@@ -1,0 +1,38 @@
+name: Assemble HyperEx v0.1.41
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.upload/ASSEMBLE'
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rebuild plugin source from staged archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .upload/v0141.part* > /tmp/v0141.b64
+          base64 -d /tmp/v0141.b64 > /tmp/v0141.zip
+          rm -rf /tmp/v0141
+          mkdir -p /tmp/v0141
+          unzip -q /tmp/v0141.zip -d /tmp/v0141
+          rm -rf decenthyperexplugin.reaplugin
+          cp -R /tmp/v0141/decenthyperexplugin.reaplugin ./decenthyperexplugin.reaplugin
+          rm -rf .upload
+          rm -f .github/workflows/assemble-v0141.yml
+      - name: Commit v0.1.41 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Add HyperEx Pulse Filter v0.1.41 source' || exit 0
+          git push

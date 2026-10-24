@@ -1,0 +1,227 @@
+{
+  "title": "HyperEx Flow Calibration - Full",
+  "author": "ladiosupp / HyperEx",
+  "notes": "EMPTY BASKET ONLY. HyperEx v0.1.37 Full real-flow calibration. Prime 3.00 ml/s x 3.0 s, then 12 calibration plateaus x 6.0 s; nominal DE1 command water about 143 ml. Use a 300 ml or larger catch vessel. Plugin actively stops around 270 g actual collected water. PREPARE FLOW CAL checks live DE1 tank level in mm when available. Tare the scale, start Espresso manually, and leave the vessel in place until Idle.",
+  "beverage_type": "espresso",
+  "steps": [
+    {
+      "name": "CAL PRIME - 3.00 ml/s",
+      "temperature": "92.0",
+      "sensor": "coffee",
+      "pump": "flow",
+      "transition": "fast",
+      "pressure": "",
+      "flow": "3.00",
+      "seconds": "3.0",
+      "volume": "0",
+      "weight": "0",
+      "limiter": {
+        "value": "6.00",
+        "range": "0.60"
+      }
+    },
+    {
+      "name": "CAL FULL 1/12 - 0.25 ml/s",
+      "temperature": "92.0",
+      "sensor": "coffee",
+      "pump": "flow",
+      "transition": "fast",
+      "pressure": "",
+      "flow": "0.25",
+      "seconds": "6.0",
+      "volume": "0",
+      "weight": "0",
+      "limiter": {
+        "value": "6.00",
+        "range": "0.60"
+      }
+    },
+    {
+      "name": "CAL FULL 2/12 - 0.40 ml/s",
+      "temperature": "92.0",
+      "sensor": "coffee",
+      "pump": "flow",
+      "transition": "fast",
+      "pressure": "",
+      "flow": "0.40",
+      "seconds": "6.0",
+      "volume": "0",
+      "weight": "0",
+      "limiter": {
+        "value": "6.00",
+        "range": "0.60"
+      }
+    },
+    {
+      "name": "CAL FULL 3/12 - 0.60 ml/s",
+      "temperature": "92.0",
+      "sensor": "coffee",
+      "pump": "flow",
+      "transition": "fast",
+      "pressure": "",
+      "flow": "0.60",
+      "seconds": "6.0",
+      "volume": "0",
+      "weight": "0",
+      "limiter": {
+        "value": "6.00",
+        "range": "0.60"
+      }
+    },
+    {
+      "name": "CAL FULL 4/12 - 0.80 ml/s",
+      "temperature": "92.0",
+      "sensor": "coffee",
+      "pump": "flow",
+      "transition": "fast",
+      "pressure": "",
+      "flow": "0.80",
+      "seconds": "6.0",
+      "volume": "0",
+      "weight": "0",
+      "limiter": {
+        "value": "6.00",
+        "range": "0.60"
+      }
+    },
+    {
+      "name": "CAL FULL 5/12 - 1.00 ml/s",
+      "temperature": "92.0",
+      "sensor": "coffee",
+      "pump": "flow",
+      "transition": "fast",
+      "pressure": "",
+      "flow": "1.00",
+      "seconds": "6.0",
+      "volume": "0",
+      "weight": "0",
+      "limiter": {
+        "value": "6.00",
+        "range": "0.60"
+      }
+    },
+    {
+      "name": "CAL FULL 6/12 - 1.25 ml/s",
+      "temperature": "92.0",
+      "sensor": "coffee",
+      "pump": "flow",
+      "transition": "fast",
+      "pressure": "",
+      "flow": "1.25",
+      "seconds": "6.0",
+      "volume": "0",
+      "weight": "0",
+      "limiter": {
+        "value": "6.00",
+        "range": "0.60"
+      }
+    },
+    {
+      "name": "CAL FULL 7/12 - 1.50 ml/s",
+      "temperature": "92.0",
+      "sensor": "coffee",
+      "pump": "flow",
+      "transition": "fast",
+      "pressure": "",
+      "flow": "1.50",
+      "seconds": "6.0",
+      "volume": "0",
+      "weight": "0",
+      "limiter": {
+        "value": "6.00",
+        "range": "0.60"
+      }
+    },
+    {
+      "name": "CAL FULL 8/12 - 2.00 ml/s",
+      "temperature": "92.0",
+      "sensor": "coffee",
+      "pump": "flow",
+      "transition": "fast",
+      "pressure": "",
+      "flow": "2.00",
+      "seconds": "6.0",
+      "volume": "0",
+      "weight": "0",
+      "limiter": {
+        "value": "6.00",
+        "range": "0.60"
+      }
+    },
+    {
+      "name": "CAL FULL 9/12 - 2.50 ml/s",
+      "temperature": "92.0",
+      "sensor": "coffee",
+      "pump": "flow",
+      "transition": "fast",
+      "pressure": "",
+      "flow": "2.50",
+      "seconds": "6.0",
+      "volume": "0",
+      "weight": "0",
+      "limiter": {
+        "value": "6.00",
+        "range": "0.60"
+      }
+    },
+    {
+      "name": "CAL FULL 10/12 - 3.00 ml/s",
+      "temperature": "92.0",
+      "sensor": "coffee",
+      "pump": "flow",
+      "transition": "fast",
+      "pressure": "",
+      "flow": "3.00",
+      "seconds": "6.0",
+      "volume": "0",
+      "weight": "0",
+      "limiter": {
+        "value": "6.00",
+        "range": "0.60"
+      }
+    },
+    {
+      "name": "CAL FULL 11/12 - 4.00 ml/s",
+      "temperature": "92.0",
+      "sensor": "coffee",
+      "pump": "flow",
+      "transition": "fast",
+      "pressure": "",
+      "flow": "4.00",
+      "seconds": "6.0",
+      "volume": "0",
+      "weight": "0",
+      "limiter": {
+        "value": "6.00",
+        "range": "0.60"
+      }
+    },
+    {
+      "name": "CAL FULL 12/12 - 5.00 ml/s",
+      "temperature": "92.0",
+      "sensor": "coffee",
+      "pump": "flow",
+      "transition": "fast",
+      "pressure": "",
+      "flow": "5.00",
+      "seconds": "6.0",
+      "volume": "0",
+      "weight": "0",
+      "limiter": {
+        "value": "6.00",
+        "range": "0.60"
+      }
+    }
+  ],
+  "tank_temperature": "0",
+  "target_weight": "0",
+  "target_volume": "0",
+  "target_volume_count_start": "0",
+  "legacy_profile_type": "settings_2c",
+  "type": "flow",
+  "lang": "en",
+  "hidden": "0",
+  "reference_file": "hyperex_flow_calibration_full",
+  "changes_since_last_espresso": "",
+  "version": "2"
+}

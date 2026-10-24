@@ -1,0 +1,385 @@
+{
+  "id": "decenthyperexplugin.reaplugin",
+  "author": "ladiosupp",
+  "name": "HyperEx Pulse Filter",
+  "description": "Stable HyperEx controller with default-on verified next-shot adaptation, full v0.1.39-style plugin settings restored, idempotent profile installation to avoid unnecessary Decaid/DE1 profile reloads, reliable CLOSE/HOME fallback, Target-LUT calibration with automatic LUT sync, hard parameter guards, diagnostics, and scoped DE1 flowMultiplier handling.",
+  "version": "0.1.41",
+  "apiVersion": 1,
+  "permissions": [
+    "log",
+    "api",
+    "emit",
+    "events.machine",
+    "events.workflow",
+    "network.websocket",
+    "pluginStorage"
+  ],
+  "settings": {
+    "Enabled": {
+      "type": "boolean",
+      "label": "Enable HyperEx controller",
+      "description": "Only controls shots whose selected workflow profile title exactly matches Profile title.",
+      "default": true
+    },
+    "ProfileTitle": {
+      "type": "string",
+      "label": "Profile title",
+      "description": "Workflow profile title that arms the controller.",
+      "default": "HyperEx Pulse Filter"
+    },
+    "Temperature": {
+      "type": "number",
+      "label": "Brew temperature (\u00b0C)",
+      "description": "Brew temperature used by the generated HyperEx flow profile. Runtime hard-clamped to 70\u2013100 \u00b0C.",
+      "default": 92.0
+    },
+    "Stage1Flow": {
+      "type": "number",
+      "label": "S1 desired real flow (g/s)",
+      "description": "User-facing physical cup-scale mass-flow target. Runtime hard-clamped to 0.30\u20136.50 g/s. Low Water calibration dynamically searches around this value and a valid LUT maps it to a bounded DE1 command.",
+      "default": 2.0
+    },
+    "Stage1Weight": {
+      "type": "number",
+      "label": "Dump trigger weight (g)",
+      "description": "At this cumulative beverage weight the plugin requests Idle to actively depressurize. Runtime limited to 1\u201320 g.",
+      "default": 4.0
+    },
+    "Stage1PressureLimit": {
+      "type": "number",
+      "label": "Stage 1 pressure limiter (bar)",
+      "description": "Safety pressure limiter for S1. Runtime limited to the emergency pressure stop and never above 12 bar.",
+      "default": 3.0
+    },
+    "DumpFlowThreshold": {
+      "type": "number",
+      "label": "Release flow threshold (ml/s)",
+      "description": "Near-zero flow threshold used as a secondary active-release confirmation when the exact Idle state frame is missed during shot finalization.",
+      "default": 0.4
+    },
+    "DumpFlowStableSamples": {
+      "type": "number",
+      "label": "Release low-flow stable samples",
+      "description": "Retained for compatibility. Release confirmation now uses exact Idle, pouringDone/settled telemetry, or reinforced acknowledged Idle fallback.",
+      "default": 2
+    },
+    "DumpMinSettleSeconds": {
+      "type": "number",
+      "label": "Minimum release settle time (s)",
+      "description": "Minimum valve/water-path settling time after active release confirmation before the soak begins.",
+      "default": 0.8
+    },
+    "DumpFallbackSeconds": {
+      "type": "number",
+      "label": "Release fallback time (s)",
+      "description": "If the exact Idle frame is not seen by this time after an acknowledged Idle request, the plugin sends one reinforcing Idle request and uses the resulting state/telemetry as a fallback confirmation.",
+      "default": 1.5
+    },
+    "DumpTimeoutSeconds": {
+      "type": "number",
+      "label": "Dump timeout (s)",
+      "description": "Final fail-safe. The plugin aborts only if fresh telemetry still explicitly shows active espresso pouring with meaningful flow, or no Idle request was ever acknowledged.",
+      "default": 5.0
+    },
+    "SoakSeconds": {
+      "type": "number",
+      "label": "Zero-pressure soak (s)",
+      "description": "Pause duration after active water-path release has been confirmed.",
+      "default": 10.0
+    },
+    "GHCConfirmTimeoutSeconds": {
+      "type": "number",
+      "label": "GHC confirmation timeout (s)",
+      "description": "After the soak, maximum time to wait for the physical GHC Espresso button. On timeout the plugin sends Idle and fully resets the HyperEx sequence so the next shot starts cleanly.",
+      "default": 20.0
+    },
+    "AutoArmRetry1Seconds": {
+      "type": "number",
+      "label": "Auto arm retry 1 (s)",
+      "description": "Seconds after the initial second-stage Espresso arm request to resend it once if preinfusion/pouring has not started. Set 0 to disable.",
+      "default": 3.0
+    },
+    "AutoArmRetry2Seconds": {
+      "type": "number",
+      "label": "Auto arm retry 2 (s)",
+      "description": "Seconds after the initial second-stage Espresso arm request to send the final automatic reinforcement if preinfusion/pouring has not started. Set 0 to disable.",
+      "default": 7.0
+    },
+    "Stage2Flow": {
+      "type": "number",
+      "label": "S2 desired real flow (g/s)",
+      "description": "User-facing physical cup-scale mass-flow target. Runtime hard-clamped to 0.30\u20136.50 g/s. Low Water calibration dynamically searches around this value and a valid LUT maps it to a bounded DE1 command.",
+      "default": 5.0
+    },
+    "Stage2Weight": {
+      "type": "number",
+      "label": "Low-flow transition weight (g)",
+      "description": "At this cumulative beverage weight the plugin advances once from S2 to S3. Runtime forces this value to remain at least 2 g above the S1 dump trigger.",
+      "default": 40.0
+    },
+    "Stage2PressureLimit": {
+      "type": "number",
+      "label": "S2 pressure limiter (bar)",
+      "description": "Safety pressure limiter for S2. Runtime limited to the emergency pressure stop and never above 12 bar.",
+      "default": 6.0
+    },
+    "Stage3Flow": {
+      "type": "number",
+      "label": "S3 desired real flow (g/s)",
+      "description": "User-facing physical cup-scale mass-flow target. Runtime hard-clamped to 0.30\u20136.50 g/s. Low Water calibration dynamically searches around this value and a valid LUT maps it to a bounded DE1 command.",
+      "default": 1.5
+    },
+    "FinalWeight": {
+      "type": "number",
+      "label": "Final beverage weight (g)",
+      "description": "At this cumulative beverage weight the plugin ends espresso. Runtime forces this value to remain at least 5 g above the S2 transition.",
+      "default": 100.0
+    },
+    "Stage3PressureLimit": {
+      "type": "number",
+      "label": "S3 pressure limiter (bar)",
+      "description": "Safety pressure limiter for S3. Runtime limited to the emergency pressure stop and never above 12 bar.",
+      "default": 3.0
+    },
+    "HardPressureLimit": {
+      "type": "number",
+      "label": "Emergency pressure stop (bar)",
+      "description": "Independent fail-safe. Runtime hard-clamped to 1\u201312 bar; if measured pressure exceeds this limit for three snapshots, the plugin stops the shot.",
+      "default": 8.0
+    },
+    "ScaleResetThreshold": {
+      "type": "number",
+      "label": "Scale tare detection threshold (g)",
+      "description": "A sudden downward weight jump larger than this is treated as a tare/reset so cumulative weight survives the second Espresso start.",
+      "default": 2.0
+    },
+    "NoScaleTimeoutSeconds": {
+      "type": "number",
+      "label": "No-scale timeout (s)",
+      "description": "Fail-safe: stop if no usable weight snapshot arrives from /ws/v1/scale/snapshot after the controlled pour starts.",
+      "default": 5.0
+    },
+    "UseCalibrationLut": {
+      "type": "boolean",
+      "label": "Use real-flow calibration LUT",
+      "description": "When a valid scale-derived calibration exists, HyperEx flow settings are treated as desired real beverage mass flow (g/s) and mapped to DE1 command flow.",
+      "default": true
+    },
+    "FlowMultiplierScope": {
+      "type": "enum",
+      "label": "DE1 flowMultiplier scope",
+      "values": [
+        "Off",
+        "HyperEx only",
+        "Global"
+      ],
+      "default": "HyperEx only",
+      "description": "Off never changes flowMultiplier. HyperEx only temporarily applies the calibration multiplier for HyperEx/Flow Calibration and restores the prior value when leaving. Global leaves the machine multiplier in effect for all profiles; writing a global value still requires the explicit diagnostic-page action."
+    },
+    "CalibrationMode": {
+      "type": "enum",
+      "label": "Calibration mode",
+      "values": [
+        "Low Water",
+        "Full"
+      ],
+      "default": "Low Water",
+      "description": "Selects one of two persistent calibration profiles. Low Water (default) runs a target-focused 3\u00d73 search around the current HyperEx real-flow targets and auto-generates a validated LUT. Full retains the wider 12-point engineering staircase."
+    },
+    "CalibrationProfileTitle": {
+      "type": "string",
+      "label": "Calibration profile base title",
+      "description": "Base title used to generate two persistent profiles: \u201c<base> - Low Water\u201d and \u201c<base> - Full\u201d. The old single profile using only the base title is hidden during dual-profile migration.",
+      "default": "HyperEx Flow Calibration"
+    },
+    "CalibrationStepSeconds": {
+      "type": "number",
+      "label": "Legacy calibration step duration (unused by dual-mode profiles)",
+      "description": "Legacy compatibility setting. v0.1.26 Low Water/Full calibration programs use mode-specific timings.",
+      "default": 10.0
+    },
+    "CalibrationSettleSeconds": {
+      "type": "number",
+      "label": "Legacy calibration settle exclusion (unused by dual-mode profiles)",
+      "description": "Legacy compatibility setting. v0.1.26 calibration uses mode-specific settling windows.",
+      "default": 4.0
+    },
+    "CalibrationWindowSeconds": {
+      "type": "number",
+      "label": "Legacy calibration fit window (unused by dual-mode profiles)",
+      "description": "Legacy compatibility setting. v0.1.26 calibration uses mode-specific regression windows.",
+      "default": 3.5
+    },
+    "CalibrationAutoSync": {
+      "type": "boolean",
+      "label": "Auto-sync calibration to HyperEx",
+      "description": "After a calibration run passes all quality gates, persist the new LUT and rewrite the HyperEx profile command flows automatically. Invalid runs keep the previous valid LUT unchanged.",
+      "default": true
+    },
+    "AutoApplyNextShot": {
+      "type": "boolean",
+      "label": "Auto-apply verified next-shot adaptation",
+      "description": "Default ON after installation. When a completed HyperEx shot produces an actionable suggestion that passes the same consensus, bounds, readback, and profile verification used by manual APPLY NEXT SHOT, apply it automatically for the next shot. If disabled, v0.1.39 manual-confirmation behavior is restored.",
+      "default": true
+    },
+    "DiagnosticEnabled": {
+      "type": "boolean",
+      "label": "Diagnostic logging",
+      "description": "Capture the last HyperEx run in memory for machine Flow vs scale GFlow analysis. Does not change brew control.",
+      "default": true
+    },
+    "IdleDashboardShortcut": {
+      "type": "boolean",
+      "label": "Dashboard idle DIAG/CAL shortcut",
+      "description": "Streamline header shortcut while HyperEx is idle. Default on for convenient DIAG/CAL access. If another plugin occupies the reserved header slot and the shortcut is not visible, use Plugins \u2192 HyperEx Pulse Filter. HyperEx does not run an active reclaim/retry loop for the slot.",
+      "default": true
+    },
+    "DiagnosticSampleIntervalMs": {
+      "type": "number",
+      "label": "Diagnostic sample interval (ms)",
+      "description": "Target cadence for combined machine/scale diagnostic samples. 100 ms is recommended.",
+      "default": 100
+    },
+    "MaxRunSeconds": {
+      "type": "number",
+      "label": "Maximum sequence time (s)",
+      "description": "Overall fail-safe time limit for a HyperEx sequence.",
+      "default": 180.0
+    }
+  },
+  "api": [
+    {
+      "id": "skin",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "ui",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "status",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "rearm",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "advanced-settings",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "diagnostics",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "diagnostics-csv",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "adaptive-next-apply",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "test-command-set",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "test-command-clear",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "calibration-status",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "calibration-mode",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "calibration-prepare",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "calibration-scope",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "calibration-sync",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "calibration-use-suggested",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "calibration-apply-global",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "calibration-restore-global",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "calibration-clear",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "startup-apply",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "startup-clear",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "changed",
+      "type": "websocket",
+      "data": {
+        "what": {
+          "type": "string",
+          "description": "Plugin-surface refresh hint"
+        }
+      }
+    },
+    {
+      "id": "ghcPrompt",
+      "type": "websocket",
+      "data": {
+        "status": {
+          "type": "string",
+          "description": "soak, waiting, confirmed, or cleared"
+        },
+        "secondsRemaining": {
+          "type": "number",
+          "description": "Whole seconds remaining in the current HyperEx prompt phase"
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable HyperEx prompt/status"
+        }
+      }
+    }
+  ]
+}

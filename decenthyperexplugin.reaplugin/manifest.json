@@ -2,8 +2,8 @@
   "id": "decenthyperexplugin.reaplugin",
   "author": "ladiosupp",
   "name": "HyperEx Pulse Filter",
-  "description": "Stable HyperEx controller with default-on verified next-shot adaptation, full v0.1.39-style plugin settings restored, idempotent profile installation to avoid unnecessary Decaid/DE1 profile reloads, reliable CLOSE/HOME fallback, Target-LUT calibration with automatic LUT sync, hard parameter guards, diagnostics, and scoped DE1 flowMultiplier handling.",
-  "version": "0.1.41",
+  "description": "Stable HyperEx controller with unambiguous diagnostics command provenance, dashboard-entry CLOSE/HOME routing fix, verified next-shot adaptation, full plugin settings, idempotent profile installation, Target-LUT calibration with automatic LUT sync, hard parameter guards, diagnostics, and scoped DE1 flowMultiplier handling.",
+  "version": "0.1.42",
   "apiVersion": 1,
   "permissions": [
     "log",
@@ -29,20 +29,20 @@
     },
     "Temperature": {
       "type": "number",
-      "label": "Brew temperature (\u00b0C)",
-      "description": "Brew temperature used by the generated HyperEx flow profile. Runtime hard-clamped to 70\u2013100 \u00b0C.",
+      "label": "Brew temperature (°C)",
+      "description": "Brew temperature used by the generated HyperEx flow profile. Runtime hard-clamped to 70–100 °C.",
       "default": 92.0
     },
     "Stage1Flow": {
       "type": "number",
       "label": "S1 desired real flow (g/s)",
-      "description": "User-facing physical cup-scale mass-flow target. Runtime hard-clamped to 0.30\u20136.50 g/s. Low Water calibration dynamically searches around this value and a valid LUT maps it to a bounded DE1 command.",
+      "description": "User-facing physical cup-scale mass-flow target. Runtime hard-clamped to 0.30–6.50 g/s. Low Water calibration dynamically searches around this value and a valid LUT maps it to a bounded DE1 command.",
       "default": 2.0
     },
     "Stage1Weight": {
       "type": "number",
       "label": "Dump trigger weight (g)",
-      "description": "At this cumulative beverage weight the plugin requests Idle to actively depressurize. Runtime limited to 1\u201320 g.",
+      "description": "At this cumulative beverage weight the plugin requests Idle to actively depressurize. Runtime limited to 1–20 g.",
       "default": 4.0
     },
     "Stage1PressureLimit": {
@@ -108,7 +108,7 @@
     "Stage2Flow": {
       "type": "number",
       "label": "S2 desired real flow (g/s)",
-      "description": "User-facing physical cup-scale mass-flow target. Runtime hard-clamped to 0.30\u20136.50 g/s. Low Water calibration dynamically searches around this value and a valid LUT maps it to a bounded DE1 command.",
+      "description": "User-facing physical cup-scale mass-flow target. Runtime hard-clamped to 0.30–6.50 g/s. Low Water calibration dynamically searches around this value and a valid LUT maps it to a bounded DE1 command.",
       "default": 5.0
     },
     "Stage2Weight": {
@@ -126,7 +126,7 @@
     "Stage3Flow": {
       "type": "number",
       "label": "S3 desired real flow (g/s)",
-      "description": "User-facing physical cup-scale mass-flow target. Runtime hard-clamped to 0.30\u20136.50 g/s. Low Water calibration dynamically searches around this value and a valid LUT maps it to a bounded DE1 command.",
+      "description": "User-facing physical cup-scale mass-flow target. Runtime hard-clamped to 0.30–6.50 g/s. Low Water calibration dynamically searches around this value and a valid LUT maps it to a bounded DE1 command.",
       "default": 1.5
     },
     "FinalWeight": {
@@ -144,7 +144,7 @@
     "HardPressureLimit": {
       "type": "number",
       "label": "Emergency pressure stop (bar)",
-      "description": "Independent fail-safe. Runtime hard-clamped to 1\u201312 bar; if measured pressure exceeds this limit for three snapshots, the plugin stops the shot.",
+      "description": "Independent fail-safe. Runtime hard-clamped to 1–12 bar; if measured pressure exceeds this limit for three snapshots, the plugin stops the shot.",
       "default": 8.0
     },
     "ScaleResetThreshold": {
@@ -184,12 +184,12 @@
         "Full"
       ],
       "default": "Low Water",
-      "description": "Selects one of two persistent calibration profiles. Low Water (default) runs a target-focused 3\u00d73 search around the current HyperEx real-flow targets and auto-generates a validated LUT. Full retains the wider 12-point engineering staircase."
+      "description": "Selects one of two persistent calibration profiles. Low Water (default) runs a target-focused 3×3 search around the current HyperEx real-flow targets and auto-generates a validated LUT. Full retains the wider 12-point engineering staircase."
     },
     "CalibrationProfileTitle": {
       "type": "string",
       "label": "Calibration profile base title",
-      "description": "Base title used to generate two persistent profiles: \u201c<base> - Low Water\u201d and \u201c<base> - Full\u201d. The old single profile using only the base title is hidden during dual-profile migration.",
+      "description": "Base title used to generate two persistent profiles: “<base> - Low Water” and “<base> - Full”. The old single profile using only the base title is hidden during dual-profile migration.",
       "default": "HyperEx Flow Calibration"
     },
     "CalibrationStepSeconds": {
@@ -231,7 +231,7 @@
     "IdleDashboardShortcut": {
       "type": "boolean",
       "label": "Dashboard idle DIAG/CAL shortcut",
-      "description": "Streamline header shortcut while HyperEx is idle. Default on for convenient DIAG/CAL access. If another plugin occupies the reserved header slot and the shortcut is not visible, use Plugins \u2192 HyperEx Pulse Filter. HyperEx does not run an active reclaim/retry loop for the slot.",
+      "description": "Streamline header shortcut while HyperEx is idle. Default on for convenient DIAG/CAL access. If another plugin occupies the reserved header slot and the shortcut is not visible, use Plugins → HyperEx Pulse Filter. HyperEx does not run an active reclaim/retry loop for the slot.",
       "default": true
     },
     "DiagnosticSampleIntervalMs": {
@@ -285,6 +285,11 @@
     },
     {
       "id": "adaptive-next-apply",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "adaptive-auto-set",
       "type": "http",
       "data": {}
     },

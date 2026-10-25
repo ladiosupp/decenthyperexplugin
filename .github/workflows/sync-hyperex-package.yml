@@ -10,15 +10,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Rebuild verified patch payload
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, gzip
+          payload = ''.join(Path(f'HyperExPatch_sync.part{i:02d}').read_text() for i in range(9))
+          patch = gzip.decompress(base64.b64decode(payload, validate=True))
+          Path('/tmp/hyperex-148.patch').write_bytes(patch)
+          manifest_payload = Path('HyperExManifest_sync.b64').read_text()
+          manifest = gzip.decompress(base64.b64decode(manifest_payload, validate=True))
+          Path('/tmp/manifest-148.json').write_bytes(manifest)
+          PY
+          sha256sum /tmp/hyperex-148.patch /tmp/manifest-148.json
       - name: Apply verified 1.41 to 1.48 source patch
         run: |
-          cat HyperExPatch_sync.part* | base64 -d | gzip -d > /tmp/hyperex-148.patch
           git apply --check /tmp/hyperex-148.patch
           git apply /tmp/hyperex-148.patch
-          cat HyperExManifest_sync.b64 | base64 -d | gzip -d > decenthyperexplugin.reaplugin/manifest.json
+          cp /tmp/manifest-148.json decenthyperexplugin.reaplugin/manifest.json
           rm -f decenthyperexplugin.reaplugin/HyperEx_Pulse_Filter.json
           rm -f HyperExPatch_sync.part* HyperExPatch_sync.complete HyperExManifest_sync.b64
           rm -f HyperExPulseFilter_sync.part* HyperExPulseFilter_sync.complete
+          rm -f SYNC_TRIGGER_NOTE.txt SYNC_TRIGGER_NOTE_2.txt
           rm -f .github/workflows/sync-hyperex-package.yml
       - name: Verify synchronized source
         run: |

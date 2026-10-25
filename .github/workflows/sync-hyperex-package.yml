@@ -1,8 +1,8 @@
-name: Sync HyperEx package
+name: Sync HyperEx v0.1.48 source
 on:
   push:
     paths:
-      - 'HyperExPulseFilter_sync.complete'
+      - 'HyperExPatch_sync.complete'
 permissions:
   contents: write
 jobs:
@@ -10,20 +10,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Rebuild and unpack plugin package
+      - name: Apply verified 1.41 to 1.48 source patch
         run: |
-          cat HyperExPulseFilter_sync.part* | base64 -d > /tmp/HyperExPulseFilter_sync.zip
-          rm -rf /tmp/hyperex-sync
-          mkdir -p /tmp/hyperex-sync
-          unzip -q /tmp/HyperExPulseFilter_sync.zip -d /tmp/hyperex-sync
-          cp -f /tmp/hyperex-sync/decenthyperexplugin.reaplugin/plugin.js decenthyperexplugin.reaplugin/plugin.js
-          cp -f /tmp/hyperex-sync/decenthyperexplugin.reaplugin/manifest.json decenthyperexplugin.reaplugin/manifest.json
-          cp -f /tmp/hyperex-sync/decenthyperexplugin.reaplugin/README.md decenthyperexplugin.reaplugin/README.md
-          cp -f /tmp/hyperex-sync/decenthyperexplugin.reaplugin/HyperEx_Flow_Calibration_Low_Water.json decenthyperexplugin.reaplugin/HyperEx_Flow_Calibration_Low_Water.json
-          cp -f /tmp/hyperex-sync/decenthyperexplugin.reaplugin/HyperEx_Flow_Calibration_Full.json decenthyperexplugin.reaplugin/HyperEx_Flow_Calibration_Full.json
+          cat HyperExPatch_sync.part* | base64 -d | gzip -d > /tmp/hyperex-148.patch
+          git apply --check /tmp/hyperex-148.patch
+          git apply /tmp/hyperex-148.patch
+          cat HyperExManifest_sync.b64 | base64 -d | gzip -d > decenthyperexplugin.reaplugin/manifest.json
           rm -f decenthyperexplugin.reaplugin/HyperEx_Pulse_Filter.json
+          rm -f HyperExPatch_sync.part* HyperExPatch_sync.complete HyperExManifest_sync.b64
           rm -f HyperExPulseFilter_sync.part* HyperExPulseFilter_sync.complete
           rm -f .github/workflows/sync-hyperex-package.yml
+      - name: Verify synchronized source
+        run: |
+          grep -q '0.1.48' decenthyperexplugin.reaplugin/manifest.json
+          grep -q 'adaptiveHistoryFileV2' decenthyperexplugin.reaplugin/plugin.js
+          grep -q 'profile truth' decenthyperexplugin.reaplugin/README.md
+          test ! -e decenthyperexplugin.reaplugin/HyperEx_Pulse_Filter.json
       - name: Commit synchronized v0.1.48 source
         run: |
           git config user.name 'HyperEx Sync'

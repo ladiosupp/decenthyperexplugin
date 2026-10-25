@@ -3,7 +3,7 @@
   "author": "ladiosupp",
   "name": "HyperEx Pulse Filter",
   "description": "HyperEx three-stage controller with verified workflow-profile truth, persistent cross-version adaptive history with storage self-test, first-run RAW-scale flow calibration, automatic S1/S2/S3 next-shot adaptation, S3 LEVEL/SHAPE separation, real-scale diagnostics, manual engineering tools, CSV export, full plugin settings, idempotent profile installation, and scoped DE1 flowMultiplier handling.",
-  "version": "0.1.52",
+  "version": "0.1.54",
   "apiVersion": 1,
   "permissions": [
     "log",
@@ -245,6 +245,18 @@
       "label": "Maximum sequence time (s)",
       "description": "Overall fail-safe time limit for a HyperEx sequence.",
       "default": 180.0
+    },
+    "DirectDriverStartTest": {
+      "type": "boolean",
+      "label": "TEST: direct driver write after soak",
+      "description": "Default OFF. After soak: request Espresso via REST, then write A002=04 once through Decaid raw driver socket. No re-arm retries. Stop at 20 seconds after write unless machine pouring and at least 2 seconds of sustained fresh cup-weight gain were observed. Does not guarantee bypassing physical GHC confirmation.",
+      "default": false
+    },
+    "LiveFlowTrimTest": {
+      "type": "boolean",
+      "label": "TEST: S2/S3 live flow trim (50 cycles)",
+      "description": "Default OFF. Experimental raw A010 current-frame correction: ±6% cup-flow band, planned S2+S3 duration /50 interval (default944ms), max50 checks and50 write attempts. One1/16ml/s step, total ±20% baseline. Require fresh regression, pressure headroom, driver ACK and machine target response. Original profile restored afterwards; normal next-shot learning retained; corrected stages require verified stable-command windows. Current-frame effect requires hardware validation.",
+      "default": false
     }
   },
   "api": [

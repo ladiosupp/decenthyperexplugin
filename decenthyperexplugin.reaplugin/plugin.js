@@ -221,6 +221,12 @@ function createPlugin(host) {
     stage2SkipSent: false,
     finalStopSent: false,
     completionTimer: null,
+    liveTrim: null,
+    liveTrimTimer: null,
+    liveTrimDirty: false,
+    directStartTest: null,
+    directStartTestTimer: null,
+    directStartTestEnabledForRun: false,
     scaleHandle: null,
     scaleReconnectTimer: null,
     scaleConnected: false,
@@ -336,6 +342,8 @@ function createPlugin(host) {
       hardPressureLimit,
       scaleResetThreshold: clampNumber(settings.ScaleResetThreshold, 0.5, 20, 2.0),
       noScaleTimeoutSeconds: clampNumber(settings.NoScaleTimeoutSeconds, 1, 30, 5.0),
+      liveFlowTrimTest: b(settings.LiveFlowTrimTest, false),
+      directDriverStartTest: b(settings.DirectDriverStartTest, false),
       ghcConfirmTimeoutSeconds: clampNumber(settings.GHCConfirmTimeoutSeconds, 1, 60, 20.0),
       autoArmRetry1Seconds: clampNumber(settings.AutoArmRetry1Seconds, 0, 30, 3.0),
       autoArmRetry2Seconds: clampNumber(settings.AutoArmRetry2Seconds, 0, 60, 7.0),
@@ -358,6 +366,8 @@ function createPlugin(host) {
   function advancedSettingsFromCfg(cfg) {
     const c = cfg || state.cfg || loadConfig({});
     return {
+      liveFlowTrimTest: !!c.liveFlowTrimTest,
+      directDriverStartTest: !!c.directDriverStartTest,
       temperature: round(c.temperature, 2),
       stage1Flow: round(c.stage1Flow, 3), stage1PressureLimit: round(c.stage1PressureLimit, 2),
       dumpFlowThreshold: round(c.dumpFlowThreshold, 3), dumpFlowStableSamples: Math.round(c.dumpFlowStableSamples),
@@ -374,6 +384,8 @@ function createPlugin(host) {
   function advancedSettingsPayload() {
     return {
       settings: advancedSettingsFromCfg(),
+      liveFlowTrimTest: liveTrimPayload(),
+      directStartTest: directStartTestPayload(),
       basicCurve: state.cfg ? {
         stage1WeightG: round(state.cfg.stage1Weight,2),
         releaseSettleSeconds: round(state.cfg.dumpMinSettleSeconds,2),
@@ -798,7 +810,7 @@ function createPlugin(host) {
   }
 
   function startDiagnostics(kind) {
-    if (!state.cfg || (!state.cfg.diagnosticEnabled && kind !== "calibration")) {
+    if (!state.cfg || (!state.cfg.diagnosticEnabled && !state.cfg.liveFlowTrimTest && kind !== "calibration")) {
       state.diagnosticCurrent = null;
       return;
     }
@@ -807,7 +819,7 @@ function createPlugin(host) {
     state.diagnosticCurrent = {
       schema: 3,
       kind: String(kind || "hyperex"),
-      pluginVersion: "0.1.52",
+      pluginVersion: "0.1.54",
       runId: `${now}-${state.diagnosticRunSeq}`,
       profileTitle: state.workflowTitle || (state.cfg ? state.cfg.profileTitle : ""),
       startedAt: new Date(now).toISOString(),
@@ -869,7 +881,7 @@ function createPlugin(host) {
 
   function diagnosticSample(source, force) {
     const run = state.diagnosticCurrent;
-    if (!run || !state.cfg || !state.cfg.diagnosticEnabled) return;
+    if (!run || !state.cfg || (!state.cfg.diagnosticEnabled && !state.cfg.liveFlowTrimTest)) return;
     const now = Date.now();
     if (!force && state.diagnosticLastSampleAtMs && now - state.diagnosticLastSampleAtMs < state.cfg.diagnosticSampleIntervalMs) return;
     state.diagnosticLastSampleAtMs = now;
@@ -1356,7 +1368,8 @@ function createPlugin(host) {
   }
 
   function stage2AdaptiveEvidence(run) {
-    if (!stageActuatorEvidence(run, "stage2").eligible) return null;
+    run = liveTrimLearningView(run, "stage2");
+    if (!run || !stageActuatorEvidence(run, "stage2").eligible) return null;
     if (!run || (run.kind || "hyperex") !== "hyperex") return null;
     const p = diagnosticPhaseSummary(run, "stage2");
     const cfg = run.config || {};
@@ -1372,7 +1385,8 @@ function createPlugin(host) {
   }
 
   function stage3AdaptiveEvidence(run) {
-    if (!stageActuatorEvidence(run, "stage3").eligible) return null;
+    run = liveTrimLearningView(run, "stage3");
+    if (!run || !stageActuatorEvidence(run, "stage3").eligible) return null;
     if (!run || (run.kind || "hyperex") !== "hyperex") return null;
     const st = stage3StabilityDiagnostics(run);
     const phase = diagnosticPhaseSummary(run, "stage3");
@@ -1636,12 +1650,14 @@ function createPlugin(host) {
     const st = summary.stage3Stability || null;
     return {
       runId: String(run.runId),
-      pluginVersion: "0.1.52",
+      pluginVersion: "0.1.54",
       basketContext: run.config && run.config.basketContext || "unknown",
       startedAt: run.startedAt || null, endedAt: run.endedAt || null, result: run.result || null,
       fingerprint: run.config && run.config.adaptiveFingerprint || null,
       profileTruthSchema: run.config && run.config.profileTruthSchema || 0,
       profileTruthVerified: !!(run.config && run.config.profileTruthVerified),
+      experimentalLiveTrim: !!(run.config && run.config.experimentalLiveTrim),
+      liveFlowTrim: run.liveFlowTrim || null,
       workflowProfileCommands: run.config && run.config.workflowProfileCommands ? run.config.workflowProfileCommands : null,
       profileReadbackAt: run.config && run.config.profileReadbackAt || null,
       machineUploadAcknowledged: !!(run.config && run.config.machineProfileUploadAcknowledged),
@@ -1660,7 +1676,7 @@ function createPlugin(host) {
     // Never overwrite disk before the initial read, and serialize full-file writes.
     if (!state.persistentHistoryLoaded || !state.storageProbeVerified || state.persistentHistoryAvailable === false || !state.persistentHistoryFile) return false;
     if (state.pendingHistoryWrite) { state.historyWriteDirty = true; return true; }
-    state.persistentHistoryFile.writerVersion = "0.1.52";
+    state.persistentHistoryFile.writerVersion = "0.1.54";
     state.persistentHistoryFile.updatedAt = new Date().toISOString();
     state.persistentHistoryFile.writeToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     state.pendingHistoryWrite = JSON.stringify(state.persistentHistoryFile);
@@ -1685,7 +1701,7 @@ function createPlugin(host) {
     const record = compactPersistentShotRecord(run, evidence);
     if (!record) return;
     if (!state.persistentHistoryFile || typeof state.persistentHistoryFile !== "object") {
-      state.persistentHistoryFile = { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:"0.1.52", createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(), shots:[] };
+      state.persistentHistoryFile = { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:"0.1.54", createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(), shots:[] };
     }
     if (!Array.isArray(state.persistentHistoryFile.shots)) state.persistentHistoryFile.shots = [];
     state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.filter(x => x && x.runId !== record.runId);
@@ -1981,7 +1997,7 @@ function createPlugin(host) {
     }
     const previousOverrides = state.testOverrides ? JSON.parse(JSON.stringify(state.testOverrides)) : null;
     try {
-      state.testOverrides = { schema:3, writerVersion:"0.1.52", savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, basketContext:binding.basketContext, targets:binding.targets, stages, s3Shape, adaptiveSource:{ runId:suggestion.runId, appliedAt:new Date().toISOString(), mode:String(source || "manual") } };
+      state.testOverrides = { schema:3, writerVersion:"0.1.54", savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, basketContext:binding.basketContext, targets:binding.targets, stages, s3Shape, adaptiveSource:{ runId:suggestion.runId, appliedAt:new Date().toISOString(), mode:String(source || "manual") } };
       storageWrite(STORAGE_TEST_OVERRIDES, state.testOverrides);
 
       const verifyStatus = testOverrideStatus();
@@ -2131,6 +2147,7 @@ function createPlugin(host) {
       startedAt: run.startedAt,
       endedAt: run.endedAt,
       result: run.result,
+      liveFlowTrim: run.liveFlowTrim || null,
       shotCommands: diagnosticRunCommandSnapshot(run),
       sampleCount: Array.isArray(run.samples) ? run.samples.length : 0,
       rawScaleSampleCount: Array.isArray(run.rawScaleSamples) ? run.rawScaleSamples.length : 0,
@@ -2308,6 +2325,8 @@ function createPlugin(host) {
   function uiStatusPayload() {
     return {
       phase: state.phase,
+      liveFlowTrimTest: liveTrimPayload(),
+      directStartTest: directStartTestPayload(),
       soakSecondsRemaining: state.soakSecondsRemaining,
       ghcSecondsRemaining: state.ghcSecondsRemaining,
       armRequestCount: state.armRequestCount,
@@ -2348,6 +2367,9 @@ function createPlugin(host) {
           { label: "NEXT", text: "WAIT FOR PINK", color: "flow", col: 7, span: 3 }
         ]
       });
+    } else if (state.phase === "restart_wait" && state.directStartTest && state.directStartTest.active) {
+      surfaces.push({id:"hyperex-direct-start-test",kind:"header-button",label:"DIRECT START TEST",text:state.directStartTest.status,
+        action:{type:"open",view:"ghc",presentation:"overlay",fit:true,closeOnShot:true}});
     } else if (state.phase === "restart_wait") {
       const sec = Math.max(0, state.ghcSecondsRemaining);
       const sinceArm = state.lastArmRequestAtMs ? (Date.now() - state.lastArmRequestAtMs) / 1000 : 999;
@@ -2392,27 +2414,27 @@ function createPlugin(host) {
     return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 html,body{margin:0;width:100%;min-height:100%;background:transparent;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;color:#f7f7f8;overflow-x:hidden}.card{width:860px;max-width:96vw;box-sizing:border-box;padding:22px;border-radius:20px;background:#17191d;box-shadow:0 18px 60px rgba(0,0,0,.45)}html.diagview,body.diagview{background:#17191d;min-width:100%;min-height:100vh}body.diagview .card{width:100vw;max-width:none;min-height:100vh;border-radius:0;box-shadow:none;padding:24px 30px}body.diagview .chart{height:250px}body.diagview textarea{height:190px}.k{font-size:13px;letter-spacing:.12em;opacity:.65}.t{font-size:27px;font-weight:800;margin:7px 0}.d{font-size:15px;line-height:1.45}.row{display:flex;gap:9px;margin-top:14px;flex-wrap:wrap}.b{border:0;border-radius:12px;padding:12px 14px;font-size:14px;font-weight:800;cursor:pointer}.p{background:#ff4fa3;color:#fff}.s{background:#343840;color:#fff}.warn{background:#8a4b18;color:#fff}.danger{background:#8a2530;color:#fff}.primaryAction{background:#f27a22;color:#fff;padding:14px 20px;font-size:15px;box-shadow:0 5px 18px rgba(0,0,0,.28)}.secondaryAction{background:#2b2f36;color:#e7e9ec;border:1px solid #555b65;padding:10px 13px;font-size:13px}.tertiaryAction{background:transparent;color:#c9cdd3;border:1px solid #3d424a;padding:10px 13px;font-size:13px}.actionBadge{display:inline-block;margin-left:8px;padding:3px 7px;border-radius:999px;background:#4a321d;color:#ffd4ac;font-size:9px;font-weight:800;letter-spacing:.08em;vertical-align:middle}.manualPanel{margin-top:10px;padding:12px;border-radius:10px;background:#1c1f24;border:1px solid #30343b}.active{outline:2px solid #fff}.m{margin-top:12px;font:12px ui-monospace,monospace;opacity:.78}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}.stat{background:#23262c;border-radius:11px;padding:10px}.stat b{display:block;font-size:17px;margin-top:4px}.small{font-size:11px;opacity:.68}.section{margin-top:14px;padding-top:13px;border-top:1px solid #343840}.section h3{margin:0 0 8px;font-size:16px}.good{color:#77d98b}.bad{color:#ff8c92}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}textarea{width:100%;height:150px;box-sizing:border-box;background:#0f1114;color:#dfe6ef;border:1px solid #343840;border-radius:10px;padding:9px;font:10px ui-monospace,monospace;resize:vertical}table{width:100%;border-collapse:collapse;font-size:11px}th,td{text-align:right;padding:5px 6px;border-bottom:1px solid #292d33}th:first-child,td:first-child{text-align:left}.chart{width:100%;height:205px;background:#101216;border:1px solid #2f333a;border-radius:10px;margin-top:8px}.legend{font-size:11px;opacity:.8;line-height:1.5}.stepHead{margin-top:18px;padding:14px 16px;border-radius:14px;background:#20242a;border:1px solid #3a4049}.stepHead b{font-size:19px}.stepBadge{float:right;padding:4px 9px;border-radius:999px;background:#343840;font-size:10px;letter-spacing:.06em}.stepBadge.good{background:#173b25}.stepBadge.bad{background:#4a2024}.stepHint{margin-top:5px;font-size:12px;opacity:.72;line-height:1.45}
-</style></head><body><div class="card"><div class="k">HYPEREX v0.1.52</div><div id="title" class="t">Checking…</div><div id="detail" class="d"></div>
+</style></head><body><div class="card"><div class="k">HYPEREX v0.1.54</div><div id="title" class="t">Checking…</div><div id="detail" class="d"></div>
 <div id="diag" style="display:none">
   <div class="d" style="margin:2px 0 12px;padding:10px 12px;border-radius:10px;background:#23262c"><b>ENTRY</b> · Dashboard <b>DIAG / CAL</b> is enabled by default. If another plugin occupies the reserved header slot, open <b>Plugins → HyperEx Pulse Filter</b>.</div>
 
   <div class="stepHead"><span id="step1badge" class="stepBadge">CHECKING</span><b>STEP 1 · FLOW CALIBRATION</b><div class="stepHint">First-time setup. Use an <b>EMPTY BASKET</b> and a large catch vessel. A valid RAW-scale calibration creates the real-flow LUT used by HyperEx. Invalid calibration never overwrites the previous valid LUT.</div></div>
   <div class="section"><h3>CALIBRATION LUT</h3><div id="calstatus" class="d"></div><div id="calmode" class="row"></div><div id="waterwarn" class="d" style="margin-top:10px;padding:10px;border-radius:10px;background:#3b2d16;color:#ffd58a"><b>WATER / VESSEL / TANK PREFLIGHT</b><br>Waiting for live DE1 tank level…</div><div id="scope" class="row"></div><div class="row"><button id="prepare" class="b p">PREPARE FLOW CAL</button><button id="sync" class="b s">SYNC HYPEREX</button><button id="suggested" class="b s">USE SUGGESTED FOR NEXT CAL</button></div><div class="row"><button id="global" class="b danger">APPLY SUGGESTED GLOBALLY</button><button id="restore" class="b warn">RESTORE PREVIOUS GLOBAL</button><button id="clearcal" class="b s">CLEAR CAL MAP</button></div><div id="map" class="m"></div></div>
 
-  <div class="stepHead"><span id="step2badge" class="stepBadge">WAITING</span><b>STEP 2 · SHOT-TO-SHOT AUTO ADAPTIVE</b><div class="stepHint">Normal daily workflow after calibration. Every completed HyperEx shot is measured with RAW scale weight + timestamp regression. S1, S2 and S3 are evaluated separately; verified changes apply only to the <b>next shot</b>. No running-shot scale closed loop and no extra skipStep calls.</div></div>
+  <div class="stepHead"><span id="step2badge" class="stepBadge">WAITING</span><b>STEP 2 · SHOT-TO-SHOT AUTO ADAPTIVE</b><div class="stepHint">Normal daily workflow after calibration. Every completed HyperEx shot is measured with RAW scale weight + timestamp regression. S1, S2 and S3 are evaluated separately; verified changes apply only to the <b>next shot</b>. Normal mode has no running-shot scale closed loop. The optional live-flow test is labelled separately below. No extra skipStep calls.</div></div>
   <div id="historystatus" class="d" style="margin-top:10px;padding:10px 12px;border-radius:10px;background:#23262c"><b>ADAPTIVE HISTORY</b> · checking persistent storage…</div>
   <div class="section"><h3>NEXT SHOT · APPLIED PROFILE</h3><div class="small">Actual workflow commands below come from GET /workflow. Real g/s targets and LUT commands remain reference values. VERIFIED also requires successful machine upload acknowledgement.</div><div id="appliedcommands" class="m"></div><div id="auditstatus" class="small"></div><button id="readworkflow" class="b s">READ RAW WORKFLOW</button><details><summary>Raw workflow / adaptive audit JSON</summary><textarea id="auditjson" readonly></textarea></details></div>
   <div class="section"><h3>LATEST SHOT · COMMAND SNAPSHOT</h3><div class="small">Historical command snapshot captured at shot start. It may differ from NEXT SHOT after adaptation.</div><div id="runcommands" class="m"></div></div>
-  <div class="section"><h3>LATEST SHOT · VALIDATION</h3><div class="small">RAW real flow is a multi-second linear regression of unmodified scale weight vs scale timestamp. Instantaneous RAW dW/dt is not the acceptance reference.</div><div id="validation" class="grid"></div><div id="validationtable" class="m"></div></div>
+  <div class="section"><h3>LATEST SHOT · VALIDATION</h3><div class="small">RAW real flow is a multi-second linear regression of unmodified scale weight vs scale timestamp. Instantaneous RAW dW/dt is not the acceptance reference.</div><div id="livetrimstatus" class="m"></div><div id="validation" class="grid"></div><div id="validationtable" class="m"></div></div>
   <div class="section"><h3>S1 STARTUP / S3 STABILITY</h3><div class="small">S1 separates first-rise delay from active cup flow. S3 tracks EARLY / MID / LATE stability and stall/decay behavior.</div><div id="stability" class="m"></div></div>
   <div class="section"><h3>NEXT SHOT ADAPTIVE <span class="actionBadge">AUTOMATIC PATH</span></h3><div id="basketcontext" class="m"></div><div id="autoapplybox" class="m"></div><div class="small">S1 startup, S2 level and S3 LEVEL + SHAPE use repeated completed-shot evidence and bounded corrections. Calibration LUT is never rewritten by adaptive history.</div><div id="adaptive" class="m"></div></div>
   <div class="section"><h3>LIVE / END-OF-RUN TELEMETRY</h3><div id="stats" class="grid"></div></div>
-  <div class="section"><h3>REAL SCALE CURVES</h3><div class="legend">Flow: target / DE1 machine Flow / Decaid weightFlow / RAW-scale 1 s slope. Weight chart is the unmodified scale weight stream.</div><svg id="flowchart" class="chart" viewBox="0 0 800 205" preserveAspectRatio="none"></svg><svg id="weightchart" class="chart" viewBox="0 0 800 205" preserveAspectRatio="none"></svg></div>
+  <div class="section"><h3>REAL SCALE CURVES</h3><div class="legend">Machine target / machine flow: ml/s. Cup target / Decaid weightFlow / RAW-scale slope: g/s. Weight chart is the unmodified scale weight stream.<br>LIVE TEST: green circles = check RAW g/s; gray circles on baseline = check without usable regression; orange diamonds = raw writes ml/s; pale squares = machine target response ml/s. Tap/hover markers for details.</div><svg id="flowchart" class="chart" viewBox="0 0 800 205" preserveAspectRatio="none"></svg><div id="flowpointdetail" class="small"></div><svg id="weightchart" class="chart" viewBox="0 0 800 205" preserveAspectRatio="none"></svg></div>
 
   <div class="stepHead"><span class="stepBadge">OPTIONAL</span><b>STEP 3 · MANUAL / ENGINEERING</b><div class="stepHint">Only for diagnosis, experiments or manual override. Normal users should leave AUTO APPLY on and let STEP 2 manage future shots.</div></div>
   <div class="section"><h3>REFERENCE ADVISORY · NO RUNNING-SHOT CONTROL</h3><div class="small">Manual reference ranges derived from the latest shot. These are not LUT rewrites.</div><div id="advisory" class="m"></div></div>
   <div class="section"><h3>ADVANCED / TEST OVERRIDE EDITOR</h3><div class="manualPanel"><div class="small"><b>EDITOR ONLY.</b> AUTO / LUT uses the saved calibration LUT. MANUAL TEST changes only future HyperEx profile commands. S3 shape advances by profile time only.</div><div id="testcommands" class="m"></div><div id="s3shape" class="m" style="margin-top:10px"></div><div class="row"><button id="applytest" class="b secondaryAction">APPLY TEST COMMANDS</button><button id="returnlut" class="b tertiaryAction">RETURN ALL TO LUT</button></div></div></div>
-  <div class="section"><details id="advancedsettings" class="manualPanel"><summary style="cursor:pointer;font-weight:800;font-size:16px">ADVANCED SETTINGS · QUICK EDIT</summary><div class="small" style="margin-top:8px">Same source of truth as <b>Plugins → HyperEx Pulse Filter</b>. Saving here writes normal plugin Settings; there is no second settings store.</div><div id="advancedmeta" class="m"></div><div class="m"><b>REAL-FLOW TARGETS</b></div><table><tr><th>Parameter</th><th>Value</th><th>Parameter</th><th>Value</th></tr><tr><td>S1 target (g/s)</td><td><input id="adv_stage1Flow" type="number" step="0.1" min="0.3" max="6.5"></td><td>S2 target (g/s)</td><td><input id="adv_stage2Flow" type="number" step="0.1" min="0.3" max="6.5"></td></tr><tr><td>S3 target (g/s)</td><td><input id="adv_stage3Flow" type="number" step="0.1" min="0.3" max="6.5"></td><td></td><td></td></tr></table><div class="m"><b>TEMPERATURE / PRESSURE SAFETY</b></div><table><tr><td>Temperature (°C)</td><td><input id="adv_temperature" type="number" step="0.5" min="70" max="100"></td><td>Emergency pressure (bar)</td><td><input id="adv_hardPressureLimit" type="number" step="0.1" min="1" max="12"></td></tr><tr><td>S1 pressure limiter (bar)</td><td><input id="adv_stage1PressureLimit" type="number" step="0.1" min="0.5" max="12"></td><td>S2 pressure limiter (bar)</td><td><input id="adv_stage2PressureLimit" type="number" step="0.1" min="0.5" max="12"></td></tr><tr><td>S3 pressure limiter (bar)</td><td><input id="adv_stage3PressureLimit" type="number" step="0.1" min="0.5" max="12"></td><td></td><td></td></tr></table><div class="m"><b>RELEASE / SCALE / RETRY / DIAGNOSTICS</b></div><table><tr><td>Release flow threshold (ml/s)</td><td><input id="adv_dumpFlowThreshold" type="number" step="0.05" min="0" max="2"></td><td>Low-flow stable samples</td><td><input id="adv_dumpFlowStableSamples" type="number" step="1" min="1" max="20"></td></tr><tr><td>Release fallback (s)</td><td><input id="adv_dumpFallbackSeconds" type="number" step="0.1" min="0.2" max="15"></td><td>Release timeout (s)</td><td><input id="adv_dumpTimeoutSeconds" type="number" step="0.1" min="1" max="30"></td></tr><tr><td>Scale tare threshold (g)</td><td><input id="adv_scaleResetThreshold" type="number" step="0.1" min="0.5" max="20"></td><td>No-scale timeout (s)</td><td><input id="adv_noScaleTimeoutSeconds" type="number" step="0.5" min="1" max="30"></td></tr><tr><td>Auto-arm retry 1 (s)</td><td><input id="adv_autoArmRetry1Seconds" type="number" step="0.5" min="0" max="30"></td><td>Auto-arm retry 2 (s)</td><td><input id="adv_autoArmRetry2Seconds" type="number" step="0.5" min="0" max="60"></td></tr><tr><td>Diagnostic sample (ms)</td><td><input id="adv_diagnosticSampleIntervalMs" type="number" step="10" min="50" max="1000"></td><td>Maximum sequence (s)</td><td><input id="adv_maxRunSeconds" type="number" step="10" min="30" max="600"></td></tr></table><div class="row"><button id="saveadvanced" class="b secondaryAction">SAVE TO PLUGIN SETTINGS</button></div><div id="startupbox" class="d" style="margin-top:10px"></div></details></div>
+  <div class="section"><details id="advancedsettings" class="manualPanel"><summary style="cursor:pointer;font-weight:800;font-size:16px">ADVANCED SETTINGS · QUICK EDIT</summary><div class="small" style="margin-top:8px">Same source of truth as <b>Plugins → HyperEx Pulse Filter</b>. Saving here writes normal plugin Settings; there is no second settings store.</div><div id="advancedmeta" class="m"></div><div class="m"><b>REAL-FLOW TARGETS</b></div><table><tr><th>Parameter</th><th>Value</th><th>Parameter</th><th>Value</th></tr><tr><td>S1 target (g/s)</td><td><input id="adv_stage1Flow" type="number" step="0.1" min="0.3" max="6.5"></td><td>S2 target (g/s)</td><td><input id="adv_stage2Flow" type="number" step="0.1" min="0.3" max="6.5"></td></tr><tr><td>S3 target (g/s)</td><td><input id="adv_stage3Flow" type="number" step="0.1" min="0.3" max="6.5"></td><td></td><td></td></tr></table><div class="m"><b>TEMPERATURE / PRESSURE SAFETY</b></div><table><tr><td>Temperature (°C)</td><td><input id="adv_temperature" type="number" step="0.5" min="70" max="100"></td><td>Emergency pressure (bar)</td><td><input id="adv_hardPressureLimit" type="number" step="0.1" min="1" max="12"></td></tr><tr><td>S1 pressure limiter (bar)</td><td><input id="adv_stage1PressureLimit" type="number" step="0.1" min="0.5" max="12"></td><td>S2 pressure limiter (bar)</td><td><input id="adv_stage2PressureLimit" type="number" step="0.1" min="0.5" max="12"></td></tr><tr><td>S3 pressure limiter (bar)</td><td><input id="adv_stage3PressureLimit" type="number" step="0.1" min="0.5" max="12"></td><td></td><td></td></tr></table><div class="m"><b>EXPERIMENTAL S2/S3 LIVE FLOW TRIM · DEFAULT OFF</b><br><label><input id="adv_liveFlowTrimTest" type="checkbox"> Up to 50 checks / 50 raw frame writes per shot</label><br>Period = planned S2+S3 duration / 50 (default 944 ms). Target band ±6%; bounded raw A010 changes, no extra skips. Normal shot-to-shot learning remains ON; corrected frames use only verified stable-command windows. Original profile restored afterwards.</div><div class="m"><b>DIRECT DRIVER START TEST · DEFAULT OFF</b><br><label><input id="adv_directDriverStartTest" type="checkbox"> After soak: Espresso request, then raw A002=04 write</label><br>One attempt; no re-arm retries. Stop at 20 s unless fresh cup weight has increased continuously for at least 2 s. This does not guarantee bypassing GHC.</div><div class="m"><b>RELEASE / SCALE / RETRY / DIAGNOSTICS</b></div><table><tr><td>Release flow threshold (ml/s)</td><td><input id="adv_dumpFlowThreshold" type="number" step="0.05" min="0" max="2"></td><td>Low-flow stable samples</td><td><input id="adv_dumpFlowStableSamples" type="number" step="1" min="1" max="20"></td></tr><tr><td>Release fallback (s)</td><td><input id="adv_dumpFallbackSeconds" type="number" step="0.1" min="0.2" max="15"></td><td>Release timeout (s)</td><td><input id="adv_dumpTimeoutSeconds" type="number" step="0.1" min="1" max="30"></td></tr><tr><td>Scale tare threshold (g)</td><td><input id="adv_scaleResetThreshold" type="number" step="0.1" min="0.5" max="20"></td><td>No-scale timeout (s)</td><td><input id="adv_noScaleTimeoutSeconds" type="number" step="0.5" min="1" max="30"></td></tr><tr><td>Auto-arm retry 1 (s)</td><td><input id="adv_autoArmRetry1Seconds" type="number" step="0.5" min="0" max="30"></td><td>Auto-arm retry 2 (s)</td><td><input id="adv_autoArmRetry2Seconds" type="number" step="0.5" min="0" max="60"></td></tr><tr><td>Diagnostic sample (ms)</td><td><input id="adv_diagnosticSampleIntervalMs" type="number" step="10" min="50" max="1000"></td><td>Maximum sequence (s)</td><td><input id="adv_maxRunSeconds" type="number" step="10" min="30" max="600"></td></tr></table><div class="row"><button id="saveadvanced" class="b secondaryAction">SAVE TO PLUGIN SETTINGS</button></div><div id="startupbox" class="d" style="margin-top:10px"></div></details></div>
 
   <div class="stepHead"><span class="stepBadge">EXPORT</span><b>STEP 4 · COPY CSV</b><div class="stepHint">Raw engineering export for offline analysis or bug reports. This is intentionally last because it is not needed for normal brewing.</div></div>
   <div class="section"><h3>LAST RUN CSV</h3><div class="small">Combined DE1/Decaid samples plus RAW scale weight/timestamp/dW-dt and profile-frame markers.</div><textarea id="csv" readonly></textarea></div>
@@ -2441,7 +2463,7 @@ html,body{margin:0;width:100%;min-height:100%;background:transparent;font-family
 <script>
 const base=${JSON.stringify(endpointBase)};const coreSettings='/api/v1/plugins/'+${JSON.stringify(ID)}+'/settings';const requestedView=new URLSearchParams(location.search).get('view');const view=requestedView||${JSON.stringify(state.phase === 'idle' ? 'diag' : 'ghc')};const dashboardEntry=view==='diag-dashboard';const diagView=view==='diag'||dashboardEntry;if(diagView){document.documentElement.classList.add('diagview');document.body.classList.add('diagview')}window.parent.postMessage({type:'streamline:ready'},'*');const sw=Math.max(1000,Math.min(1800,Number((window.screen&&window.screen.width)||window.innerWidth||1200)));const sh=Math.max(780,Math.min(1400,Number((window.screen&&window.screen.height)||window.innerHeight||900)));window.parent.postMessage({type:'streamline:size',width:diagView?sw:520,height:diagView?sh:300},'*');
 let latestAdvisorySummary=null;let latestStage3Stability=null;let latestNextShotAdaptive=null;let latestAdaptiveSummary=null;let latestAutoApplyEnabled=true;let latestAutoApplyStatus=null;const $=id=>document.getElementById(id),t=$('title'),d=$('detail'),m=$('meta'),b=$('rearm'),copy=$('copy'),diag=$('diag'),stats=$('stats'),appliedcommands=$('appliedcommands'),runcommands=$('runcommands'),validation=$('validation'),validationtable=$('validationtable'),stability=$('stability'),adaptive=$('adaptive'),advisory=$('advisory'),testcommands=$('testcommands'),s3shape=$('s3shape'),csv=$('csv'),calstatus=$('calstatus'),waterwarn=$('waterwarn'),scope=$('scope'),calmode=$('calmode'),map=$('map'),startupbox=$('startupbox');
-function paint(x){if(x.phase==='soak'){t.textContent='SOAK '+x.soakSecondsRemaining+'s';d.textContent='Active release is complete. Wait until the soak reaches 0. The plugin will arm the second stage only after the full soak.';b.disabled=true;}else if(x.phase==='restart_wait'){t.textContent='CHECK PINK LIGHT · '+x.ghcSecondsRemaining+'s';d.textContent='Pink ON → press the physical GHC Espresso button. Pink OFF → tap RE-ARM, then press GHC when the light turns pink.';b.disabled=false;}else if(x.calibrationActive){t.textContent='FLOW CAL RUNNING';d.textContent='EMPTY BASKET. Leave the staircase running until Idle. Do not remove the catch vessel; the plugin will stop at the selected-mode actual-water safety cap before 300 ml.';b.disabled=true;}else{t.textContent='HYPEREX IDLE';d.textContent='No GHC action is required.';b.disabled=true;}m.textContent='Cumulative '+Number(x.cumulativeWeight||0).toFixed(1)+'g · arm requests '+(x.armRequestCount||0);}
+function paint(x){if(x.phase==='soak'){t.textContent='SOAK '+x.soakSecondsRemaining+'s';d.textContent='Active release is complete. Wait until the soak reaches 0. The plugin will arm the second stage only after the full soak.';b.disabled=true;}else if(x.phase==='restart_wait'&&x.directStartTest&&x.directStartTest.active){t.textContent='DIRECT DRIVER START TEST';d.textContent=x.directStartTest.status+' · Espresso request then raw A002=04 · 20 s deadline / 2 s sustained cup gain';b.disabled=true;}else if(x.phase==='restart_wait'){t.textContent='CHECK PINK LIGHT · '+x.ghcSecondsRemaining+'s';d.textContent='Pink ON → press the physical GHC Espresso button. Pink OFF → tap RE-ARM, then press GHC when the light turns pink.';b.disabled=false;}else if(x.calibrationActive){t.textContent='FLOW CAL RUNNING';d.textContent='EMPTY BASKET. Leave the staircase running until Idle. Do not remove the catch vessel; the plugin will stop at the selected-mode actual-water safety cap before 300 ml.';b.disabled=true;}else{t.textContent='HYPEREX IDLE';d.textContent='No GHC action is required.';b.disabled=true;}m.textContent='Cumulative '+Number(x.cumulativeWeight||0).toFixed(1)+'g · arm requests '+(x.armRequestCount||0)+(x.directStartTest?' · DIRECT TEST: '+x.directStartTest.status:'');}
 async function post(ep,body){const r=await fetch(base+'/'+ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});let j={};try{j=await r.json()}catch(_){j={error:await r.text()}}if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j;}
 async function doRearm(auto){b.disabled=true;b.textContent='RE-ARMING…';try{const x=await post('rearm',{retry:1});paint(x);t.textContent='RE-ARM REQUEST SENT';d.textContent='Wait for the pink GHC Espresso light, then press the physical GHC Espresso button.';if(auto)setTimeout(closeUi,1300)}catch(e){t.textContent='RE-ARM FAILED';d.textContent=String(e)}finally{b.textContent='RE-ARM';setTimeout(()=>b.disabled=false,800)}}
 function stat(label,v){return '<div class="stat"><span class="small">'+label+'</span><b>'+v+'</b></div>'}
@@ -2450,15 +2472,17 @@ function commandModeLabel(v){v=String(v||'auto').toLowerCase();return v==='shape
 function shapeCommandText(sh){if(!sh||sh.enabled!==true)return null;return esc(sh.earlyCommand)+' × '+esc(sh.earlySeconds)+'s → '+esc(sh.midCommand)+' × '+esc(sh.midSeconds)+'s → '+esc(sh.lateCommand)+' ml/s'}
 function appliedS3Text(c){const sh=c&&c.s3Shape;const shaped=shapeCommandText(sh);if(shaped)return shaped;const flat=c&&c.stage3FlatCommandMlS!=null?c.stage3FlatCommandMlS:(c&&c.stage3CommandMlS);return esc(flat)+' ml/s FLAT'}
 function renderAppliedCommands(c,truth){if(!appliedcommands)return;if(!c||!c.appliedProfile){appliedcommands.innerHTML='<span class="bad">Current profile command state unavailable.</span>';return}const p=c.appliedProfile,src=c.adaptiveSource||null;const expectedS3=p.stage3||{};const t=truth||{};const a=t.actual||null;let ap1=p.stage1&&p.stage1.commandMlS,ap2=p.stage2&&p.stage2.commandMlS,mode=expectedS3.mode,ap3=expectedS3.mode==='shape'?shapeCommandText(expectedS3.shape):(esc(expectedS3.flatCommandMlS)+' ml/s');if(!a){ap1='unavailable';ap2='unavailable';ap3='unavailable';mode='unverified'}if(a){ap1=a.stage1CommandMlS;ap2=a.stage2CommandMlS;mode=a.stage3Mode==='shape'?'shape':'actual';ap3=a.stage3Mode==='shape'?shapeCommandText(a.s3Shape):(esc(a.stage3CommandMlS)+' ml/s')}let source='<b>Source:</b> '+esc(c.manualTestStatus||'AUTO / LUT');if(src&&src.runId)source='<b>Source:</b> NEXT SHOT ADAPTIVE '+esc(String(src.mode||'').toUpperCase())+' · run '+esc(src.runId)+(src.appliedAt?' · '+esc(src.appliedAt):'');const truthLine=t.verified?'<span class="good"><b>WORKFLOW READBACK VERIFIED</b></span> · '+esc(t.status||''):'<span class="bad"><b>WORKFLOW NOT VERIFIED</b></span> · '+esc(t.status||'')+' · expected commands are shown only as a reference until repair succeeds.';appliedcommands.innerHTML='<table><tr><th>Stage</th><th>Target REAL g/s</th><th>LUT cmd</th><th>Mode</th><th>ACTUAL WORKFLOW COMMAND</th></tr><tr><td>S1</td><td>'+esc(p.stage1&&p.stage1.desiredGS)+' g/s</td><td>'+esc(p.stage1&&p.stage1.lutCommandMlS)+'</td><td>'+commandModeLabel(p.stage1&&p.stage1.mode)+'</td><td><b>'+esc(ap1)+' ml/s</b></td></tr><tr><td>S2</td><td>'+esc(p.stage2&&p.stage2.desiredGS)+' g/s</td><td>'+esc(p.stage2&&p.stage2.lutCommandMlS)+'</td><td>'+commandModeLabel(p.stage2&&p.stage2.mode)+'</td><td><b>'+esc(ap2)+' ml/s</b></td></tr><tr><td>S3</td><td>'+esc(expectedS3.desiredGS)+' g/s</td><td>'+esc(expectedS3.lutCommandMlS)+'</td><td>'+commandModeLabel(mode)+'</td><td><b>'+ap3+'</b></td></tr></table><div class="small" style="margin-top:7px">'+truthLine+'<br>'+source+'</div>'}
-function renderRunCommands(s){if(!runcommands)return;const p=s&&s.shotCommands;if(!p){runcommands.innerHTML='<span class="small">No completed HyperEx shot command snapshot is available.</span>';return}const s3=p.stage3||{};const s3txt=s3.mode==='shape'?shapeCommandText(s3.shape):(esc(s3.flatCommandMlS)+' ml/s');runcommands.innerHTML='<table><tr><th>Stage</th><th>Target</th><th>LUT cmd</th><th>Mode AT SHOT START</th><th>COMMANDS USED BY THIS SHOT</th></tr><tr><td>S1</td><td>'+esc(p.stage1&&p.stage1.desiredGS)+' g/s</td><td>'+esc(p.stage1&&p.stage1.lutCommandMlS)+'</td><td>'+commandModeLabel(p.stage1&&p.stage1.mode)+'</td><td><b>'+esc(p.stage1&&p.stage1.commandMlS)+' ml/s</b></td></tr><tr><td>S2</td><td>'+esc(p.stage2&&p.stage2.desiredGS)+' g/s</td><td>'+esc(p.stage2&&p.stage2.lutCommandMlS)+'</td><td>'+commandModeLabel(p.stage2&&p.stage2.mode)+'</td><td><b>'+esc(p.stage2&&p.stage2.commandMlS)+' ml/s</b></td></tr><tr><td>S3</td><td>'+esc(s3.desiredGS)+' g/s</td><td>'+esc(s3.lutCommandMlS)+'</td><td>'+commandModeLabel(s3.mode)+'</td><td><b>'+s3txt+'</b></td></tr></table><div class="small" style="margin-top:7px">Historical snapshot only. It does not change when NEXT SHOT ADAPTIVE writes a new profile after this shot.</div>'}
-const ADV_SETTING_KEYS={temperature:'Temperature',stage1Flow:'Stage1Flow',stage1PressureLimit:'Stage1PressureLimit',dumpFlowThreshold:'DumpFlowThreshold',dumpFlowStableSamples:'DumpFlowStableSamples',dumpFallbackSeconds:'DumpFallbackSeconds',dumpTimeoutSeconds:'DumpTimeoutSeconds',stage2Flow:'Stage2Flow',stage2PressureLimit:'Stage2PressureLimit',stage3Flow:'Stage3Flow',stage3PressureLimit:'Stage3PressureLimit',hardPressureLimit:'HardPressureLimit',scaleResetThreshold:'ScaleResetThreshold',noScaleTimeoutSeconds:'NoScaleTimeoutSeconds',autoArmRetry1Seconds:'AutoArmRetry1Seconds',autoArmRetry2Seconds:'AutoArmRetry2Seconds',diagnosticSampleIntervalMs:'DiagnosticSampleIntervalMs',maxRunSeconds:'MaxRunSeconds'};
+function renderRunCommands(s){if(!runcommands)return;const p=s&&s.shotCommands;if(!p){runcommands.innerHTML='<span class="small">No completed HyperEx shot command snapshot is available.</span>';return}const s3=p.stage3||{};const s3txt=s3.mode==='shape'?shapeCommandText(s3.shape):(esc(s3.flatCommandMlS)+' ml/s');runcommands.innerHTML=(s.liveFlowTrim?'<div class="small"><b>LIVE TRIM ENABLED:</b> this table is the shot-start snapshot. In-shot commands and machine target responses are plotted and exported below.</div>':'')+'<table><tr><th>Stage</th><th>Target</th><th>LUT cmd</th><th>Mode AT SHOT START</th><th>COMMANDS USED BY THIS SHOT</th></tr><tr><td>S1</td><td>'+esc(p.stage1&&p.stage1.desiredGS)+' g/s</td><td>'+esc(p.stage1&&p.stage1.lutCommandMlS)+'</td><td>'+commandModeLabel(p.stage1&&p.stage1.mode)+'</td><td><b>'+esc(p.stage1&&p.stage1.commandMlS)+' ml/s</b></td></tr><tr><td>S2</td><td>'+esc(p.stage2&&p.stage2.desiredGS)+' g/s</td><td>'+esc(p.stage2&&p.stage2.lutCommandMlS)+'</td><td>'+commandModeLabel(p.stage2&&p.stage2.mode)+'</td><td><b>'+esc(p.stage2&&p.stage2.commandMlS)+' ml/s</b></td></tr><tr><td>S3</td><td>'+esc(s3.desiredGS)+' g/s</td><td>'+esc(s3.lutCommandMlS)+'</td><td>'+commandModeLabel(s3.mode)+'</td><td><b>'+s3txt+'</b></td></tr></table><div class="small" style="margin-top:7px">Historical snapshot only. It does not change when NEXT SHOT ADAPTIVE writes a new profile after this shot.</div>'}
+const ADV_SETTING_KEYS={liveFlowTrimTest:'LiveFlowTrimTest',directDriverStartTest:'DirectDriverStartTest',temperature:'Temperature',stage1Flow:'Stage1Flow',stage1PressureLimit:'Stage1PressureLimit',dumpFlowThreshold:'DumpFlowThreshold',dumpFlowStableSamples:'DumpFlowStableSamples',dumpFallbackSeconds:'DumpFallbackSeconds',dumpTimeoutSeconds:'DumpTimeoutSeconds',stage2Flow:'Stage2Flow',stage2PressureLimit:'Stage2PressureLimit',stage3Flow:'Stage3Flow',stage3PressureLimit:'Stage3PressureLimit',hardPressureLimit:'HardPressureLimit',scaleResetThreshold:'ScaleResetThreshold',noScaleTimeoutSeconds:'NoScaleTimeoutSeconds',autoArmRetry1Seconds:'AutoArmRetry1Seconds',autoArmRetry2Seconds:'AutoArmRetry2Seconds',diagnosticSampleIntervalMs:'DiagnosticSampleIntervalMs',maxRunSeconds:'MaxRunSeconds'};
 const ADV_FIELDS=Object.keys(ADV_SETTING_KEYS);
-async function loadAdvancedSettings(){try{const r=await fetch(base+'/advanced-settings');if(!r.ok)return;const j=await r.json(),a=j.settings||{};for(const k of ADV_FIELDS){const q=$('adv_'+k);if(q&&a[k]!=null)q.value=a[k]}const meta=$('advancedmeta');if(meta){const bt=j.basicCurve||{};meta.innerHTML='Single settings source · core curve: S1 <b>'+esc(bt.stage1WeightG)+'g</b> → settle <b>'+esc(bt.releaseSettleSeconds)+'s</b> → soak <b>'+esc(bt.soakSeconds)+'s</b> → S2→S3 <b>'+esc(bt.stage2WeightG)+'g</b> → final <b>'+esc(bt.finalWeightG)+'g</b> · GHC timeout <b>'+esc(bt.ghcConfirmTimeoutSeconds)+'s</b>.'}}catch(e){const meta=$('advancedmeta');if(meta)meta.textContent='Settings load error: '+e}}
-async function saveAdvancedSettings(){const payload={};for(const k of ADV_FIELDS){const q=$('adv_'+k);if(!q)continue;const v=Number(q.value);if(!Number.isFinite(v)){alert('Invalid setting: '+k);return}payload[ADV_SETTING_KEYS[k]]=v}if(!confirm('Save these values to the normal HyperEx plugin Settings?\\n\\nThis uses the same settings source shown on the Plugins page and reloads HyperEx once.'))return;const r=await fetch(coreSettings,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});if(!r.ok){alert('Save failed: '+await r.text());return}alert('Settings saved. HyperEx is reloading; reopen DIAG / CAL if this page closes.');setTimeout(()=>location.reload(),1200)}
-async function loadCal(){try{const r=await fetch(base+'/calibration-status');const c=await r.json();renderAppliedCommands(c.commandFlows||{},c.profileTruth||{});renderBasketContext(c);latestAutoApplyEnabled=c.autoApplyNextShot!==false;latestAutoApplyStatus=c.autoApplyLastStatus||null;renderAutoApplyBox();renderAdaptive(latestAdaptiveSummary);const ok=c.calibrationUsable;const b1=$("step1badge"),b2=$("step2badge");if(b1){b1.textContent=ok?"CAL READY":"REQUIRED FIRST";b1.className="stepBadge "+(ok?"good":"bad")}if(b2){b2.textContent=ok?"ACTIVE · AUTO NEXT SHOT":"WAITING FOR VALID LUT";b2.className="stepBadge "+(ok?"good":"bad")}const hs=c.persistentHistory||{},hb=$("historystatus");if(hb){if(hs.available===true){hb.style.background="#173b25";hb.style.color="#9ff0b5";hb.innerHTML='<b>ADAPTIVE HISTORY · PERSISTENT</b> · '+esc(hs.savedShots)+' saved shot(s), '+esc(hs.compatibleShots)+' compatible with the current calibration/LUT and basket context. '+esc(hs.baselineReferenceShots||0)+' empty/pre-upgrade baseline references retained; coffee consensus accumulates from normal coffees.'}else if(hs.available===false){hb.style.background="#4a2024";hb.style.color="#ffb4b8";hb.innerHTML='<b>ADAPTIVE HISTORY · SESSION ONLY</b> · '+esc(hs.status)+'<br>Shot-to-shot adaptation still works in this session, but cross-reload/version regression is disabled.'}else{hb.style.background="#3b2d16";hb.style.color="#ffd58a";hb.innerHTML='<b>ADAPTIVE HISTORY</b> · checking pluginStorage write/readback…'}}if($("t1")){ $("t1").value=c.commandFlows&&c.commandFlows.stage1DesiredGS!=null?c.commandFlows.stage1DesiredGS:""; $("t2").value=c.commandFlows&&c.commandFlows.stage2DesiredGS!=null?c.commandFlows.stage2DesiredGS:""; $("t3").value=c.commandFlows&&c.commandFlows.stage3DesiredGS!=null?c.commandFlows.stage3DesiredGS:"";}if(calmode){calmode.innerHTML=(c.calibrationModes||[{id:'low',label:'Low Water'},{id:'full',label:'Full'}]).map(x=>'<button class="b s '+(c.calibrationMode===x.id?'active':'')+'" data-mode="'+esc(x.id)+'">'+esc(x.label)+(x.id==='low'?' · DEFAULT':'')+'</button>').join('');calmode.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-mode',{mode:q.dataset.mode});await loadCal()})}if(waterwarn){const w=c.waterPreflight||{};const wc=w.status==='ok'?'#163b26':w.status==='warn'?'#3b2d16':'#4a2024';const fg=w.status==='ok'?'#9ff0b5':w.status==='warn'?'#ffd58a':'#ffb4b8';waterwarn.style.background=wc;waterwarn.style.color=fg;let tank='Tank level unavailable';if(w.available)tank='Tank: <b>'+esc(w.currentLevelMm)+' mm</b> · refill threshold: <b>'+esc(w.refillLevelMm)+' mm</b> · margin: <b>'+esc(w.marginMm)+' mm</b>';waterwarn.innerHTML='<b>WATER / VESSEL / TANK PREFLIGHT · '+esc(c.calibrationModeLabel)+' · '+esc((w.status||'unknown').toUpperCase())+'</b><br>'+tank+'<br>Prime: '+esc(c.primeFlow)+' ml/s × '+esc(c.primeSeconds)+' s · '+esc(c.calibrationSteps)+' calibration plateaus × '+esc(c.calibrationStepSeconds)+' s · nominal DE1 command water <b>≈'+esc(c.nominalCommandWaterMl)+' ml</b>.<br>Use a <b>'+esc(c.recommendedContainerMl)+' ml or larger</b> catch vessel. Plugin actively stops around <b>'+esc(c.calibrationHardStopG)+' g</b> actual collected water. '+esc(w.message||'');}calstatus.innerHTML='<b class="'+(ok?'good':'bad')+'">'+(ok?'CALIBRATION READY':'CALIBRATION NOT READY')+'</b><br>Mode: <b>'+esc(c.calibrationModeLabel)+'</b> · Profile: <b>'+esc(c.calibrationProfileTitle)+'</b><br>Scope: <b>'+esc(c.scopeLabel)+'</b> · DE1 multiplier: <b>'+esc(c.currentFlowMultiplier)+'</b> · map base: <b>'+esc(c.calibrationBaseMultiplier)+'</b> · suggested: <b>'+esc(c.suggestedFlowMultiplier)+'</b><br>'+esc(c.calibrationStaleReason||'LUT valid')+(c.lastCalibrationValid===false?'<br><b class="bad">LAST CAL RUN INVALID — previous valid LUT retained</b>':c.lastCalibrationValid===true?'<br><b class="good">LAST CAL RUN VALID</b>':'')+'<br>Real→command: S1 '+esc(c.commandFlows&&c.commandFlows.stage1DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage1CommandMlS)+' · S2 '+esc(c.commandFlows&&c.commandFlows.stage2DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage2CommandMlS)+' · S3 '+esc(c.commandFlows&&c.commandFlows.stage3DesiredGS)+'→'+appliedS3Text(c.commandFlows||{})+'<br>Test mode: <b>'+esc((c.commandFlows&&c.commandFlows.manualTestStatus)||'none')+'</b>';renderTestCommands(c.commandFlows||{},latestAdvisorySummary||{});scope.innerHTML=['off','hyperex','global'].map(x=>'<button class="b s '+(c.scope===x?'active':'')+'" data-scope="'+x+'">'+(x==='off'?'OFF':x==='hyperex'?'HYPEREX ONLY':'GLOBAL')+'</button>').join('');scope.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-scope',{scope:q.dataset.scope});await loadCal()});const last=c.lastCalibration||null;const rows=last&&Array.isArray(last.plateauResults)?last.plateauResults:[];const anchors=last&&last.map&&Array.isArray(last.map.targetAnchors)?last.map.targetAnchors:[];const anchorHtml=anchors.length?'<div style="margin:8px 0"><b>TARGET LUT:</b> '+anchors.map(a=>esc(a.blockId)+' '+esc(a.actualFlow)+' g/s → '+esc(a.commandFlow)+' ml/s ('+esc(a.quality)+')').join(' · ')+'</div>':'';map.innerHTML=rows.length?anchorHtml+'<table><tr><th>Frame</th><th>Block / target</th><th>DE1 cmd</th><th>RAW real g/s</th><th>DE1 flow</th><th>R²</th><th>Status</th></tr>'+rows.map(p=>'<tr><td>'+esc(p.frame)+'</td><td>'+esc((p.blockId||'—')+(p.targetReal!=null?' / '+p.targetReal:'') )+'</td><td>'+esc(p.commandFlow)+'</td><td>'+esc(p.actualFlow)+'</td><td>'+esc(p.machineFlow)+'</td><td>'+esc(p.r2)+'</td><td class="'+(p.acceptedInMap?'good':(p.valid?'':'bad'))+'">'+esc(p.acceptedInMap?'ANCHOR SOURCE':(p.reason||'REJECTED'))+'</td></tr>').join('')+'</table><div style="margin-top:8px">'+esc(c.profileSyncStatus||'')+'</div>':'No calibration run yet. Low Water automatically searches the three HyperEx real-flow targets and generates the LUT only when all targets pass. Full remains the wide engineering staircase.';const cur=c.stage1StartupCorrection||1;startupbox.innerHTML='<b>Stable skip topology:</b> scale feedback is advisory only. Optional S3 DECAY COMP may use 5 profile frames, but S3 subframes advance only by their own timers and never add plugin skipStep calls.'+(Number(cur)!==1?(' <br><span class="bad">Legacy S1 startup factor '+esc(cur)+'× is stored but ignored in v0.1.52.</span> <button id=clearstartup class="b s">CLEAR LEGACY</button>'):'');const cl=$("clearstartup");if(cl)cl.onclick=async()=>{try{await post('startup-clear',{});await loadCal()}catch(e){alert('Clear failed: '+e)}};}catch(e){calstatus.textContent='Calibration status error: '+e}}
+async function loadAdvancedSettings(){try{const r=await fetch(base+'/advanced-settings');if(!r.ok)return;const j=await r.json(),a=j.settings||{};for(const k of ADV_FIELDS){const q=$('adv_'+k);if(q&&a[k]!=null){if(q.type==='checkbox')q.checked=!!a[k];else q.value=a[k]}}const meta=$('advancedmeta');if(meta){const bt=j.basicCurve||{};meta.innerHTML='Single settings source · core curve: S1 <b>'+esc(bt.stage1WeightG)+'g</b> → settle <b>'+esc(bt.releaseSettleSeconds)+'s</b> → soak <b>'+esc(bt.soakSeconds)+'s</b> → S2→S3 <b>'+esc(bt.stage2WeightG)+'g</b> → final <b>'+esc(bt.finalWeightG)+'g</b> · GHC timeout <b>'+esc(bt.ghcConfirmTimeoutSeconds)+'s</b>.'+(j.directStartTest?'<br><b>DIRECT DRIVER TEST: '+esc(j.directStartTest.status)+'</b>':'')}}catch(e){const meta=$('advancedmeta');if(meta)meta.textContent='Settings load error: '+e}}
+async function saveAdvancedSettings(){const payload={};for(const k of ADV_FIELDS){const q=$('adv_'+k);if(!q)continue;if(q.type==='checkbox'){payload[ADV_SETTING_KEYS[k]]=q.checked;continue}const v=Number(q.value);if(!Number.isFinite(v)){alert('Invalid setting: '+k);return}payload[ADV_SETTING_KEYS[k]]=v}if(!confirm('Save these values to the normal HyperEx plugin Settings?\\n\\nThis uses the same settings source shown on the Plugins page and reloads HyperEx once.'))return;const r=await fetch(coreSettings,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});if(!r.ok){alert('Save failed: '+await r.text());return}alert('Settings saved. HyperEx is reloading; reopen DIAG / CAL if this page closes.');setTimeout(()=>location.reload(),1200)}
+async function loadCal(){try{const r=await fetch(base+'/calibration-status');const c=await r.json();renderAppliedCommands(c.commandFlows||{},c.profileTruth||{});renderBasketContext(c);latestAutoApplyEnabled=c.autoApplyNextShot!==false;latestAutoApplyStatus=c.autoApplyLastStatus||null;renderAutoApplyBox();renderAdaptive(latestAdaptiveSummary);const ok=c.calibrationUsable;const b1=$("step1badge"),b2=$("step2badge");if(b1){b1.textContent=ok?"CAL READY":"REQUIRED FIRST";b1.className="stepBadge "+(ok?"good":"bad")}if(b2){b2.textContent=ok?"ACTIVE · AUTO NEXT SHOT":"WAITING FOR VALID LUT";b2.className="stepBadge "+(ok?"good":"bad")}const hs=c.persistentHistory||{},hb=$("historystatus");if(hb){if(hs.available===true){hb.style.background="#173b25";hb.style.color="#9ff0b5";hb.innerHTML='<b>ADAPTIVE HISTORY · PERSISTENT</b> · '+esc(hs.savedShots)+' saved shot(s), '+esc(hs.compatibleShots)+' compatible with the current calibration/LUT and basket context. '+esc(hs.baselineReferenceShots||0)+' empty/pre-upgrade baseline references retained; coffee consensus accumulates from normal coffees.'}else if(hs.available===false){hb.style.background="#4a2024";hb.style.color="#ffb4b8";hb.innerHTML='<b>ADAPTIVE HISTORY · SESSION ONLY</b> · '+esc(hs.status)+'<br>Shot-to-shot adaptation still works in this session, but cross-reload/version regression is disabled.'}else{hb.style.background="#3b2d16";hb.style.color="#ffd58a";hb.innerHTML='<b>ADAPTIVE HISTORY</b> · checking pluginStorage write/readback…'}}if($("t1")){ $("t1").value=c.commandFlows&&c.commandFlows.stage1DesiredGS!=null?c.commandFlows.stage1DesiredGS:""; $("t2").value=c.commandFlows&&c.commandFlows.stage2DesiredGS!=null?c.commandFlows.stage2DesiredGS:""; $("t3").value=c.commandFlows&&c.commandFlows.stage3DesiredGS!=null?c.commandFlows.stage3DesiredGS:"";}if(calmode){calmode.innerHTML=(c.calibrationModes||[{id:'low',label:'Low Water'},{id:'full',label:'Full'}]).map(x=>'<button class="b s '+(c.calibrationMode===x.id?'active':'')+'" data-mode="'+esc(x.id)+'">'+esc(x.label)+(x.id==='low'?' · DEFAULT':'')+'</button>').join('');calmode.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-mode',{mode:q.dataset.mode});await loadCal()})}if(waterwarn){const w=c.waterPreflight||{};const wc=w.status==='ok'?'#163b26':w.status==='warn'?'#3b2d16':'#4a2024';const fg=w.status==='ok'?'#9ff0b5':w.status==='warn'?'#ffd58a':'#ffb4b8';waterwarn.style.background=wc;waterwarn.style.color=fg;let tank='Tank level unavailable';if(w.available)tank='Tank: <b>'+esc(w.currentLevelMm)+' mm</b> · refill threshold: <b>'+esc(w.refillLevelMm)+' mm</b> · margin: <b>'+esc(w.marginMm)+' mm</b>';waterwarn.innerHTML='<b>WATER / VESSEL / TANK PREFLIGHT · '+esc(c.calibrationModeLabel)+' · '+esc((w.status||'unknown').toUpperCase())+'</b><br>'+tank+'<br>Prime: '+esc(c.primeFlow)+' ml/s × '+esc(c.primeSeconds)+' s · '+esc(c.calibrationSteps)+' calibration plateaus × '+esc(c.calibrationStepSeconds)+' s · nominal DE1 command water <b>≈'+esc(c.nominalCommandWaterMl)+' ml</b>.<br>Use a <b>'+esc(c.recommendedContainerMl)+' ml or larger</b> catch vessel. Plugin actively stops around <b>'+esc(c.calibrationHardStopG)+' g</b> actual collected water. '+esc(w.message||'');}calstatus.innerHTML='<b class="'+(ok?'good':'bad')+'">'+(ok?'CALIBRATION READY':'CALIBRATION NOT READY')+'</b><br>Mode: <b>'+esc(c.calibrationModeLabel)+'</b> · Profile: <b>'+esc(c.calibrationProfileTitle)+'</b><br>Scope: <b>'+esc(c.scopeLabel)+'</b> · DE1 multiplier: <b>'+esc(c.currentFlowMultiplier)+'</b> · map base: <b>'+esc(c.calibrationBaseMultiplier)+'</b> · suggested: <b>'+esc(c.suggestedFlowMultiplier)+'</b><br>'+esc(c.calibrationStaleReason||'LUT valid')+(c.lastCalibrationValid===false?'<br><b class="bad">LAST CAL RUN INVALID — previous valid LUT retained</b>':c.lastCalibrationValid===true?'<br><b class="good">LAST CAL RUN VALID</b>':'')+'<br>Real→command: S1 '+esc(c.commandFlows&&c.commandFlows.stage1DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage1CommandMlS)+' · S2 '+esc(c.commandFlows&&c.commandFlows.stage2DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage2CommandMlS)+' · S3 '+esc(c.commandFlows&&c.commandFlows.stage3DesiredGS)+'→'+appliedS3Text(c.commandFlows||{})+'<br>Test mode: <b>'+esc((c.commandFlows&&c.commandFlows.manualTestStatus)||'none')+'</b>';renderTestCommands(c.commandFlows||{},latestAdvisorySummary||{});scope.innerHTML=['off','hyperex','global'].map(x=>'<button class="b s '+(c.scope===x?'active':'')+'" data-scope="'+x+'">'+(x==='off'?'OFF':x==='hyperex'?'HYPEREX ONLY':'GLOBAL')+'</button>').join('');scope.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-scope',{scope:q.dataset.scope});await loadCal()});const last=c.lastCalibration||null;const rows=last&&Array.isArray(last.plateauResults)?last.plateauResults:[];const anchors=last&&last.map&&Array.isArray(last.map.targetAnchors)?last.map.targetAnchors:[];const anchorHtml=anchors.length?'<div style="margin:8px 0"><b>TARGET LUT:</b> '+anchors.map(a=>esc(a.blockId)+' '+esc(a.actualFlow)+' g/s → '+esc(a.commandFlow)+' ml/s ('+esc(a.quality)+')').join(' · ')+'</div>':'';map.innerHTML=rows.length?anchorHtml+'<table><tr><th>Frame</th><th>Block / target</th><th>DE1 cmd</th><th>RAW real g/s</th><th>DE1 flow</th><th>R²</th><th>Status</th></tr>'+rows.map(p=>'<tr><td>'+esc(p.frame)+'</td><td>'+esc((p.blockId||'—')+(p.targetReal!=null?' / '+p.targetReal:'') )+'</td><td>'+esc(p.commandFlow)+'</td><td>'+esc(p.actualFlow)+'</td><td>'+esc(p.machineFlow)+'</td><td>'+esc(p.r2)+'</td><td class="'+(p.acceptedInMap?'good':(p.valid?'':'bad'))+'">'+esc(p.acceptedInMap?'ANCHOR SOURCE':(p.reason||'REJECTED'))+'</td></tr>').join('')+'</table><div style="margin-top:8px">'+esc(c.profileSyncStatus||'')+'</div>':'No calibration run yet. Low Water automatically searches the three HyperEx real-flow targets and generates the LUT only when all targets pass. Full remains the wide engineering staircase.';const cur=c.stage1StartupCorrection||1;startupbox.innerHTML='<b>Stable skip topology:</b> scale feedback is advisory only. Optional S3 DECAY COMP may use 5 profile frames, but S3 subframes advance only by their own timers and never add plugin skipStep calls.'+(Number(cur)!==1?(' <br><span class="bad">Legacy S1 startup factor '+esc(cur)+'× is stored but ignored in v0.1.54.</span> <button id=clearstartup class="b s">CLEAR LEGACY</button>'):'');const cl=$("clearstartup");if(cl)cl.onclick=async()=>{try{await post('startup-clear',{});await loadCal()}catch(e){alert('Clear failed: '+e)}};}catch(e){calstatus.textContent='Calibration status error: '+e}}
 function svgPath(points,xmin,xmax,ymin,ymax){const W=800,H=205,pad=18,dx=Math.max(.001,xmax-xmin),dy=Math.max(.001,ymax-ymin);let out='';for(const q of points){if(!Number.isFinite(q[0])||!Number.isFinite(q[1]))continue;const x=pad+(q[0]-xmin)/dx*(W-pad*2),y=H-pad-(q[1]-ymin)/dy*(H-pad*2);out+=(out?' L ':'M ')+x.toFixed(1)+' '+y.toFixed(1)}return out}
-function renderChart(svg,series,ymin,ymax){if(!svg)return;let all=[];series.forEach(s=>all=all.concat(s.points));if(!all.length){svg.innerHTML='';return}const xs=all.map(p=>p[0]).filter(Number.isFinite),ys=all.map(p=>p[1]).filter(Number.isFinite);const xmin=Math.min(...xs),xmax=Math.max(...xs);if(ymin==null)ymin=Math.min(...ys);if(ymax==null)ymax=Math.max(...ys);if(ymax-ymin<.01)ymax=ymin+1;let h='<line x1="18" y1="187" x2="782" y2="187" stroke="#3a3f47"/><line x1="18" y1="18" x2="18" y2="187" stroke="#3a3f47"/>';for(const s of series){const path=svgPath(s.points,xmin,xmax,ymin,ymax);if(path)h+='<path d="'+path+'" fill="none" stroke="'+s.stroke+'" stroke-width="'+(s.width||1.7)+'" opacity="'+(s.opacity||1)+'"/>'}h+='<text x="24" y="16" fill="#aeb6c2" font-size="10">'+Number(ymax).toFixed(1)+'</text><text x="24" y="184" fill="#aeb6c2" font-size="10">'+Number(ymin).toFixed(1)+'</text>';svg.innerHTML=h}
-function renderCharts(run){if(!run)return;const combined=run.samples||[],raw=run.rawScaleSamples||[];const target=combined.map(s=>[Number(s.tMs)/1000,Number(s.targetFlowMlS)]),machine=combined.map(s=>[Number(s.tMs)/1000,Number(s.machineFlowMlS)]),decaid=combined.map(s=>[Number(s.tMs)/1000,Number(s.decaidWeightFlowGS)]);const rawSlope=[];for(let i=0;i<raw.length;i++){let j=i-1;while(j>0&&Number(raw[i].tMs)-Number(raw[j].tMs)<900)j--;if(j>=0){let reset=false;for(let k=j+1;k<=i;k++)if(raw[k].tareReset){reset=true;break}const dt=(Number(raw[i].scaleTimestampSeconds)-Number(raw[j].scaleTimestampSeconds));if(!reset&&Number.isFinite(dt)&&dt>.25){rawSlope.push([Number(raw[i].tMs)/1000,(Number(raw[i].weightG)-Number(raw[j].weightG))/dt])}}}const flowYs=[...target,...machine,...decaid,...rawSlope].map(p=>p[1]).filter(v=>Number.isFinite(v)&&v>-1&&v<20);const fymax=Math.max(6,flowYs.length?Math.min(12,Math.ceil(Math.max(...flowYs)+.5)):8);renderChart($('flowchart'),[{points:target,stroke:'#f0c75e',width:1.4},{points:machine,stroke:'#71a7ff',width:1.8},{points:decaid,stroke:'#c77dff',width:1.5,opacity:.8},{points:rawSlope,stroke:'#63d89b',width:2.1}],0,fymax);const wp=raw.map(r=>[Number(r.tMs)/1000,Number(r.weightG)]);if(wp.length){const wy=wp.map(p=>p[1]).filter(Number.isFinite);renderChart($('weightchart'),[{points:wp,stroke:'#e5e8ed',width:2}],Math.min(...wy),Math.max(...wy))}}
+function renderChart(svg,series,ymin,ymax,markers){if(!svg)return;let all=[];series.forEach(s=>all=all.concat(s.points));if(!all.length){svg.innerHTML='';return}const xs=all.map(p=>p[0]).filter(Number.isFinite),ys=all.map(p=>p[1]).filter(Number.isFinite);const xmin=Math.min(...xs),xmax=Math.max(...xs);if(ymin==null)ymin=Math.min(...ys);if(ymax==null)ymax=Math.max(...ys);if(ymax-ymin<.01)ymax=ymin+1;let h='<line x1="18" y1="187" x2="782" y2="187" stroke="#3a3f47"/><line x1="18" y1="18" x2="18" y2="187" stroke="#3a3f47"/>';for(const s of series){const path=svgPath(s.points,xmin,xmax,ymin,ymax);if(path)h+='<path d="'+path+'" fill="none" stroke="'+s.stroke+'" stroke-width="'+(s.width||1.7)+'" opacity="'+(s.opacity||1)+'"/>'}h+='<text x="24" y="16" fill="#aeb6c2" font-size="10">'+Number(ymax).toFixed(1)+'</text><text x="24" y="184" fill="#aeb6c2" font-size="10">'+Number(ymin).toFixed(1)+'</text>';for(const q of markers||[]){if(!Number.isFinite(q.x))continue;const xx=18+(q.x-xmin)/Math.max(.001,xmax-xmin)*764;const yy=Number.isFinite(q.y)?187-(q.y-ymin)/Math.max(.001,ymax-ymin)*169:181;const title='<title>'+esc(q.label||'')+'</title>';const tip=' data-tip="'+esc(q.label||'').replace(/"/g,'&quot;')+'"';if(q.shape==='diamond')h+='<path d="M '+xx+' '+(yy-4)+' l 4 4 l -4 4 l -4 -4 Z" fill="'+q.color+'"'+tip+'>'+title+'</path>';else if(q.shape==='square')h+='<rect x="'+(xx-3)+'" y="'+(yy-3)+'" width="6" height="6" fill="'+q.color+'"'+tip+'>'+title+'</rect>';else h+='<circle cx="'+xx+'" cy="'+yy+'" r="3" fill="'+q.color+'"'+tip+'>'+title+'</circle>'}svg.innerHTML=h}
+function liveTrimMarkers(run){return(run.liveFlowTrim&&run.liveFlowTrim.trace||[]).filter(x=>['check','write','machine-target-response'].includes(x.kind)).map(x=>({x:x.tMs/1000,y:x.kind==='check'?x.rawGS:x.commandMlS,shape:x.kind==='write'?'diamond':x.kind==='machine-target-response'?'square':'circle',color:x.kind==='write'?'#ff9c45':x.kind==='machine-target-response'?'#f4e6a5':x.rawGS==null?'#7c8795':'#63d89b',label:x.kind+' @ '+(x.tMs/1000).toFixed(2)+'s · '+(x.kind==='check'?(x.rawGS==null?'no valid RAW regression':x.rawGS+' g/s')+' · '+(x.reason||x.decision):x.commandMlS+' ml/s')}))}
+function renderLiveTrim(run){const q=$('livetrimstatus');if(!q)return;const x=run&&run.liveFlowTrim;if(!x){q.textContent='';return}q.textContent='EXPERIMENTAL LIVE FLOW TRIM · '+x.status+' · checks '+x.checks+'/50 · writes '+x.writes+'/50 · driver ACK '+x.acks+' · target responses '+x.targetConfirmations+' · interval '+x.periodMs+' ms · normal next-shot learning retained; corrected stages require verified stable windows';}
+function renderCharts(run){if(!run)return;const combined=run.samples||[],raw=run.rawScaleSamples||[];const target=combined.map(s=>[Number(s.tMs)/1000,Number(s.targetFlowMlS)]),machine=combined.map(s=>[Number(s.tMs)/1000,Number(s.machineFlowMlS)]),decaid=combined.map(s=>[Number(s.tMs)/1000,Number(s.decaidWeightFlowGS)]);const cupTarget=combined.map(s=>[Number(s.tMs)/1000,Number(s.desiredRealFlowGS)]);const rawSlope=[];for(let i=0;i<raw.length;i++){let j=i-1;while(j>0&&Number(raw[i].tMs)-Number(raw[j].tMs)<900)j--;if(j>=0){let reset=false;for(let k=j+1;k<=i;k++)if(raw[k].tareReset){reset=true;break}const dt=(Number(raw[i].scaleTimestampSeconds)-Number(raw[j].scaleTimestampSeconds));if(!reset&&Number.isFinite(dt)&&dt>.25){rawSlope.push([Number(raw[i].tMs)/1000,(Number(raw[i].weightG)-Number(raw[j].weightG))/dt])}}}const flowYs=[...target,...machine,...decaid,...rawSlope].map(p=>p[1]).filter(v=>Number.isFinite(v)&&v>-1&&v<20);const fymax=Math.max(6,flowYs.length?Math.min(12,Math.ceil(Math.max(...flowYs)+.5)):8);renderChart($('flowchart'),[{points:cupTarget,stroke:'#f58d9a',width:1.3},{points:target,stroke:'#f0c75e',width:1.4},{points:machine,stroke:'#71a7ff',width:1.8},{points:decaid,stroke:'#c77dff',width:1.5,opacity:.8},{points:rawSlope,stroke:'#63d89b',width:2.1},{points:(run.liveFlowTrim&&run.liveFlowTrim.trace||[]).filter(x=>x.kind==='write').map(x=>[x.tMs/1000,x.commandMlS]),stroke:'#ff9c45',width:2}],0,fymax,liveTrimMarkers(run));const wp=raw.map(r=>[Number(r.tMs)/1000,Number(r.weightG)]);if(wp.length){const wy=wp.map(p=>p[1]).filter(Number.isFinite);renderChart($('weightchart'),[{points:wp,stroke:'#e5e8ed',width:2}],Math.min(...wy),Math.max(...wy))}}
 function validationClass(x){return x==='HIT'?'good':x==='NEAR'||x==='TRANSIENT'?'':'bad'}
 function validationRow(label,p){if(!p)return '<tr><td>'+label+'</td><td colspan=7>—</td></tr>';return '<tr><td>'+label+'</td><td>'+esc(p.desiredRealFlowGS)+'</td><td>'+esc(p.machineFlowAvg)+'</td><td>'+esc(p.gflowAvg)+'</td><td><b>'+esc(p.rawRegressionGS)+'</b></td><td>'+esc(p.rawRegressionR2)+'</td><td>'+esc(p.rawRegressionSeconds)+'s</td><td class="'+validationClass(p.validationStatus)+'">'+esc(p.validationStatus)+' '+(p.rawErrorPct==null?'':('('+p.rawErrorPct+'%)'))+'</td></tr>'}
 function advisoryClass(a){return !a?'':a.action==='HOLD'?'good':a.confidence==='INSUFFICIENT'?'bad':''}
@@ -2520,8 +2544,8 @@ function renderTestCommands(c,a){if(!testcommands)return;testcommands.innerHTML=
 async function applyTestCommands(){const stages={};for(const key of ['stage1','stage2','stage3']){const mode=$('mode_'+key).value;const command=Number($('cmd_'+key).value);if(mode==='manual'&&(!Number.isFinite(command)||command<0.10||command>8.00)){alert(key.toUpperCase()+' manual command must be 0.10–8.00 ml/s.');return}stages[key]={mode,command}}const sm=$('s3shape_mode');const s3Shape={enabled:!!sm&&sm.value==='decay',earlyCommand:Number($('s3shape_early').value),earlySeconds:Number($('s3shape_early_s').value),midCommand:Number($('s3shape_mid').value),midSeconds:Number($('s3shape_mid_s').value),lateCommand:Number($('s3shape_late').value)};if(s3Shape.enabled){if([s3Shape.earlyCommand,s3Shape.midCommand,s3Shape.lateCommand].some(x=>!Number.isFinite(x)||x<.10||x>8)){alert('S3 shape commands must be 0.10–8.00 ml/s.');return}if(s3Shape.earlyCommand>s3Shape.midCommand||s3Shape.midCommand>s3Shape.lateCommand){alert('S3 DECAY COMP commands must be non-decreasing: EARLY ≤ MID ≤ LATE.');return}if(!Number.isFinite(s3Shape.earlySeconds)||s3Shape.earlySeconds<3||s3Shape.earlySeconds>30||!Number.isFinite(s3Shape.midSeconds)||s3Shape.midSeconds<3||s3Shape.midSeconds>30){alert('S3 EARLY/MID times must be 3–30 seconds.');return}}if(!confirm('Apply these TEST commands to HyperEx?\\n\\nS1/S2/manual flat commands are static. S3 DECAY COMP, if enabled, advances only by profile time and adds NO plugin skipStep calls. Calibration LUT remains unchanged. Use empty-basket validation first.'))return;try{await post('test-command-set',{stages,s3Shape});await loadDiag()}catch(e){alert('Apply failed: '+e)}}
 async function returnAllToLut(){if(!confirm('Return S1/S2/S3 to AUTO / LUT and clear all manual test overrides, including S3 shape?'))return;try{await post('test-command-clear',{});await loadDiag()}catch(e){alert('Reset failed: '+e)}}
 
-async function loadDiag(){b.style.display='none';copy.style.display='block';diag.style.display='block';t.textContent='DIAGNOSTICS / FLOW CAL';d.textContent='STEP 1 calibrates the physical real-flow LUT. STEP 2 measures every completed shot and automatically adapts S1/S2/S3 for the next shot only. STEP 3 is manual engineering; STEP 4 exports CSV.';try{const jr=await fetch(base+'/diagnostics');if(jr.ok){const j=await jr.json(),s=j.summary||{};renderCharts(j.run);renderRunCommands(s);if(s.kind==='hyperex'){validation.innerHTML=stat('S1 target / RAW reg',(s.stage1?(esc(s.stage1.desiredRealFlowGS)+' / '+esc(s.stage1.rawRegressionGS)):'—'))+stat('S2 target / RAW reg',(s.stage2?(esc(s.stage2.desiredRealFlowGS)+' / '+esc(s.stage2.rawRegressionGS)):'—'))+stat('S3 target / RAW reg',(s.stage3?(esc(s.stage3.desiredRealFlowGS)+' / '+esc(s.stage3.rawRegressionGS)):'—'));validationtable.innerHTML='<table><tr><th>Stage</th><th>Target g/s</th><th>DE1 Flow</th><th>Decaid</th><th>RAW regression</th><th>R²</th><th>Window</th><th>Status / error</th></tr>'+validationRow('S1',s.stage1)+validationRow('S2',s.stage2)+validationRow('S3',s.stage3)+'</table>';latestAdvisorySummary=s.advisory||null;latestStage3Stability=s.stage3Stability||null;latestNextShotAdaptive=s.nextShotAdaptive||null;renderStability(s);renderAdaptive(s);renderAdvisory(s)}else{validation.innerHTML=stat('LATEST RUN',s.kind||'calibration');validationtable.innerHTML='<span class="small">Latest diagnostic run is not a HyperEx shot. Run HyperEx to populate current-shot validation.</span>';latestAdvisorySummary=null;latestStage3Stability=null;latestNextShotAdaptive=null;latestAdaptiveSummary=null;if(stability)stability.innerHTML='<span class="small">S1/S3 stability diagnostics are generated only from a HyperEx shot.</span>';if(adaptive)adaptive.innerHTML='<span class="small"><b>NEW INSTALL / NO PREVIOUS SHOT</b><br>Run one complete HyperEx validation shot to generate the first next-shot suggestion.</span>';if(advisory)advisory.innerHTML='<span class="small">Reference advice is generated only from a HyperEx shot.</span>'}stats.innerHTML=stat('RAW SCALE WEIGHT',s.lastRawScaleWeightG??'—')+stat('RAW instantaneous dW/dt',s.lastRawScaleDwDtGS??'—')+stat('Decaid weightFlow',s.lastDecaidWeightFlowGS??'—')+stat('RUN RESULT',s.result||'—')+stat('COMBINED SAMPLES',s.sampleCount||0)+stat('RAW SCALE SAMPLES',s.rawScaleSampleCount||0);m.textContent=(s.result||'')+' · '+(s.sampleCount||0)+' combined · '+(s.rawScaleSampleCount||0)+' raw scale';const cr=await fetch(base+'/diagnostics-csv');if(cr.ok)csv.value=await cr.text();}else{renderRunCommands(null);validation.innerHTML=stat('LAST RUN','none yet');validationtable.innerHTML='';latestAdaptiveSummary=null;if(stability)stability.innerHTML='';if(adaptive)adaptive.innerHTML='<span class="small"><b>NEW INSTALL / NO PREVIOUS SHOT</b><br>Run one complete HyperEx validation shot to generate the first next-shot suggestion.</span>';if(advisory)advisory.innerHTML='';stats.innerHTML=''}}catch(e){if(runcommands)runcommands.innerHTML='<span class="bad">Latest-shot command snapshot unavailable: '+esc(e)+'</span>';validation.innerHTML=stat('DIAG ERROR',esc(e));validationtable.innerHTML='';latestAdaptiveSummary=null;if(stability)stability.innerHTML='';if(adaptive)adaptive.innerHTML='';if(advisory)advisory.innerHTML='';stats.innerHTML=''}await loadCal();await loadAdvancedSettings()}
-const saveAdv=$('saveadvanced');if(saveAdv)saveAdv.onclick=saveAdvancedSettings;$('applytest').onclick=applyTestCommands;$('returnlut').onclick=returnAllToLut;
+async function loadDiag(){b.style.display='none';copy.style.display='block';diag.style.display='block';t.textContent='DIAGNOSTICS / FLOW CAL';d.textContent='STEP 1 calibrates the physical real-flow LUT. STEP 2 measures every completed shot and automatically adapts S1/S2/S3 for the next shot only. STEP 3 is manual engineering; STEP 4 exports CSV.';try{const jr=await fetch(base+'/diagnostics');if(jr.ok){const j=await jr.json(),s=j.summary||{};renderLiveTrim(j.run);renderCharts(j.run);renderRunCommands(s);if(s.kind==='hyperex'){validation.innerHTML=stat('S1 target / RAW reg',(s.stage1?(esc(s.stage1.desiredRealFlowGS)+' / '+esc(s.stage1.rawRegressionGS)):'—'))+stat('S2 target / RAW reg',(s.stage2?(esc(s.stage2.desiredRealFlowGS)+' / '+esc(s.stage2.rawRegressionGS)):'—'))+stat('S3 target / RAW reg',(s.stage3?(esc(s.stage3.desiredRealFlowGS)+' / '+esc(s.stage3.rawRegressionGS)):'—'));validationtable.innerHTML='<table><tr><th>Stage</th><th>Target g/s</th><th>DE1 Flow</th><th>Decaid</th><th>RAW regression</th><th>R²</th><th>Window</th><th>Status / error</th></tr>'+validationRow('S1',s.stage1)+validationRow('S2',s.stage2)+validationRow('S3',s.stage3)+'</table>';latestAdvisorySummary=s.advisory||null;latestStage3Stability=s.stage3Stability||null;latestNextShotAdaptive=s.nextShotAdaptive||null;renderStability(s);renderAdaptive(s);renderAdvisory(s)}else{validation.innerHTML=stat('LATEST RUN',s.kind||'calibration');validationtable.innerHTML='<span class="small">Latest diagnostic run is not a HyperEx shot. Run HyperEx to populate current-shot validation.</span>';latestAdvisorySummary=null;latestStage3Stability=null;latestNextShotAdaptive=null;latestAdaptiveSummary=null;if(stability)stability.innerHTML='<span class="small">S1/S3 stability diagnostics are generated only from a HyperEx shot.</span>';if(adaptive)adaptive.innerHTML='<span class="small"><b>NEW INSTALL / NO PREVIOUS SHOT</b><br>Run one complete HyperEx validation shot to generate the first next-shot suggestion.</span>';if(advisory)advisory.innerHTML='<span class="small">Reference advice is generated only from a HyperEx shot.</span>'}stats.innerHTML=stat('RAW SCALE WEIGHT',s.lastRawScaleWeightG??'—')+stat('RAW instantaneous dW/dt',s.lastRawScaleDwDtGS??'—')+stat('Decaid weightFlow',s.lastDecaidWeightFlowGS??'—')+stat('RUN RESULT',s.result||'—')+stat('COMBINED SAMPLES',s.sampleCount||0)+stat('RAW SCALE SAMPLES',s.rawScaleSampleCount||0);m.textContent=(s.result||'')+' · '+(s.sampleCount||0)+' combined · '+(s.rawScaleSampleCount||0)+' raw scale';const cr=await fetch(base+'/diagnostics-csv');if(cr.ok)csv.value=await cr.text();}else{renderRunCommands(null);validation.innerHTML=stat('LAST RUN','none yet');validationtable.innerHTML='';latestAdaptiveSummary=null;if(stability)stability.innerHTML='';if(adaptive)adaptive.innerHTML='<span class="small"><b>NEW INSTALL / NO PREVIOUS SHOT</b><br>Run one complete HyperEx validation shot to generate the first next-shot suggestion.</span>';if(advisory)advisory.innerHTML='';stats.innerHTML=''}}catch(e){if(runcommands)runcommands.innerHTML='<span class="bad">Latest-shot command snapshot unavailable: '+esc(e)+'</span>';validation.innerHTML=stat('DIAG ERROR',esc(e));validationtable.innerHTML='';latestAdaptiveSummary=null;if(stability)stability.innerHTML='';if(adaptive)adaptive.innerHTML='';if(advisory)advisory.innerHTML='';stats.innerHTML=''}await loadCal();await loadAdvancedSettings()}
+const flowSvg=$('flowchart');if(flowSvg)flowSvg.onclick=e=>{const q=e.target.closest('[data-tip]');if(q&&$('flowpointdetail'))$('flowpointdetail').textContent=q.getAttribute('data-tip')};const saveAdv=$('saveadvanced');if(saveAdv)saveAdv.onclick=saveAdvancedSettings;$('applytest').onclick=applyTestCommands;$('returnlut').onclick=returnAllToLut;
 $('prepare').onclick=async()=>{let c={calibrationModeLabel:'Low Water',calibrationSteps:9,calibrationStepSeconds:7.5,nominalCommandWaterMl:95,recommendedContainerMl:300,calibrationHardStopG:240,primeFlow:3,primeSeconds:3,waterPreflight:{status:'unknown',available:false,message:'Tank level unavailable'}};try{const rr=await fetch(base+'/calibration-status');if(rr.ok)c=await rr.json()}catch(_){}const w=c.waterPreflight||{};if(w.status==='block'){alert('WATER PREFLIGHT BLOCKED.\\n\\n'+(w.message||'DE1 tank level is too close to/below the refill threshold.')+'\\n\\nRefill the tank and try again.');return}let allowUnknown=false;if(w.status==='unknown'||!w.available){if(!confirm('DE1 tank level is unavailable or stale.\\n\\nThe plugin cannot verify tank water automatically. Continue only if you have manually checked the tank.'))return;allowUnknown=true}else if(w.status==='warn'){if(!confirm('DE1 tank water margin is low.\\n\\n'+(w.message||'')+'\\n\\nContinue anyway?'))return}const msg='EMPTY BASKET ONLY · '+c.calibrationModeLabel+' CALIBRATION.\\n\\nPrime '+c.primeFlow+' ml/s × '+c.primeSeconds+' s, then '+c.calibrationSteps+' target/search plateaus × '+c.calibrationStepSeconds+' s.\\nNominal DE1 commanded water: ≈'+c.nominalCommandWaterMl+' ml.\\nActual-water safety stop: ≈'+c.calibrationHardStopG+' g.\\n\\nUse a '+c.recommendedContainerMl+' ml or larger catch vessel.\\nTare the scale, then start Espresso manually. Do not remove the vessel until Idle.\\n\\nContinue?';if(!confirm(msg))return;try{await post('calibration-prepare',{allowUnknownWater:allowUnknown,allowLowMargin:w.status==='warn'});alert(c.calibrationModeLabel+' calibration profile selected. EMPTY BASKET. Tare scale, start Espresso, and leave the vessel in place until Idle.');await loadCal()}catch(e){alert('Prepare failed: '+e)}};
 $('sync').onclick=async()=>{try{await post('calibration-sync',{});await loadCal()}catch(e){alert('Sync failed: '+e)}};
 $('suggested').onclick=async()=>{try{await post('calibration-use-suggested',{});alert('Suggested multiplier will be used for the NEXT calibration run. Re-run Flow Cal to create a LUT tied to that multiplier.');await loadCal()}catch(e){alert('Action failed: '+e)}};
@@ -2570,6 +2594,8 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
   }
 
   function clearAllTimers() {
+    stopLiveTrim("cancelled");
+    cancelDirectStartTest();
     clearTimer("dumpTimer");
     clearTimer("dumpSettleTimer");
     clearTimer("dumpFallbackTimer");
@@ -2671,7 +2697,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     return {
       title: calibrationProfileTitle(normalizedMode),
       author: "ladiosupp / HyperEx",
-      notes: `EMPTY BASKET ONLY. HyperEx v0.1.52 ${wp.modeLabel} real-flow calibration. Prime ${wp.primeFlow.toFixed(2)} ml/s × ${wp.primeSeconds.toFixed(1)} s, then ${wp.steps} ${wp.algorithm === "target-lut" ? "target-search" : "calibration"} plateaus × ${wp.stepSeconds.toFixed(1)} s; nominal DE1 commanded water ≈${wp.nominalCommandWaterMl} ml. Use a ${wp.recommendedContainerMl} ml or larger catch vessel. The plugin actively stops calibration at about ${wp.hardStopG} g actual collected water to preserve margin below 300 ml. Tank level is checked before PREPARE when live DE1 water-level telemetry is available. Tare the scale, start Espresso manually, and leave the vessel in place until Idle.`,
+      notes: `EMPTY BASKET ONLY. HyperEx v0.1.54 ${wp.modeLabel} real-flow calibration. Prime ${wp.primeFlow.toFixed(2)} ml/s × ${wp.primeSeconds.toFixed(1)} s, then ${wp.steps} ${wp.algorithm === "target-lut" ? "target-search" : "calibration"} plateaus × ${wp.stepSeconds.toFixed(1)} s; nominal DE1 commanded water ≈${wp.nominalCommandWaterMl} ml. Use a ${wp.recommendedContainerMl} ml or larger catch vessel. The plugin actively stops calibration at about ${wp.hardStopG} g actual collected water to preserve margin below 300 ml. Tank level is checked before PREPARE when live DE1 water-level telemetry is available. Tare the scale, start Espresso manually, and leave the vessel in place until Idle.`,
       beverage_type: "espresso",
       steps: [
         ...(wp.primeSeconds > 0 ? [{
@@ -3204,6 +3230,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
 
     if (state.phase === "idle" || state.phase === "aborted") return;
 
+    observeDirectStartWeight(snapshot, weight, receivedAtMs);
     updateCumulativeWeight(weight);
     diagnosticSample("scale", false);
 
@@ -3637,7 +3664,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     refreshLearningStage();
     const map = state.calibrationMap;
     return {
-      pluginVersion: '0.1.52',
+      pluginVersion: '0.1.54',
       basketContext: state.cfg ? state.cfg.basketContext : "unknown",
       learningStage: state.learningStage,
       baselinePrior: baselineFeedForwardPayload(),
@@ -3850,6 +3877,10 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       state.ghcPromptStartedAtMs = 0;
     }
     state.phase = "idle";
+    if (state.liveTrimDirty) {
+      invalidateProfileTruth("Experimental raw frame changed; restoring original profile before next shot", true);
+      state.liveTrimDirty = false;
+    }
     state.lowFlowSamples = 0;
     state.idleConfirmedAtMs = 0;
     state.dumpAcceptedAtMs = 0;
@@ -3906,6 +3937,8 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     if (state.autoApplyTimer !== null) state.autoApplyLastStatus = {status:"cancelled",at:new Date().toISOString(),message:"New shot started before pending adaptation; current shot commands retained"};
     clearAllTimers();
     state.phase = "stage1";
+    state.directStartTestEnabledForRun = !!state.cfg.directDriverStartTest;
+    state.directStartTest = null;
     state.lowFlowSamples = 0;
     state.idleConfirmedAtMs = 0;
     state.hardPressureSamples = 0;
@@ -3919,6 +3952,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     state.lastArmRequestAtMs = 0;
     resetWeightTracking(rawWeight);
     startDiagnostics("hyperex");
+    initializeLiveTrim();
     diagnosticSample("sequence-start", true);
 
     state.noScaleTimer = setTimeout(() => {
@@ -4134,12 +4168,293 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       emitSkinChanged();
       diagnosticEvent("soak_complete_arm1", { cumulativeWeightG: round(state.cumulativeWeight, 3) });
       log(`Soak complete at cumulative ${state.cumulativeWeight.toFixed(2)} g. Sending second-stage Espresso arm request now.`);
+      if (state.directStartTestEnabledForRun) {
+        beginDirectStartTest();
+        return;
+      }
       requestMachineState("espresso")
         .then(() => startRestartPoll())
         .catch((error) => abortSequence(`Espresso restart failed: ${error.message || error}`, false));
     }, state.cfg.soakSeconds * 1000);
   }
 
+
+
+  // Experimental REST request -> raw requestedState write. Same firmware state value,
+  // not a GHC bypass. No retries, no additional skip transitions.
+
+  // User-authorized experiment: direct writes to the current flow frame, never skipStep.
+  // Firmware live-frame semantics are unverified; ACK is distinct from target feedback.
+
+  function liveTrimLearningView(run,phase) {
+    if(!run||!run.config||!run.config.experimentalLiveTrim)return run;
+    const trace=run.liveFlowTrim&&run.liveFlowTrim.trace||[];
+    const frames=phase==="stage2"?[1]:(run.config.stage3Shape&&run.config.stage3Shape.enabled?[2,3,4]:[2]);
+    const changed=frames.filter(f=>trace.some(x=>x.kind==="write"&&x.frame===f));
+    if(!changed.length)return run; // S1 and untouched phases retain the existing evidence path.
+    const bounds={},commands={};
+    for(const frame of changed){
+      const last=trace.filter(x=>x.kind==="write"&&x.frame===frame).slice(-1)[0];
+      const response=trace.find(x=>x.kind==="machine-target-response"&&x.frame===frame&&x.tMs>=last.tMs&&Math.abs(x.commandMlS-last.commandMlS)<0.001);
+      if(!response)return null;
+      bounds[frame]=response.tMs+2000;commands[frame]=last.commandMlS;
+      const raw=(run.rawScaleSamples||[]).filter(x=>x.phase===phase&&Number(x.profileFrame)===frame&&x.tMs>=bounds[frame]);
+      if(raw.length<6||raw[raw.length-1].tMs-raw[0].tMs<5000)return null;
+    }
+    const keep=x=>x.phase!==phase||bounds[Number(x.profileFrame)]===undefined||x.tMs>=bounds[Number(x.profileFrame)];
+    const c={...run.config,liveTrimLearningBasis:"verified stable-command windows after 2s settle"};
+    if(phase==="stage2")c.stage2CommandMlS=commands[1];
+    else if(c.stage3Shape&&c.stage3Shape.enabled){
+      c.stage3Shape={...c.stage3Shape};
+      for(const [frame,key] of [[2,"earlyCommand"],[3,"midCommand"],[4,"lateCommand"]])if(commands[frame]!==undefined)c.stage3Shape[key]=commands[frame];
+      c.stage3CommandMlS=c.stage3Shape.midCommand;
+    }else c.stage3CommandMlS=commands[2];
+    return {...run,config:c,rawScaleSamples:(run.rawScaleSamples||[]).filter(keep),samples:(run.samples||[]).filter(keep)};
+  }
+
+  function liveTrimPayload() { return state.liveTrim ? state.liveTrim.report : null; }
+  function liveTrimRecord(kind, extra) {
+    const t=state.liveTrim;if(!t)return;
+    const row={kind,tMs:Math.max(0,Date.now()-t.run.startedAtMs),...(extra||{})};
+    t.report.trace.push(row);
+    diagnosticEvent("live_flow_trim",row);
+  }
+  function closeLiveTrim(t) {
+    if(!t||!t.handle)return;const h=t.handle;t.handle=null;
+    host.transport.close(h).catch(()=>{});
+  }
+  function stopLiveTrim(reason) {
+    clearTimer("liveTrimTimer");
+    const t=state.liveTrim;if(!t)return;
+    if(t.active){t.active=false;t.report.status=reason;liveTrimRecord("stopped",{reason});}
+    closeLiveTrim(t);
+  }
+  function initializeLiveTrim() {
+    state.liveTrim=null;
+    const run=state.diagnosticCurrent;
+    if(!state.cfg.liveFlowTrimTest||!run)return;
+    const c=run.config;
+    c.experimentalLiveTrim=true;
+    const seconds=(c.stage2Weight-c.stage1Weight)/c.stage2Flow+(c.finalWeight-c.stage2Weight)/c.stage3Flow;
+    const report={enabled:true,status:"armed-for-S2",periodMs:Math.max(300,Math.round(seconds*1000/50)),maxChecks:50,maxWrites:50,
+      checks:0,writes:0,acks:0,targetConfirmations:0,deadbandPct:6,trace:[],adaptiveMode:"normal-shot-to-shot-with-verified-stable-command-windows"};
+    run.liveFlowTrim=report;
+    state.liveTrim={active:true,started:false,handle:null,run,report,phase:null,frame:null,frameAt:0,
+      commands:{},pending:null,profile:JSON.parse(JSON.stringify(profileObject()))};
+    liveTrimRecord("armed",{periodMs:report.periodMs});
+  }
+  async function startLiveTrim() {
+    const t=state.liveTrim;
+    if(!t||!t.active||t.started)return;t.started=true;
+    const live=()=>state.liveTrim===t&&t.active&&state.diagnosticCurrent===t.run&&["stage2","stage3"].includes(state.phase);
+    // Schedule before awaits: opening/API calls cannot strand the experiment.
+    scheduleLiveTrimTick(t);
+    try {
+      const rr=await api("/machine/info",{method:"GET"});const info=await rr.json();
+      if(!live())return;
+      // This encoder is for stock DE1 only, not Bengle's 0.1-unit v2 protocol.
+      if(!info||typeof info.model!=="string"||!/^DE1/i.test(info.model))throw new Error("stock DE1 model not confirmed");
+      const opened=await host.transport.open({kind:"websocket",url:"ws://localhost:8080/ws/v1/machine/raw"});
+      if(!opened||!opened.handle)throw new Error("raw socket missing handle");
+      if(!live()){host.transport.close(opened.handle).catch(()=>{});return;}
+      t.handle=opened.handle;t.report.status="monitoring";
+      host.transport.onEvent(t.handle,event=>{
+        if(!live())return;
+        if(event.type==="close"||event.type==="error"){t.handle=null;stopLiveTrim("raw-transport-failed");return;}
+        if(event.type!=="data"||!t.pending)return;
+        try {
+          const x=typeof event.data==="string"?JSON.parse(event.data):event.data;
+          if(x.type==="response"&&x.operation==="write"&&x.characteristicUUID==="A010"&&!t.pending.ack){
+            t.pending.ack=true;t.report.acks++;
+            liveTrimRecord("driver-ack",{frame:t.pending.frame,latencyMs:Date.now()-t.pending.at});
+          }
+        }catch(_){}
+      });
+    }catch(error){if(live())stopLiveTrim(`setup-failed: ${error.message||error}`);}
+  }
+  function scheduleLiveTrimTick(t) {
+    if(!t.active||state.liveTrim!==t)return;
+    state.liveTrimTimer=setTimeout(()=>{
+      state.liveTrimTimer=null;
+      liveTrimTick(t).catch(error=>{if(state.liveTrim===t&&t.active){stopLiveTrim(`write-failed: ${error.message||error}`);abortSequence("Live flow driver write failed",true);}});
+    },t.report.periodMs);
+  }
+  function observeLiveTrimMachine(machine) {
+    const t=state.liveTrim;if(!t||!t.active||!t.started)return;
+    if(!["stage2","stage3"].includes(state.phase))return;
+    const frame=finiteOrNull(machine.profileFrame);
+    if(frame!==t.frame||state.phase!==t.phase){t.frame=frame;t.phase=state.phase;t.frameAt=Date.now();}
+    const p=t.pending;
+    if(p&&machine.machineState==="espresso"&&machine.telemetryValid&&frame===p.frame&&
+       finiteOrNull(machine.targetFlow)!==null&&Math.abs(machine.targetFlow-p.command)<0.02&&!p.targetSeen){
+      p.targetSeen=true;t.report.targetConfirmations++;
+      liveTrimRecord("machine-target-response",{frame,commandMlS:p.command,latencyMs:Date.now()-p.at});
+    }
+  }
+  function encodeLiveFlowFrame(step,frame,command) {
+    if(!step||step.pump!=="flow"||step.exit||!Number.isInteger(frame)||frame<1||frame>4)throw new Error("unsupported frame");
+    if(!Number.isFinite(command)||command<LIMITS.commandFlowMin||command>LIMITS.commandFlowMax)throw new Error("flow out of bounds");
+    const temp=Number(step.temperature),seconds=Number(step.seconds),volume=Number(step.volume);
+    if(!Number.isFinite(temp)||temp<70||temp>100||!Number.isFinite(seconds)||seconds<0||!Number.isFinite(volume)||volume!==0)throw new Error("unsupported frame metadata");
+    // Exactly match Decaid stock-DE1 frame encoding; preserve sensor, transition,
+    // temperature, duration and unlimited-volume flag. Extended limiter frame untouched.
+    const flags=0x40|0x01|(step.sensor==="water"?0x10:0)|(step.transition==="smooth"?0x20:0);
+    const duration=seconds===0?0:seconds>=12.75?(0x80|Math.min(127,Math.floor(seconds+0.5))):Math.floor(seconds*10+0.5);
+    const bytes=[frame,flags,Math.floor(command*16+0.5),Math.floor(temp*2+0.5),duration,0,4,0];
+    return bytes.map(x=>x.toString(16).padStart(2,"0").toUpperCase()).join("");
+  }
+  function liveTrimRegression(t) {
+    const now=Date.now(),raw=t.run.rawScaleSamples||[],seen=new Set(),points=[];
+    for(const x of raw){
+      if(x.phase!==state.phase||Number(x.profileFrame)!==t.frame||x.tMs<t.frameAt-t.run.startedAtMs||now-t.run.startedAtMs-x.tMs>1600)continue;
+      if(x.tareReset){points.length=0;seen.clear();continue;}
+      const stamp=finiteOrNull(x.scaleTimestampSeconds),weight=finiteOrNull(x.weightG);
+      if(stamp===null||weight===null||seen.has(stamp))continue;
+      if(points.length&&(stamp<=points[points.length-1].x||stamp-points[points.length-1].x>0.6)){points.length=0;}
+      seen.add(stamp);points.push({x:stamp,y:weight});
+    }
+    if(points.length<6||points[points.length-1].x-points[0].x<1.2)return null;
+    const r=linearRegression(points);return r&&r.r2>=0.90&&r.slope>0?r:null;
+  }
+  async function liveTrimTick(t) {
+    const live=()=>state.liveTrim===t&&t.active&&state.diagnosticCurrent===t.run&&["stage2","stage3"].includes(state.phase);
+    if(!live())return;
+    if(t.report.checks>=50){stopLiveTrim("50-check-budget-complete");return;}
+    t.report.checks++;
+    const row={check:t.report.checks,frame:t.frame,phase:state.phase,decision:"hold"};
+    const checkReg=liveTrimRegression(t);
+    if(checkReg)row.rawGS=round(checkReg.slope,3);
+    try {
+      if(t.pending){
+        const p=t.pending;
+        if(Date.now()-p.at>Math.max(2000,t.report.periodMs*2)){
+          if(!p.ack){stopLiveTrim("driver-ack-timeout");abortSequence("Live flow driver acknowledgement timeout",true);return;}
+          if(!p.targetSeen){stopLiveTrim("driver-ack-but-no-machine-target-response");return;}
+          t.pending=null;
+        }else {row.reason="waiting-for-write-response";return;}
+      }
+      if(!t.handle){row.reason="raw-socket-not-ready";return;}
+      if(state.stage2SkipSent&&state.phase==="stage2"){row.reason="stage-transition";return;}
+      const frame=finiteOrNull(state.lastFrame);
+      if(frame===null||!Number.isInteger(frame)||(state.phase==="stage2"?frame!==1:frame<2||frame>=t.profile.steps.length)){row.reason="frame-not-confirmed";return;}
+      if(frame!==t.frame||state.phase!==t.phase){t.frame=frame;t.phase=state.phase;t.frameAt=Date.now();row.reason="frame-settle";return;}
+      if(Date.now()-t.frameAt<1600||Date.now()-state.latestScaleAtMs>600||Date.now()-state.lastMachineAtMs>600||!state.lastMachineTelemetryValid||state.lastMachineState!=="espresso"||!["preinfusion","pouring"].includes(state.lastSubstate)){row.reason="settling-or-stale-telemetry";return;}
+      const reg=liveTrimRegression(t);if(!reg){row.reason="raw-regression-insufficient";return;}
+      const target=state.phase==="stage2"?t.run.config.stage2Flow:t.run.config.stage3Flow;
+      row.rawGS=round(reg.slope,3);row.targetGS=target;row.errorPct=round((reg.slope/target-1)*100,2);row.r2=round(reg.r2,4);
+      if(Math.abs(reg.slope/target-1)<=0.06){row.reason="inside-6pct-band";return;}
+      const step=t.profile.steps[frame],base=Math.floor(Number(step.flow)*16+0.5)/16;
+      const command=Number.isFinite(t.commands[frame])?t.commands[frame]:base;
+      const limiter=Number(step.limiter&&step.limiter.value);
+      if(reg.slope<target&&(!Number.isFinite(limiter)||state.lastPressure>=0.95*limiter||state.lastFlow<command*0.7)){row.reason="pressure-or-actuator-limited";return;}
+      // One native flow quantum per correction. Stay within ±20% of baseline.
+      const candidate=Math.round((command+(reg.slope<target?1:-1)/16)*16)/16;
+      if(candidate<LIMITS.commandFlowMin||candidate>LIMITS.commandFlowMax||candidate<base*0.8||candidate>base*1.2){row.reason="command-bound";return;}
+      if(t.report.writes>=50){row.reason="50-write-budget";return;}
+      const payload=encodeLiveFlowFrame(step,frame,candidate);
+      // All preconditions are synchronous immediately before dispatch. No awaiting
+      // GET/profile upload between frame validation and this single raw write.
+      if(!live()||Number(state.lastFrame)!==frame||state.commandBusy){row.reason="frame-changed-or-command-busy";return;}
+      const p={frame,command:candidate,at:Date.now(),ack:false,targetSeen:false};t.pending=p;
+      t.commands[frame]=candidate;t.report.writes++;state.liveTrimDirty=true;
+      liveTrimRecord("write",{frame,commandMlS:candidate,previousMlS:command,rawGS:row.rawGS,targetGS:target,payload});
+      row.decision="write";row.commandMlS=candidate;
+      await host.transport.send(t.handle,{type:"text",data:JSON.stringify({type:"request",operation:"write",characteristicUUID:"A010",payload})});
+    }finally{
+      if(state.liveTrim===t){liveTrimRecord("check",row);if(live())scheduleLiveTrimTick(t);}
+    }
+  }
+
+  function directStartTestPayload() {
+    const t = state.directStartTest;
+    if (!t) return null;
+    return {active:t.active,status:t.status,requestAtMs:t.requestAtMs,writeAtMs:t.writeAtMs,
+      rawWriteAcknowledged:!!t.rawWriteAcknowledged,machineConfirmed:!!t.machineConfirmed,
+      sustainedWeightConfirmed:!!t.sustainedWeightConfirmed,deadlineMs:t.writeAtMs ? t.writeAtMs+20000 : null};
+  }
+  function directTestEvent(status) {
+    const t=state.directStartTest;if(!t)return;
+    t.status=status;
+    diagnosticEvent("direct_driver_start_test", directStartTestPayload());
+    log(`DIRECT START TEST: ${status}`);emitSkinChanged();
+  }
+  function closeDirectTestTransport(t) {
+    if (!t || !t.handle) return;
+    const handle=t.handle;t.handle=null;
+    host.transport.close(handle).catch(error=>log(`Direct test socket close: ${error.message||error}`));
+  }
+  function cancelDirectStartTest() {
+    clearTimer("directStartTestTimer");
+    const t=state.directStartTest;
+    if(t){if(t.active){directTestEvent("cancelled");t.active=false;}closeDirectTestTransport(t);}
+  }
+  function directTestFailed(t,reason) {
+    if(state.directStartTest!==t||!t.active)return;
+    directTestEvent(reason);t.active=false;closeDirectTestTransport(t);
+    abortSequence(`Direct driver test: ${reason}`,true);
+  }
+  async function beginDirectStartTest() {
+    const t={active:true,status:"requesting-espresso",requestAtMs:Date.now(),writeAtMs:null,
+      handle:null,machineConfirmed:false,sustainedWeightConfirmed:false,last:null,rise:null,
+      minimumScaleStamp:scaleTimestampSeconds(state.latestScaleTimestamp)};
+    state.directStartTest=t;directTestEvent(t.status);
+    const live=()=>state.directStartTest===t&&t.active&&["restart_wait","stage2","stage3"].includes(state.phase);
+    // Bound preparation too; no delayed write after abort/unload/new shot.
+    state.directStartTestTimer=setTimeout(()=>directTestFailed(t,"request/open-timeout"),5000);
+    try {
+      await requestMachineState("espresso");
+      if(!live())return;
+      directTestEvent("espresso-request-accepted");
+      const opened=await host.transport.open({kind:"websocket",url:"ws://localhost:8080/ws/v1/machine/raw"});
+      if(!opened||!opened.handle)throw new Error("raw socket missing handle");
+      if(!live()){host.transport.close(opened.handle).catch(()=>{});return;}
+      t.handle=opened.handle;
+      host.transport.onEvent(t.handle,event=>{
+        if(!live())return;
+        if(event.type==="close"||event.type==="error"){
+          t.handle=null;if(!t.rawWriteAcknowledged)directTestFailed(t,"raw-transport-closed-before-ack");return;
+        }
+        if(event.type!=="data")return;
+        try{
+          const msg=typeof event.data==="string"?JSON.parse(event.data):event.data;
+          if(t.writeAtMs&&msg.type==="response"&&msg.operation==="write"&&String(msg.characteristicUUID).toUpperCase()==="A002"){
+            t.rawWriteAcknowledged=true;directTestEvent("raw-write-acknowledged; waiting-for-cup-gain");closeDirectTestTransport(t);
+          }
+        }catch(_){/* unrelated raw notifications are not evidence */}
+      });
+      if(!live())return;
+      clearTimer("directStartTestTimer");
+      t.writeAtMs=Date.now();directTestEvent("raw-write-dispatched; waiting-for-cup-gain");
+      state.directStartTestTimer=setTimeout(()=>{
+        state.directStartTestTimer=null;if(!live())return;
+        if(!t.machineConfirmed||!t.sustainedWeightConfirmed){directTestFailed(t,"20s-timeout-no-sustained-2s-cup-gain");return;}
+        directTestEvent("passed-machine-and-sustained-cup-gain");t.active=false;closeDirectTestTransport(t);
+      },20000);
+      await host.transport.send(t.handle,{type:"text",data:JSON.stringify({type:"request",operation:"write",characteristicUUID:"A002",payload:"04"})});
+      if(!live())return;
+      // send() is queue acceptance, not a driver acknowledgement or proof of flow.
+      startRestartPoll();
+    }catch(error){directTestFailed(t,`write-failed: ${error.message||error}`);}
+  }
+  function observeDirectStartWeight(snapshot,weight,atMs) {
+    const t=state.directStartTest;
+    if(!t||!t.active||!t.writeAtMs||!t.machineConfirmed||atMs-t.writeAtMs>20000)return;
+    const stamp=scaleTimestampSeconds(snapshot.timestamp);
+    if(!Number.isFinite(stamp)||(Number.isFinite(t.minimumScaleStamp)&&stamp<=t.minimumScaleStamp))return;
+    if(t.last&&stamp<=t.last.stamp)return; // duplicates/stale timestamps cannot prove gain
+    const prev=t.last;t.last={stamp,weight,atMs};
+    if(!prev)return;
+    const dt=stamp-prev.stamp,delta=weight-prev.weight;
+    if(dt>1||atMs-prev.atMs>1000||delta < -0.02){t.rise=null;return;}
+    // Quantized scale plateaus are allowed briefly, but must show repeated gains.
+    if(delta>=0.02){
+      if(!t.rise)t.rise={stamp:prev.stamp,weight:prev.weight,lastGain:stamp,gains:0};
+      t.rise.lastGain=stamp;t.rise.gains++;
+    }else if(t.rise&&stamp-t.rise.lastGain>0.6){t.rise=null;}
+    if(t.rise&&stamp-t.rise.stamp>=2&&weight-t.rise.weight>=0.2&&t.rise.gains>=3&&!t.sustainedWeightConfirmed){
+      t.sustainedWeightConfirmed=true;directTestEvent("sustained-2s-cup-gain-observed");
+    }
+  }
 
   function restartPourConfirmed(source, machine) {
     if (state.phase !== "restart_wait" || state.restartSkipTimer !== null) return;
@@ -4149,7 +4464,11 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     clearTimer("restartTimeoutTimer");
     clearTimer("armReinforceTimer");
     clearTimer("armReinforceTimer2");
-    stopGhcPrompt("confirmed", "GHC Espresso confirmed — continuing HyperEx");
+    if (state.directStartTest && state.directStartTest.active) {
+      state.directStartTest.machineConfirmed = true;
+      directTestEvent("pouring-observed");
+    }
+    stopGhcPrompt("confirmed", "Espresso preinfusion/pouring observed — continuing HyperEx");
     emitSkinChanged();
     diagnosticEvent("ghc_pour_confirmed", { source, substate: machine.substate, armRequestCount: state.armRequestCount });
     log(`GHC CONFIRMED. Restart pour confirmed via ${source} (${machine.substate}); scheduling skipStep to desired real ${state.cfg.stage2Flow.toFixed(2)} g/s (DE1 command ${resolvedStageCommandFlow("stage2", state.cfg.stage2Flow).toFixed(2)} ml/s).`);
@@ -4157,11 +4476,12 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
   }
 
   function startRestartPoll() {
+    const directTest = !!(state.directStartTest && state.directStartTest.active);
     clearTimer("restartPollTimer");
     clearTimer("restartTimeoutTimer");
     clearTimer("armReinforceTimer");
-    log(`Second-stage Espresso request sent. Wait for the pink GHC light; press the physical GHC Espresso button within ${state.cfg.ghcConfirmTimeoutSeconds.toFixed(1)} s. If no pink light, use RE-ARM.`);
-    startGhcCountdown();
+    log(directTest ? "Direct test: REST Espresso then raw A002=04 sent; observing actual pour and sustained cup gain, no re-arm." : `Second-stage Espresso request sent. Wait for the pink GHC light; press the physical GHC Espresso button within ${state.cfg.ghcConfirmTimeoutSeconds.toFixed(1)} s. If no pink light, use RE-ARM.`);
+    if (!directTest) startGhcCountdown();
     emitSkinChanged();
 
     // Two bounded automatic reinforcement requests after the full soak. They never
@@ -4182,13 +4502,13 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       }, delaySeconds * 1000);
     };
 
-    scheduleArmRetry("armReinforceTimer", state.cfg.autoArmRetry1Seconds, 1);
+    if (!directTest) scheduleArmRetry("armReinforceTimer", state.cfg.autoArmRetry1Seconds, 1);
     const retry2 = state.cfg.autoArmRetry2Seconds;
     const retry1 = state.cfg.autoArmRetry1Seconds;
     const retry2Effective = retry2 > 0 && retry1 > 0 && retry2 <= retry1 ? retry1 + 1 : retry2;
-    scheduleArmRetry("armReinforceTimer2", retry2Effective, 2);
+    if (!directTest) scheduleArmRetry("armReinforceTimer2", retry2Effective, 2);
 
-    state.restartTimeoutTimer = setTimeout(() => {
+    if (!directTest) state.restartTimeoutTimer = setTimeout(() => {
       state.restartTimeoutTimer = null;
       if (state.phase !== "restart_wait") return;
       log(`>>> GHC TIMEOUT — no second-stage pour detected. Sending Idle and clearing HyperEx state. <<<`);
@@ -4220,6 +4540,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
   }
 
   async function manualRearmSecondStage() {
+    if (state.directStartTest && state.directStartTest.active) throw new Error("Direct driver test active: automatic/manual re-arm disabled");
     if (state.phase !== "restart_wait") throw new Error("HyperEx is not waiting for second-stage GHC confirmation");
     const now = Date.now();
     if (now - state.lastArmRequestAtMs < 800) throw new Error("RE-ARM throttled; wait a moment");
@@ -4265,6 +4586,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       try {
         await guardedSingleSkip(0, 1, "restart -> S2");
         state.phase = "stage2";
+        startLiveTrim();
         diagnosticEvent("stage2_start", { targetFlowMlS: state.cfg.stage2Flow });
         diagnosticSample("stage2-start", true);
         log(`START stage3: skipped profile frame 0 -> 1; desired real ${state.cfg.stage2Flow.toFixed(2)} g/s, DE1 command ${resolvedStageCommandFlow("stage2", state.cfg.stage2Flow).toFixed(2)} ml/s until cumulative ${state.cfg.stage2Weight.toFixed(2)} g.`);
@@ -4294,6 +4616,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
   function finishSequence() {
     if (state.finalStopSent || (state.phase !== "stage2" && state.phase !== "stage3")) return;
     state.finalStopSent = true;
+    stopLiveTrim("shot-finished");
     state.phase = "finishing";
     diagnosticEvent("final_weight_trigger", { cumulativeWeightG: round(state.cumulativeWeight, 3) });
     log(`Final cumulative weight ${state.cumulativeWeight.toFixed(2)} g reached. Ending Espresso.`);
@@ -4320,6 +4643,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     const machine = extractMachine(payload);
     state.lastFrame = machine.profileFrame;
     noteMachine(machine);
+    observeLiveTrimMachine(machine);
 
     if (state.phase === 'idle' && state.runtimeProfileVerified &&
         (!profileExecutionEquivalent(state.workflowProfile, profileObject()) || !adaptiveHistoryFingerprint())) {
@@ -4461,7 +4785,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
 
   return {
     id: ID,
-    version: "0.1.52",
+    version: "0.1.54",
 
     onLoad(settings) {
       state.cfg = loadConfig(settings || {});
@@ -4482,7 +4806,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       state.runtimeProfileMismatchAbortSent = false;
       state.calibrationArmed = false;
       resetSequence();
-      log(`Loaded v0.1.52. Stable two-skip topology; scale feedback is validation/advisory only; optional S3 decay-compensation subframes advance by profile time and add no skipStep calls. Dual calibration profiles are installed/updated at first load; HyperEx flow settings are desired REAL mass flow: ${state.cfg.stage1Flow}/${state.cfg.stage2Flow}/${state.cfg.stage3Flow} g/s. flowMultiplier scope=${scopeLabel(state.scopeMode)}. Dashboard idle shortcut=${state.cfg.idleDashboardShortcut ? "enabled" : "off (plugin page primary)"}. Brew state machine remains v0.1.16/v0.1.17 baseline.`);
+      log(`Loaded v0.1.54. Stable two-skip topology; scale feedback is validation/advisory only; optional S3 decay-compensation subframes advance by profile time and add no skipStep calls. Dual calibration profiles are installed/updated at first load; HyperEx flow settings are desired REAL mass flow: ${state.cfg.stage1Flow}/${state.cfg.stage2Flow}/${state.cfg.stage3Flow} g/s. flowMultiplier scope=${scopeLabel(state.scopeMode)}. Dashboard idle shortcut=${state.cfg.idleDashboardShortcut ? "enabled" : "off (plugin page primary)"}. Brew state machine remains v0.1.16/v0.1.17 baseline.`);
       connectScaleStream();
       connectWaterLevelStream();
       storageRead(STORAGE_CAL);
@@ -4598,7 +4922,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
             s3Shape = { enabled:true, earlyCommand:round(earlyCommand,3), earlySeconds:round(earlySeconds,1), midCommand:round(midCommand,3), midSeconds:round(midSeconds,1), lateCommand:round(lateCommand,3) };
           }
           const binding = testOverrideBinding();
-          state.testOverrides = { schema:3, writerVersion:"0.1.52", savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, basketContext:binding.basketContext, targets:binding.targets, stages, s3Shape };
+          state.testOverrides = { schema:3, writerVersion:"0.1.54", savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, basketContext:binding.basketContext, targets:binding.targets, stages, s3Shape };
           storageWrite(STORAGE_TEST_OVERRIDES, state.testOverrides);
           await syncHyperExProfile(state.workflowTitle === state.cfg.profileTitle);
           log(`Manual test commands updated: ${JSON.stringify(commandFlowSummary())}`);
@@ -4723,7 +5047,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
         return pluginHttpJson(request, 200, calibrationStatusPayload());
       }
       if (request.endpoint === "startup-apply") {
-        return pluginHttpJson(request, 409, { error: "Legacy startup-apply is disabled in v0.1.52. S1 is handled only by the unified shot-to-shot adaptive engine after two matching MEDIUM-confidence startup shots." });
+        return pluginHttpJson(request, 409, { error: "Legacy startup-apply is disabled in v0.1.54. S1 is handled only by the unified shot-to-shot adaptive engine after two matching MEDIUM-confidence startup shots." });
       }
       if (request.endpoint === "startup-clear") {
         state.stage1StartupCorrection = null; storageWrite(STORAGE_S1_STARTUP, '');
@@ -4742,6 +5066,10 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     },
 
     onUnload() {
+      if (state.liveTrim && state.liveTrim.active) requestMachineState("idle").catch(()=>{});
+      if (state.directStartTest && state.directStartTest.active) {
+        requestMachineState("idle").catch(error=>log(`Direct test unload Idle failed: ${error.message||error}`));
+      }
       clearTimer("storageProbeTimer");
       clearTimer("historyWriteTimer");
       if (state.calibrationActive) {
@@ -4832,7 +5160,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
           if (!state.persistentHistoryLoaded) {
             const sessionRows = state.persistentHistoryFile && state.persistentHistoryFile.shots || [];
             state.persistentHistoryFile = parsed && Number(parsed.schema || 0) >= 2 && Array.isArray(parsed.shots) ? parsed
-              : { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:"0.1.52", shots:[] };
+              : { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:"0.1.54", shots:[] };
             for (const row of sessionRows) {
               state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.filter(x => x && x.runId !== row.runId).concat(row);
             }

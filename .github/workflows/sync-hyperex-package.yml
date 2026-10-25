@@ -1,12 +1,12 @@
 name: Sync HyperEx v0.1.48 source
 on:
-  push:
-    paths:
-      - 'HyperExPatch_sync.complete'
+  issues:
+    types: [opened]
 permissions:
   contents: write
 jobs:
   sync:
+    if: github.event.issue.title == 'HyperEx v0.1.48 sync trigger'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

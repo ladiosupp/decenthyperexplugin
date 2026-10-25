@@ -79,5 +79,49 @@ PASS varying level with repeated decay reaches shape-only through full RAW evide
 PASS shape-only applies only while idle, verifies DTO readback and leaves LUT untouched
 PASS shape-only upload failure preserves previous overrides and cannot arm
 PASS rendered diagnostics browser scripts compile and show quality/shape action labels
+PASS Idle burst completes once, preserves pending apply, and automatically verifies the new shape
+PASS stale completion callback cannot reset a later sequence
+PASS starting a new shot explicitly cancels pending adaptation without rewriting its commands
+PASS auto OFF finalization saves shot without scheduling application
+PASS automatic upload failure is an explicit error and never APPLIED
+PASS normal coffee learning is automatic after upgrade without a user mode switch
+PASS coffee preserves empty/legacy commands as baseline priors without losing LUT or records
+PASS coffee overrides cannot leak back into empty-basket commands
+PASS context freezes at shot start and mismatched context invalidates completed-run evidence
+PASS old empty and unknown history remain saved but cannot restore into coffee consensus
+PASS ordinary complete coffee shots can form bounded next-shot evidence without rewriting calibration
+PASS persisted coffee context restores only into matching coffee settings
+PASS coffee pressure-limited stage yields LIMITED/HOLD and no numeric evidence
+PASS coffee actuator mismatch or stale/missing telemetry blocks numeric adaptation
+PASS coffee S3 without actual frame identity cannot use assumed shape actuator commands
+PASS missing telemetry cannot masquerade as zero pressure with valid actuator evidence
+PASS fresh audit exposes actual JSON separately from cached UI and proposal, without writes
+PASS failed raw audit cannot fabricate readback, repair or upload
+PASS audit refuses to mark matching when selection changes during read
+PASS unknown-context run cannot masquerade as current coffee evidence
+PASS read-only audit detects a basket context switch even if execution fields stay equal
+PASS coffee telemetry coverage below 80 percent cannot pass from a handful of valid samples
+PASS pressure-limited old coffee shot cannot supply the second clean consensus measurement
+PASS raw audit reports null actual commands when no workflow profile exists
+PASS coffee manual/auto override is stamped with context when applied
+PASS legacy verified history is retained as baseline response after automatic coffee transition
+PASS baseline history with changed calibration or targets cannot become a transferable reference
+PASS legacy empty adaptive seed is labelled as prior rather than coffee auto-apply success
+PASS dedicated calibration remains empty-basket while normal HyperEx uses automatic coffee context
+PASS baseline seed never bypasses existing invalid calibration binding and legacy corruption guards
+PASS manual basket mode selection is absent from the new normal-use UI
+PASS new-user path begins with empty-basket Step 1 when no usable LUT exists
+PASS after calibration, zero or one empty Step 2 shot cannot skip qualification
+PASS two stable qualified empty shots automatically prompt coffee and preserve the baseline
+PASS three usable but imperfect empty shots end empty tuning and recommend at most one coffee acceptance
+PASS existing four pre-upgrade empty records qualify without restarting the test count
+PASS completion waits for automatic apply and storage readback before changing the interpretation
+PASS three runs never override invalid data, stall, workflow or application failure gates
+PASS changing physical LUT/settings invalidates old qualification count
+PASS active shot context never flips midway through a pour
+PASS qualified coffee start freezes coffee context while retaining empty baseline references
+PASS qualified readiness uses the existing cooperative dashboard shortcut to prompt coffee
+PASS history-context initial read blocks premature profile uploads after reload
+PASS initial saved coffee history restores context before verified profile uploads
 
-81/81 checks passed
+125/125 checks passed

@@ -1,4 +1,46 @@
-# HyperEx Pulse Filter v0.1.51
+# HyperEx Pulse Filter v0.1.52
+
+## Current candidate: once-only completion, inspectable readback, automatic coffee learning
+
+Based on the exact delivered 1.51 source. Its original ZIP remains unchanged.
+
+### Completion and auto-apply
+Repeated Idle events while finishing now schedule one tracked completion callback. The callback checks the sequence and diagnostic-run identity. Once completion saves the run, later Idle events cannot cancel its pending automatic application. New-shot/unload cleanup still cancels obsolete timers. Auto-apply reports scheduled, applying, waiting, applied, error or explicit cancellation; duplicate application of an applying/applied source run is suppressed. Profile writes still require idle and verified upload/workflow readback.
+
+The Idle-timer defect was reproduced in 1.51 simulations. The user's fourth empty-basket shot showed a proposal but old workflow commands; without its raw machine logs, the defect is not proven to be that shot's sole cause.
+
+### Raw workflow audit
+READ RAW WORKFLOW calls the read-only adaptive-audit endpoint. It performs a fresh GET /workflow and returns the raw profile, actual commands, expected-current-profile match, latest-proposal match, separate cached profile truth, auto-apply state and baseline provenance. It does not repair/upload a profile. Selection/context changes during the read prevent a matching claim. JSON can be selected/copied from the page. Upload acknowledgement remains distinct from independent DE1 firmware-memory readback.
+
+### Automatic normal coffee use with the empty-basket baseline retained
+No basket-mode toggle is required. New-user flow: Step 1 uses an empty locked-in basket to save the original LUT. Step 2 uses 2–3 empty-basket HyperEx runs to refine next-shot command corrections while retaining that original LUT. Two clean stable runs (S2/S3 within 12%, adequate regression windows/quality and repeat variability) may finish qualification early. At three completed same-baseline empty runs with usable recent data but limited improvement, end empty tuning and recommend at most one dedicated coffee acceptance. Workflow/upload/history or automatic-apply failures, invalid data and detected stalls block readiness rather than being bypassed by the count; stop tests and inspect diagnostics, do not demand endless extra cups.
+
+Readiness changes the learning context automatically between shots. Dedicated calibration always stays EMPTY BASKET ONLY. Both Diagnostics and the existing cooperative Dashboard shortcut display READY FOR COFFEE / READY · ADD COFFEE. Valid saved pre-upgrade records count; the current user's four empty shots need not be repeated. Saved coffee evidence keeps normal coffee mode across reload. Changes to the physical LUT/settings invalidate unrelated qualification records. This is an operating-intent transition, not a sensor claim that grounds were detected.
+
+Keep the physical LUT, existing valid bounded baseline commands/manual seed, and saved history. Prior empty/pre-upgrade overrides remain the starting command trajectory (if their calibration/target bindings and existing profile guards pass); they are labelled as baseline seeds, not newly validated coffee corrections. Matching verified completed empty/pre-upgrade history is exposed as baseline cup-response/reference evidence and frozen with the new run. No speculative numerical backpressure multiplier is applied.
+
+Coffee response differs from empty-basket response. New numeric coffee consensus uses completed coffee runs, with explicit frozen context and pressure/actuator quality. Old records remain baseline references and diagnostics rather than pretending to be a second matching coffee shot. History may therefore show 4 saved / 0 coffee-compatible and 4 baseline references after upgrade; this is retention with a different evidence role.
+
+For coffee numeric evidence, exclude the first second of machine transients and require at least four fresh, explicitly valid machine samples and at least 80% usable coverage. Hold the affected stage when ≥20% of samples reach 95% of its pressure limiter or ≥25% have machine flow below 70% of its frozen command. Shaped S3 requires actual frame identity. Missing/stale telemetry also withholds numeric correction. These are conservative engineering evidence gates, not a perfect physical detector of all pressure-limited conditions. Pressure limits are never raised to chase an unreachable cup-flow target.
+
+### Validation and use
+125/125 built-in Node checks pass, including the original 81; full Idle-burst completion→auto-apply→DTO readback, failure handling, prior preservation, context/history isolation, normal coffee evidence, pressure/actuator guards, read-only audit versus stale cache, and rendered-browser-script compilation.
+
+This version has not yet run on the user's DE1 with coffee. For an established baseline, do not add more empty-basket flow-tuning rounds. New users follow the bounded Step 1/Step 2 flow above. Install over the same plugin without uninstalling/clearing data; preserve parameters, LUT, seed and history. Before filling/brewing, confirm CAL READY, READY FOR COFFEE and WORKFLOW READBACK VERIFIED. Then brew normally with grounds; at most one dedicated filled-basket acceptance shot, possibly zero if the first normal consumed coffee supplies the observation. PENDING/REPEAT/LIMITED-HOLD is not permission to schedule repeated special test cups. Let subsequent normal consumed coffees accumulate trustworthy evidence. If a blocker appears, capture existing diagnostics/audit and fix it without demanding repeated dedicated coffee trials.
+
+Dashboard CLOSE/HOME remains a separate open issue. The current 1.52 is not uploaded to GitHub; the latest authorized upload remains 1.51.
+
+Run:
+```sh
+node --check plugin.js
+node tests/verify_v0152.cjs
+```
+
+See HANDOFF_v0152.md. Older release notes below are historical and their manual basket-switch/override-discard assumptions do not describe 1.52.
+
+---
+
+# Historical v0.1.51 release notes
 
 ## Current candidate: independent conservative S3 SHAPE fallback
 

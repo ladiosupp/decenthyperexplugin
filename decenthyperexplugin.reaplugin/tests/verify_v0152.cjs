@@ -1,4 +1,4 @@
-// Run: node tests/verify_v0151.cjs [path/to/plugin.js]
+// Run: node tests/verify_v0152.cjs [path/to/plugin.js]
 // Hooks are injected in memory only. The shipped plugin has no test exports.
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const file=process.argv[2]||require('path').join(__dirname,'..','plugin.js');
@@ -15,11 +15,11 @@ function setup(options={}) {
  trustedAdaptiveRun,restoreAdaptiveHistoryFromPersistentFile,previousMatchingAdaptiveEvidence,nextShotAdaptiveSuggestion,rememberAdaptiveEvidence,
  compactPersistentShotRecord,persistHistoryFile,appendPersistentHistoryShot,startPersistentHistoryProbe,setPersistentHistoryUnavailable,
  startDiagnostics,finalizeCalibrationRun,clearAllTimers,stage1StartupMetrics,stage3StabilityDiagnostics,diagnosticSummary,scalarConsensusSuggestion,stage1AdaptiveEvidence,stage2AdaptiveEvidence,stage3AdaptiveEvidence,
- testOverrideBinding,recordNextShotApplied,buildGhcOverlayHtml,stage3ShapeOnlyConsensus,applyNextShotAdaptiveSuggestion,extractMachine,profilesEquivalent,profileExecutionEquivalent,profileExecutionDifferences,
+ testOverrideBinding,recordNextShotApplied,buildSkinSurfaceAnswer,refreshLearningStage,commandFlowSummary,baselineFeedForwardPayload,buildGhcOverlayHtml,stageActuatorEvidence,adaptiveAuditPayload,autoApplyNextShotIfEligible,testOverrideStatus,resetSequence,startSequence,stage3ShapeOnlyConsensus,applyNextShotAdaptiveSuggestion,extractMachine,profilesEquivalent,profileExecutionEquivalent,profileExecutionDifferences,
  enterHyperExScopedMultiplier,restoreHyperExScopedMultiplier,setApi(fn){api=fn;}};\n`;
  const token='  return {\n    id: ID,';assert(source.includes(token));
  vm.runInContext(source.replace(token,injection+token),context);plugin=context.createPlugin(host);h=context.hooks;
- const s=h.state;s.cfg=h.loadConfig({});s.scopeMode='off';s.calibrationStorageLoaded=true;s.overrideStorageLoaded=true;s.scopeStorageLoaded=true;s.scopedOriginalStorageLoaded=true;
+ const s=h.state;s.cfg=h.loadConfig({});s.cfg.basketContext='empty';s.scopeMode='off';s.calibrationStorageLoaded=true;s.overrideStorageLoaded=true;s.scopeStorageLoaded=true;s.scopedOriginalStorageLoaded=true;
  s.calibrationMap={schema:3,valid:true,createdAt:'fixture-cal',baseFlowMultiplier:1,algorithm:'test',points:[{actualFlow:1.5,commandFlow:.569},{actualFlow:2,commandFlow:.719},{actualFlow:5,commandFlow:2.507}]};
  s.flowMultiplierCurrent=1;h.recomputeCalibrationUsability();s.workflowTitle=s.cfg.profileTitle;
  const expected=copy(h.profileObject());mock.workflow=mock.workflow||copy(expected);mock.profiles=[{id:'hyperex',profile:copy(expected)}];
@@ -41,12 +41,12 @@ function setup(options={}) {
  function event(key,value){plugin.onEvent({name:'storageRead',payload:{key,value}});}
  function deliverRead(i=0){const r=pendingReads.splice(i,1)[0];assert(r,'no queued storage read');event(r.key,r.value);return r;}
  function flushReads(){let n=0;while(pendingReads.length){assert(++n<100);deliverRead();}}
- function run(id){const t=timers.get(id);assert(t,'missing timer');timers.delete(id);t.fn();}
+ function run(id){const t=timers.get(id);assert(t,'missing timer');timers.delete(id);return t.fn();}
  const writes=()=>calls.filter(c=>c.method==='PUT'||c.method==='POST');
  return {h,s,plugin,expected,mock,calls,writes,timers,run,storage,storageCalls,pendingReads,deliverRead,flushReads,event};
 }
 function evidenceRun(e,id='run') {
- return {runId:id,kind:'hyperex',result:'completed at 100 g',config:{profileTruthVerified:true,profileTruthSchema:3,adaptiveFingerprint:copy(e.h.adaptiveHistoryFingerprint())},summary:{},samples:[],rawScaleSamples:[]};
+ return {runId:id,kind:'hyperex',result:'completed at 100 g',config:{basketContext:e.s.cfg.basketContext,profileTruthVerified:true,profileTruthSchema:3,adaptiveFingerprint:copy(e.h.adaptiveHistoryFingerprint())},summary:{},samples:[],rawScaleSamples:[]};
 }
 function historyRow(e,id='old'){
  const fp=copy(e.h.adaptiveHistoryFingerprint());return {runId:id,profileTruthVerified:true,profileTruthSchema:3,fingerprint:fp,evidence:{runId:id,profileTruthSchema:3,fingerprint:fp,s2:{runId:id,targetGS:5,command:2.507,measured:6.5}}};
@@ -234,6 +234,310 @@ test('rendered diagnostics browser scripts compile and show quality/shape action
  const scripts=[...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)];
  assert(scripts.length>0);scripts.forEach(x=>new vm.Script(x[1]));
  assert.match(html,/Quality:/);assert.match(html,/normalized shape var/);
+});
+
+test('Idle burst completes once, preserves pending apply, and automatically verifies the new shape',async()=>{
+ const e=setup({roundtrip:true}),a=syntheticRun(e,'before',[2.1,1.8,1.5]),b=syntheticRun(e,'finished',[2.1,1.8,1.5]);
+ e.h.rememberAdaptiveEvidence(a);e.s.diagnosticCurrent=b;e.s.phase='finishing';e.s.cumulativeWeight=100;e.s.autoApplyNextShot=true;
+ for(let i=0;i<12;i++)e.h.handleStateUpdate({state:'idle',substate:'idle'});
+ const completions=[...e.timers].filter(([id,t])=>t.ms===500);
+ assert.equal(completions.length,1);
+ e.run(completions[0][0]);const timer=e.s.autoApplyTimer;
+ assert.equal(e.s.autoApplyLastStatus.status,'scheduled');assert(e.timers.has(timer));
+ for(let i=0;i<12;i++)e.h.handleStateUpdate({state:'idle',substate:'idle'});
+ assert(e.timers.has(timer));await e.run(timer);
+ assert.equal(e.s.autoApplyLastStatus.status,'applied');assert.equal(e.s.autoApplyLastStatus.runId,'finished');
+ assert.equal(e.s.testOverrides.adaptiveSource.runId,'finished');assert.equal(e.s.armed,true);
+ const writes=e.writes().length;await e.h.autoApplyNextShotIfEligible(b);assert.equal(e.writes().length,writes);
+ assert.equal(e.s.persistentHistoryFile.shots.filter(x=>x.runId==='finished').length,1);
+});
+test('stale completion callback cannot reset a later sequence',()=>{
+ const e=setup();e.s.phase='finishing';e.s.sequenceStartedAtMs=1;e.s.diagnosticCurrent=syntheticRun(e,'old');
+ e.h.handleStateUpdate({state:'idle',substate:'idle'});const fn=e.timers.get(e.s.completionTimer).fn;
+ e.h.startSequence(0);const run=e.s.diagnosticCurrent;fn();
+ assert.equal(e.s.phase,'stage1');assert.equal(e.s.diagnosticCurrent,run);assert.equal(e.s.autoApplyTimer,null);
+});
+test('starting a new shot explicitly cancels pending adaptation without rewriting its commands',()=>{
+ const e=setup();e.s.autoApplyNextShot=true;e.s.phase='finishing';e.s.diagnosticCurrent=syntheticRun(e,'done');
+ e.h.handleStateUpdate({state:'idle',substate:'idle'});e.run(e.s.completionTimer);
+ const id=e.s.autoApplyTimer;assert(e.timers.has(id));e.h.startSequence(0);
+ assert(!e.timers.has(id));assert.equal(e.s.autoApplyLastStatus.status,'cancelled');assert.equal(e.writes().length,0);
+});
+test('auto OFF finalization saves shot without scheduling application',()=>{
+ const e=setup();e.s.autoApplyNextShot=false;e.s.phase='finishing';e.s.diagnosticCurrent=syntheticRun(e,'manual');
+ e.h.handleStateUpdate({state:'idle',substate:'idle'});e.run(e.s.completionTimer);
+ assert.equal(e.s.autoApplyTimer,null);assert.equal(e.s.diagnosticLast.runId,'manual');assert.equal(e.writes().length,0);
+});
+test('automatic upload failure is an explicit error and never APPLIED',async()=>{
+ const e=setup({roundtrip:true}),a=syntheticRun(e,'a',[2.1,1.8,1.5]),b=syntheticRun(e,'b',[2.1,1.8,1.5]);
+ e.h.rememberAdaptiveEvidence(a);e.mock.fail=p=>p==='/machine/profile'?'machine offline':null;
+ await e.h.autoApplyNextShotIfEligible(b);
+ assert.equal(e.s.autoApplyLastStatus.status,'error');assert.match(e.s.autoApplyLastStatus.message,/machine offline/);
+ assert.equal(e.s.armed,false);
+});
+function seedOverride(e,context){
+ return {schema:3,writerVersion:'0.1.52',...copy(e.h.testOverrideBinding()),
+  ...(context===undefined?{}:{basketContext:context}),stages:{stage1:{mode:'manual',command:.8}},
+  s3Shape:{enabled:true,earlyCommand:.698,earlySeconds:8,midCommand:.72,midSeconds:14,lateCommand:.778}};
+}
+test('normal coffee learning is automatic after upgrade without a user mode switch',()=>{
+ const e=setup();assert.equal(e.h.loadConfig({}).basketContext,'empty');
+ assert.equal(e.h.loadConfig({BasketContext:'Coffee'}).basketContext,'empty');
+});
+test('coffee preserves empty/legacy commands as baseline priors without losing LUT or records',()=>{
+ const e=setup(),lut=JSON.stringify(e.s.calibrationMap);
+ const old=seedOverride(e,'empty');e.s.testOverrides=old;
+ const records=[historyRow(e)];e.s.persistentHistoryFile={shots:records};e.s.cfg.basketContext='coffee';
+ assert.equal(e.h.testOverrideStatus().valid,true);assert.equal(e.h.testOverrideStatus().baselinePrior,true);assert.deepEqual(copy(e.h.profileObject().steps.map(x=>+x.flow)),[.8,2.507,.698,.72,.778]);
+ delete old.basketContext;assert.equal(e.h.testOverrideStatus().valid,true);assert.equal(e.h.testOverrideStatus().baselinePrior,true);
+ assert.equal(JSON.stringify(e.s.calibrationMap),lut);assert.equal(e.s.persistentHistoryFile.shots,records);
+ old.basketContext='coffee';assert.equal(e.h.testOverrideStatus().valid,true);
+});
+test('coffee overrides cannot leak back into empty-basket commands',()=>{
+ const e=setup();e.s.testOverrides=seedOverride(e,'coffee');assert.equal(e.h.testOverrideStatus().valid,false);
+});
+test('context freezes at shot start and mismatched context invalidates completed-run evidence',()=>{
+ const e=setup();e.h.startDiagnostics('hyperex');const r=e.s.diagnosticCurrent;
+ assert.equal(r.config.basketContext,'empty');assert.equal(r.config.adaptiveFingerprint.basketContext,'empty');
+ e.s.cfg.basketContext='coffee';assert.equal(r.config.basketContext,'empty');
+ r.result='completed at 100 g';assert.equal(e.h.trustedAdaptiveRun(r),false);
+});
+test('old empty and unknown history remain saved but cannot restore into coffee consensus',()=>{
+ const e=setup(),a=historyRow(e,'empty'),b=copy(a);b.runId='unknown';delete b.fingerprint.basketContext;
+ e.s.persistentHistoryFile={shots:[a,b]};e.s.persistentHistoryAvailable=true;e.s.cfg.basketContext='coffee';
+ e.h.restoreAdaptiveHistoryFromPersistentFile();assert.equal(e.s.adaptiveHistory.length,0);
+ assert.equal(e.s.persistentHistoryFile.shots.length,2);
+});
+function coffeeRun(e,id='coffee',rates=[2.1,1.8,1.5]){
+ e.s.cfg.basketContext='coffee';const r=syntheticRun(e,id,rates);
+ Object.assign(r.config,{basketContext:'coffee',stage1PressureLimit:3,stage2PressureLimit:6,stage3PressureLimit:3});
+ for(const x of r.samples){
+  Object.assign(x,{pressureBar:.5,machineTelemetryValid:true,machineAgeMs:0});
+  if(x.phase==='stage1')x.machineFlowMlS=.719;
+  if(x.phase==='stage2')x.machineFlowMlS=2.507;
+  if(x.phase==='stage3'){const dt=x.tMs/1000-25;x.profileFrame=dt<8?2:dt<22?3:4;x.machineFlowMlS=[.698,.72,.778][x.profileFrame-2];}
+ }
+ return r;
+}
+test('ordinary complete coffee shots can form bounded next-shot evidence without rewriting calibration',async()=>{
+ const e=setup({roundtrip:true}),a=coffeeRun(e,'a'),b=coffeeRun(e,'b'),lut=JSON.stringify(e.s.calibrationMap);
+ assert(e.h.stage2AdaptiveEvidence(b));assert(e.h.stage3AdaptiveEvidence(b));
+ e.h.rememberAdaptiveEvidence(a);const q=e.h.nextShotAdaptiveSuggestion(b);assert(q.s3.suggestedShape);
+ await e.h.autoApplyNextShotIfEligible(b);assert.equal(e.s.autoApplyLastStatus.status,'applied');
+ assert.equal(e.s.testOverrides.basketContext,'coffee');assert.equal(JSON.stringify(e.s.calibrationMap),lut);
+});
+test('persisted coffee context restores only into matching coffee settings',()=>{
+ const e=setup(),r=coffeeRun(e,'coffee-saved');r.summary=e.h.diagnosticSummary(r);
+ e.h.rememberAdaptiveEvidence(r);const row=e.s.persistentHistoryFile.shots[0];
+ assert.equal(row.basketContext,'coffee');assert.equal(row.fingerprint.basketContext,'coffee');
+ e.s.adaptiveHistory=[];e.s.persistentHistoryAvailable=true;e.h.restoreAdaptiveHistoryFromPersistentFile();
+ assert.equal(e.s.adaptiveHistory.length,1);
+ e.s.cfg.basketContext='empty';e.h.restoreAdaptiveHistoryFromPersistentFile();assert.equal(e.s.cfg.basketContext,'coffee');assert.equal(e.s.adaptiveHistory.length,1);
+});
+test('coffee pressure-limited stage yields LIMITED/HOLD and no numeric evidence',()=>{
+ const e=setup(),r=coffeeRun(e);r.samples.filter(x=>x.phase==='stage2').forEach(x=>x.pressureBar=5.9);
+ assert.equal(e.h.stage2AdaptiveEvidence(r),null);const q=e.h.nextShotAdaptiveSuggestion(r);
+ assert.equal(q.s2.action,'LIMITED / HOLD');assert.match(q.s2.reason,/Pressure limiter/);
+ assert.equal(e.s.cfg.stage2PressureLimit,6);
+});
+test('coffee actuator mismatch or stale/missing telemetry blocks numeric adaptation',()=>{
+ for(const change of [x=>x.machineFlowMlS=.1,x=>x.machineTelemetryValid=false,x=>x.machineAgeMs=2000,x=>x.pressureBar=null]){
+  const e=setup(),r=coffeeRun(e);r.samples.filter(x=>x.phase==='stage2').forEach(change);
+  assert.equal(e.h.stage2AdaptiveEvidence(r),null);assert.equal(e.h.nextShotAdaptiveSuggestion(r).s2.action,'LIMITED / HOLD');
+ }
+});
+test('coffee S3 without actual frame identity cannot use assumed shape actuator commands',()=>{
+ const e=setup(),r=coffeeRun(e);r.samples.filter(x=>x.phase==='stage3').forEach(x=>x.profileFrame=null);
+ assert.equal(e.h.stage3AdaptiveEvidence(r),null);assert.match(e.h.nextShotAdaptiveSuggestion(r).s3.reason,/coverage insufficient/);
+});
+test('missing telemetry cannot masquerade as zero pressure with valid actuator evidence',()=>{
+ const e=setup();assert.equal(e.h.extractMachine({state:'espresso'}).telemetryValid,false);
+ assert.equal(e.h.extractMachine({pressure:0,flow:.7}).telemetryValid,true);
+ assert.equal(e.h.extractMachine({pressure:null,flow:.7}).telemetryValid,false);
+});
+test('fresh audit exposes actual JSON separately from cached UI and proposal, without writes',async()=>{
+ const e=setup(),a=syntheticRun(e,'a',[2.1,1.8,1.5]),b=syntheticRun(e,'b',[2.1,1.8,1.5]);
+ e.h.rememberAdaptiveEvidence(a);e.s.diagnosticLast=b;e.s.testOverrides=seedOverride(e,'empty');
+ e.mock.workflow=copy(e.h.profileObject());e.s.workflowProfile=copy(e.mock.workflow);
+ let audit=await e.h.adaptiveAuditPayload();assert.equal(audit.proposalMatchesWorkflow,false);
+ const sh=audit.proposal.s3.suggestedShape;
+ Object.assign(e.mock.workflow.steps[2],{flow:sh.earlyCommand,seconds:sh.earlySeconds});
+ Object.assign(e.mock.workflow.steps[3],{flow:sh.midCommand,seconds:sh.midSeconds});
+ e.mock.workflow.steps[4].flow=sh.lateCommand;
+ audit=await e.h.adaptiveAuditPayload();assert.equal(audit.proposalMatchesWorkflow,true);
+ assert.equal(audit.workflowMatchesExpected,false);
+ assert.notEqual(audit.actualCommands.s3Shape.earlyCommand,+e.s.workflowProfile.steps[2].flow);
+ assert.equal(e.writes().length,0);assert.equal(audit.machineProfileIndependentlyReadBack,false);
+});
+test('failed raw audit cannot fabricate readback, repair or upload',async()=>{
+ const e=setup();e.mock.fail=p=>p==='/workflow'?'offline':null;
+ await assert.rejects(e.h.adaptiveAuditPayload(),/offline/);assert.equal(e.writes().length,0);
+});
+test('audit refuses to mark matching when selection changes during read',async()=>{
+ const e=setup();e.mock.after=p=>{if(p==='/workflow')e.s.workflowSelectionRevision++;};
+ const a=await e.h.adaptiveAuditPayload();assert.equal(a.contextStable,false);assert.equal(a.workflowMatchesExpected,false);
+});
+
+
+test('unknown-context run cannot masquerade as current coffee evidence',()=>{
+ const e=setup(),r=coffeeRun(e);delete r.config.basketContext;
+ assert.equal(e.h.trustedAdaptiveRun(r),false);assert.equal(e.h.nextShotAdaptiveSuggestion(r),null);
+});
+test('read-only audit detects a basket context switch even if execution fields stay equal',async()=>{
+ const e=setup();e.mock.after=p=>{if(p==='/workflow')e.s.cfg.basketContext='coffee';};
+ const a=await e.h.adaptiveAuditPayload();assert.equal(a.contextStable,false);assert.equal(a.workflowMatchesExpected,false);
+});
+test('coffee telemetry coverage below 80 percent cannot pass from a handful of valid samples',()=>{
+ const e=setup(),r=coffeeRun(e);let i=0;
+ r.samples.filter(x=>x.phase==='stage2').forEach(x=>{if(i++%2)x.machineTelemetryValid=false;});
+ assert.equal(e.h.stage2AdaptiveEvidence(r),null);
+});
+test('pressure-limited old coffee shot cannot supply the second clean consensus measurement',()=>{
+ const e=setup(),a=coffeeRun(e,'limited'),b=coffeeRun(e,'clean');
+ a.samples.filter(x=>x.phase==='stage2').forEach(x=>x.pressureBar=5.9);
+ e.h.rememberAdaptiveEvidence(a);assert.equal(e.h.nextShotAdaptiveSuggestion(b).s2.repeatCount,1);
+});
+test('raw audit reports null actual commands when no workflow profile exists',async()=>{
+ const e=setup();e.mock.workflow=null;
+ const a=await e.h.adaptiveAuditPayload();assert.equal(a.actualCommands,null);assert.equal(a.workflowMatchesExpected,false);
+ assert.equal(e.writes().length,0);
+});
+test('coffee manual/auto override is stamped with context when applied',async()=>{
+ const e=setup({roundtrip:true}),a=coffeeRun(e,'a'),b=coffeeRun(e,'b');
+ e.h.rememberAdaptiveEvidence(a);await e.h.applyNextShotAdaptiveSuggestion(b,'manual');
+ assert.equal(e.s.testOverrides.basketContext,'coffee');assert.equal(e.h.testOverrideStatus().valid,true);
+ e.s.cfg.basketContext='empty';assert.equal(e.h.testOverrideStatus().valid,false);
+});
+
+test('legacy verified history is retained as baseline response after automatic coffee transition',()=>{
+ const e=setup(),row=historyRow(e,'old-empty');row.result='completed at 100 g';delete row.fingerprint.basketContext;
+ row.s2={rawRegressionGS:4.512,rawRegressionR2:.999,windowS:6.78};row.commands={stage2:{commandMlS:2.507}};
+ e.s.persistentHistoryFile={shots:[row]};e.s.testOverrides=seedOverride(e,'empty');e.s.cfg.basketContext='coffee';
+ const b=e.h.baselineFeedForwardPayload();
+ assert.equal(b.referenceShots,1);assert.equal(b.commandSeedRetained,true);assert.equal(b.priorCupResponse.stage2.rawRegressionGS,4.512);
+ e.s.persistentHistoryAvailable=true;e.h.restoreAdaptiveHistoryFromPersistentFile();assert.equal(e.s.adaptiveHistory.length,0);
+ e.h.startDiagnostics('hyperex');assert.equal(e.s.diagnosticCurrent.config.baselinePrior.referenceShots,1);
+ assert.equal(e.s.diagnosticCurrent.config.stage3Shape.earlyCommand,.698);
+});
+test('baseline history with changed calibration or targets cannot become a transferable reference',()=>{
+ const e=setup(),row=historyRow(e);row.fingerprint.targets.stage2=6;e.s.persistentHistoryFile={shots:[row]};
+ e.s.cfg.basketContext='coffee';assert.equal(e.h.baselineFeedForwardPayload().referenceShots,0);
+});
+test('legacy empty adaptive seed is labelled as prior rather than coffee auto-apply success',()=>{
+ const e=setup();e.s.testOverrides=seedOverride(e,'empty');e.s.testOverrides.adaptiveSource={runId:'empty',mode:'auto'};
+ e.s.cfg.basketContext='coffee';const c=e.h.commandFlowSummary();
+ assert.equal(c.adaptiveSource,null);assert.match(c.manualTestStatus,/baseline seed/);
+ assert.equal(c.s3Shape.earlyCommand,.698);
+});
+test('dedicated calibration remains empty-basket while normal HyperEx uses automatic coffee context',()=>{
+ const e=setup();e.s.cfg=e.h.loadConfig({});e.h.startDiagnostics('calibration');
+ assert.equal(e.s.diagnosticCurrent.config.basketContext,'empty');
+ e.h.startDiagnostics('hyperex');assert.equal(e.s.diagnosticCurrent.config.basketContext,'empty');
+});
+test('baseline seed never bypasses existing invalid calibration binding and legacy corruption guards',()=>{
+ const e=setup();e.s.cfg.basketContext='coffee';e.s.testOverrides=seedOverride(e,'empty');
+ e.s.testOverrides.mapCreatedAt='other';assert.equal(e.h.testOverrideStatus().valid,false);
+ e.s.testOverrides=seedOverride(e,'empty');delete e.s.testOverrides.writerVersion;e.s.testOverrides.adaptiveSource={mode:'auto'};
+ assert.equal(e.h.testOverrideStatus().valid,false);
+});
+test('manual basket mode selection is absent from the new normal-use UI',()=>{
+ const e=setup(),html=e.h.buildGhcOverlayHtml();
+ assert.match(html,/Starting LUT and bounded commands are kept/);assert(!html.includes('id="changebasket"'));
+ assert(!html.includes('START NORMAL COFFEE USE'));
+});
+
+
+function readinessRow(e,id,s2=5,s3=1.5){
+ const r=historyRow(e,id);r.result='completed at 100 g';r.basketContext='empty';
+ r.s2={targetGS:5,rawRegressionGS:s2,rawRegressionR2:.999,windowS:6};
+ r.s3={targetGS:1.5,rawRegressionGS:s3,rawRegressionR2:.99,windowS:25};
+ r.s3Stability={status:'LATE DECAY',lateToEarlyRatio:.7,stall:{suspected:false}};
+ return r;
+}
+function readinessPreflight(e){
+ e.s.runtimeProfileVerified=true;e.s.machineProfileAckKey='verified-upload';e.s.persistentHistoryAvailable=true;
+}
+test('new-user path begins with empty-basket Step 1 when no usable LUT exists',()=>{
+ const e=setup();e.s.calibrationMapUsable=false;
+ assert.equal(e.h.refreshLearningStage().stage,'STEP 1 · EMPTY CALIBRATION');assert.equal(e.s.cfg.basketContext,'empty');
+});
+test('after calibration, zero or one empty Step 2 shot cannot skip qualification',()=>{
+ const e=setup();readinessPreflight(e);e.s.persistentHistoryFile={shots:[]};
+ assert.equal(e.h.refreshLearningStage().stage,'STEP 2 · EMPTY BASELINE');
+ e.s.persistentHistoryFile.shots.push(readinessRow(e,'one'));
+ const q=e.h.refreshLearningStage();assert.equal(q.emptyShots,1);assert.equal(e.s.cfg.basketContext,'empty');
+});
+test('two stable qualified empty shots automatically prompt coffee and preserve the baseline',()=>{
+ const e=setup();readinessPreflight(e);e.s.testOverrides=seedOverride(e,'empty');
+ e.s.persistentHistoryFile={shots:[readinessRow(e,'one',5.075,1.50),readinessRow(e,'two',4.908,1.48)]};
+ const q=e.h.refreshLearningStage();assert.equal(q.stage,'READY FOR COFFEE · AUTO');
+ assert.equal(q.transitionBasis,'two stable shots');assert.equal(e.s.cfg.basketContext,'coffee');
+ assert.equal(e.h.commandFlowSummary().s3Shape.earlyCommand,.698);assert.equal(e.h.baselineFeedForwardPayload().referenceShots,2);
+});
+test('three usable but imperfect empty shots end empty tuning and recommend at most one coffee acceptance',()=>{
+ const e=setup();readinessPreflight(e);
+ e.s.persistentHistoryFile={shots:[readinessRow(e,'one',4,1.2),readinessRow(e,'two',4.2,1.1),readinessRow(e,'three',4.1,1.15)]};
+ const q=e.h.refreshLearningStage();assert.equal(q.stage,'READY FOR COFFEE · AUTO');assert.equal(q.limitedEmptyImprovement,true);
+ assert.match(q.message,/at most one/);assert.equal(e.s.cfg.basketContext,'coffee');
+});
+test('existing four pre-upgrade empty records qualify without restarting the test count',()=>{
+ const e=setup();readinessPreflight(e);
+ e.s.persistentHistoryFile={shots:[1,2,3,4].map(i=>{const r=readinessRow(e,'legacy'+i,4.1,1.1);delete r.basketContext;delete r.fingerprint.basketContext;return r;})};
+ const q=e.h.refreshLearningStage();assert.equal(q.emptyShots,4);assert.equal(e.s.cfg.basketContext,'coffee');
+});
+test('completion waits for automatic apply and storage readback before changing the interpretation',()=>{
+ const e=setup();readinessPreflight(e);
+ e.s.persistentHistoryFile={shots:[readinessRow(e,'a'),readinessRow(e,'b')]};
+ e.s.autoApplyLastStatus={status:'applying'};assert.equal(e.h.refreshLearningStage().stage,'STEP 2 · APPLYING');assert.equal(e.s.cfg.basketContext,'empty');
+ e.s.autoApplyLastStatus={status:'applied'};e.s.pendingHistoryWrite='pending';
+ assert.equal(e.h.refreshLearningStage().stage,'STEP 2 · CHECKING');assert.equal(e.s.cfg.basketContext,'empty');
+ e.s.pendingHistoryWrite=null;assert.equal(e.h.refreshLearningStage().stage,'READY FOR COFFEE · AUTO');
+});
+test('three runs never override invalid data, stall, workflow or application failure gates',()=>{
+ const e=setup();readinessPreflight(e);const rows=[1,2,3].map(i=>readinessRow(e,'r'+i));
+ e.s.persistentHistoryFile={shots:rows};rows[2].s3.rawRegressionGS=null;
+ assert.equal(e.h.refreshLearningStage().stage,'STEP 2 · BLOCKED');assert.equal(e.s.cfg.basketContext,'empty');
+ rows[2].s3.rawRegressionGS=1.5;rows[2].s3Stability.stall.suspected=true;
+ assert.equal(e.h.refreshLearningStage().stage,'STEP 2 · BLOCKED');
+ rows[2].s3Stability.stall.suspected=false;e.s.autoApplyLastStatus={status:'error'};
+ assert.equal(e.h.refreshLearningStage().stage,'STEP 2 · BLOCKED');
+ e.s.autoApplyLastStatus=null;e.s.runtimeProfileVerified=false;
+ assert.equal(e.h.refreshLearningStage().stage,'STEP 2 · CHECKING');
+});
+test('changing physical LUT/settings invalidates old qualification count',()=>{
+ const e=setup();readinessPreflight(e);e.s.persistentHistoryFile={shots:[readinessRow(e,'a'),readinessRow(e,'b')]};
+ e.s.cfg.stage2Weight+=1;assert.equal(e.h.refreshLearningStage().emptyShots,0);assert.equal(e.s.cfg.basketContext,'empty');
+});
+test('active shot context never flips midway through a pour',()=>{
+ const e=setup();readinessPreflight(e);e.s.persistentHistoryFile={shots:[readinessRow(e,'a'),readinessRow(e,'b')]};
+ e.s.phase='stage3';e.h.refreshLearningStage();assert.equal(e.s.cfg.basketContext,'empty');
+ e.s.phase='idle';e.h.refreshLearningStage();assert.equal(e.s.cfg.basketContext,'coffee');
+});
+test('qualified coffee start freezes coffee context while retaining empty baseline references',()=>{
+ const e=setup();readinessPreflight(e);e.s.persistentHistoryFile={shots:[readinessRow(e,'a'),readinessRow(e,'b')]};
+ e.h.startSequence(0);assert.equal(e.s.diagnosticCurrent.config.basketContext,'coffee');
+ assert.equal(e.s.diagnosticCurrent.config.baselinePrior.referenceShots,2);
+});
+
+
+test('qualified readiness uses the existing cooperative dashboard shortcut to prompt coffee',()=>{
+ const e=setup();readinessPreflight(e);e.s.persistentHistoryFile={shots:[readinessRow(e,'a'),readinessRow(e,'b')]};
+ e.h.refreshLearningStage();const h=e.h.buildSkinSurfaceAnswer().surfaces.find(x=>x.id==='hyperex-diag-header');
+ assert.equal(h.label,'READY · ADD COFFEE');assert.equal(h.action.view,'diag-dashboard');
+});
+
+
+test('history-context initial read blocks premature profile uploads after reload',async()=>{
+ const e=setup();e.s.learningContextLoaded=false;
+ await assert.rejects(e.h.syncHyperExProfile(true),/history context/);assert.equal(e.writes().length,0);assert.equal(e.s.armed,false);
+});
+test('initial saved coffee history restores context before verified profile uploads',async()=>{
+ const e=setup({roundtrip:true}),r=coffeeRun(e,'saved-coffee');r.summary=e.h.diagnosticSummary(r);
+ const record=e.h.compactPersistentShotRecord(r,{runId:r.runId,profileTruthSchema:3,fingerprint:r.config.adaptiveFingerprint});
+ e.s.testOverrides=seedOverride(e,'coffee');e.s.cfg.basketContext='empty';e.s.learningContextLoaded=false;
+ e.event('adaptiveHistoryFileV2',JSON.stringify({schema:2,shots:[record]}));
+ await e.s.profileSyncQueue;assert.equal(e.s.learningContextLoaded,true);assert.equal(e.s.cfg.basketContext,'coffee');
+ assert.equal(e.s.armed,true);assert.equal(+e.mock.workflow.steps[0].flow,.8);assert.equal(+e.mock.workflow.steps[2].flow,.698);
 });
 
 (async()=>{let failed=0;for(const [name,fn]of tests){try{await fn();console.log('PASS '+name);}catch(err){failed++;console.error('FAIL '+name+'\n'+err.stack);}}console.log(`\n${tests.length-failed}/${tests.length} checks passed`);process.exitCode=failed?1:0;})();

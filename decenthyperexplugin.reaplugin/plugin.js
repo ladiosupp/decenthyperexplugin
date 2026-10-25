@@ -179,6 +179,7 @@ function createPlugin(host) {
     lastMachineState: null,
     lastSubstate: null,
     lastPressure: 0,
+    lastMachineTelemetryValid: false,
     lastFlow: 0,
     lastWeightFlow: 0,
     lastFrame: null,
@@ -219,6 +220,7 @@ function createPlugin(host) {
     stage1DumpSent: false,
     stage2SkipSent: false,
     finalStopSent: false,
+    completionTimer: null,
     scaleHandle: null,
     scaleReconnectTimer: null,
     scaleConnected: false,
@@ -278,6 +280,8 @@ function createPlugin(host) {
     storageProbeTimer: null,
     autoApplyNextShot: true,
     autoApplyLastStatus: null,
+    learningStage: null,
+    learningContextLoaded: true,
     autoApplyTimer: null
   };
 
@@ -311,6 +315,7 @@ function createPlugin(host) {
     const finalWeight = clampNumber(settings.FinalWeight, stage2Weight + 5.0, LIMITS.finalWeightMax, Math.max(100.0, stage2Weight + 5.0));
     return {
       enabled: b(settings.Enabled, true),
+      basketContext: "empty", // Startup qualification chooses empty engineering or normal coffee automatically.
       profileTitle: String(settings.ProfileTitle || "HyperEx Pulse Filter"),
       temperature: clampNumber(settings.Temperature, LIMITS.temperatureMin, LIMITS.temperatureMax, 92.0),
       stage1Flow: clampNumber(settings.Stage1Flow, LIMITS.desiredRealFlowMin, LIMITS.desiredRealFlowMax, 2.0),
@@ -546,6 +551,7 @@ function createPlugin(host) {
     const mapCreatedAt = state.calibrationMap && state.calibrationMap.createdAt ? String(state.calibrationMap.createdAt) : "";
     return {
       mapCreatedAt,
+      basketContext: state.cfg ? state.cfg.basketContext : "unknown",
       targets: state.cfg ? {
         stage1: round(state.cfg.stage1Flow, 4),
         stage2: round(state.cfg.stage2Flow, 4),
@@ -567,6 +573,11 @@ function createPlugin(host) {
     }
     if (!state.cfg) return { valid: false, reason: "configuration unavailable", activeStages: [], s3ShapeActive: false };
     const binding = testOverrideBinding();
+    const overrideContext = x.basketContext || "unknown";
+    const baselinePrior = binding.basketContext === "coffee" && ["empty","unknown"].includes(overrideContext);
+    if (overrideContext !== binding.basketContext && !baselinePrior && !(binding.basketContext === "empty" && overrideContext === "unknown")) {
+      return { valid:false, reason:"basket context changed; previous overrides ignored; using LUT baseline", activeStages:[], s3ShapeActive:false };
+    }
     if (String(x.mapCreatedAt || "") !== String(binding.mapCreatedAt || "")) return { valid: false, reason: "calibration LUT changed; manual test override ignored", activeStages: [], s3ShapeActive: false };
     const xt = x.targets && typeof x.targets === "object" ? x.targets : {};
     for (const stage of ["stage1","stage2","stage3"]) {
@@ -589,7 +600,8 @@ function createPlugin(host) {
       else if (adaptiveSource) reason = "adaptive manual applied";
       else reason = "manual test active";
     }
-    return { valid: true, reason, activeStages, s3ShapeActive, adaptiveSource };
+    if (baselinePrior && activeStages.length) reason = "empty/pre-upgrade baseline seed; normal coffee learning";
+    return { valid: true, reason, activeStages, s3ShapeActive, adaptiveSource:baselinePrior?null:adaptiveSource, baselinePrior, sourceBasketContext:overrideContext };
   }
 
   function s3ShapeStatus() {
@@ -657,7 +669,7 @@ function createPlugin(host) {
     }
     const os = testOverrideStatus();
     const shape = s3ShapeStatus();
-    const adaptiveSource = os.valid && state.testOverrides && state.testOverrides.adaptiveSource && typeof state.testOverrides.adaptiveSource === "object"
+    const adaptiveSource = os.valid && !os.baselinePrior && state.testOverrides && state.testOverrides.adaptiveSource && typeof state.testOverrides.adaptiveSource === "object"
       ? {
           runId: String(state.testOverrides.adaptiveSource.runId || ""),
           appliedAt: String(state.testOverrides.adaptiveSource.appliedAt || ""),
@@ -795,7 +807,7 @@ function createPlugin(host) {
     state.diagnosticCurrent = {
       schema: 3,
       kind: String(kind || "hyperex"),
-      pluginVersion: "0.1.51",
+      pluginVersion: "0.1.52",
       runId: `${now}-${state.diagnosticRunSeq}`,
       profileTitle: state.workflowTitle || (state.cfg ? state.cfg.profileTitle : ""),
       startedAt: new Date(now).toISOString(),
@@ -803,6 +815,11 @@ function createPlugin(host) {
       endedAt: null,
       result: null,
       config: {
+        basketContext: kind === "calibration" ? "empty" : state.cfg.basketContext,
+        baselinePrior: baselineFeedForwardPayload(),
+        stage1PressureLimit: state.cfg.stage1PressureLimit,
+        stage2PressureLimit: state.cfg.stage2PressureLimit,
+        stage3PressureLimit: state.cfg.stage3PressureLimit,
         stage1Flow: state.cfg.stage1Flow,
         stage1LutCommandMlS: baseStageCommandFlow(state.cfg.stage1Flow),
         stage1CommandMlS: resolvedStageCommandFlow("stage1", state.cfg.stage1Flow),
@@ -872,6 +889,8 @@ function createPlugin(host) {
       desiredRealFlowGS: round(desiredRealFlowForPhase(state.phase), 3),
       targetPressureBar: round(state.lastTargetPressure, 3),
       machineFlowMlS: round(state.lastFlow, 3),
+      machineTelemetryValid: state.lastMachineTelemetryValid,
+      machineAgeMs: state.lastMachineAtMs ? Math.max(0,now-state.lastMachineAtMs) : null,
       pressureBar: round(state.lastPressure, 3),
       machineWeightFlowGS: round(state.lastMachineWeightFlow, 3),
       rawScaleWeightG: round(state.latestRawWeight, 3),
@@ -1283,7 +1302,44 @@ function createPlugin(host) {
   }
 
 
+  function stageActuatorEvidence(run, phase) {
+    const cfg=run && run.config || {};
+    if (cfg.basketContext !== "coffee") return {eligible:true,reason:"Empty/legacy engineering context"};
+    const limit=finiteOrNull(cfg[phase+"PressureLimit"]);
+    const all=(run.samples||[]).filter(x=>x.phase===phase && finiteOrNull(x.tMs)!==null);
+    if (!all.length || limit===null || limit<=0) return {eligible:false,reason:"Coffee actuator evidence missing; keep command"};
+    const start=Math.min(...all.map(x=>Number(x.tMs)));
+    // Exclude the first second of actuator transients. No interpolated or cup
+    // derivative data are used to pretend the machine reached its command.
+    const rows=all.filter(x=>Number(x.tMs)-start>=1000);
+    let usable=0,nearLimit=0,underCommand=0;
+    for (const row of rows) {
+      const pressure=finiteOrNull(row.pressureBar), flow=finiteOrNull(row.machineFlowMlS);
+      let command=finiteOrNull(cfg[phase+"CommandMlS"]);
+      if (phase==="stage3" && cfg.stage3Shape && cfg.stage3Shape.enabled) {
+        const frame=finiteOrNull(row.profileFrame);
+        command=frame===2?finiteOrNull(cfg.stage3Shape.earlyCommand):
+          frame===3?finiteOrNull(cfg.stage3Shape.midCommand):
+          frame===4?finiteOrNull(cfg.stage3Shape.lateCommand):null;
+      }
+      if (row.machineTelemetryValid!==true || finiteOrNull(row.machineAgeMs)===null || Number(row.machineAgeMs)>1000 || pressure===null || pressure<0 || flow===null || flow<0 || command===null || command<=0) continue;
+      usable++;
+      if (pressure>=limit*0.95) nearLimit++;
+      if (flow<command*0.70) underCommand++;
+    }
+    const pressureFraction=usable?nearLimit/usable:1;
+    const underCommandFraction=usable?underCommand/usable:1;
+    const eligible=usable>=4 && usable>=rows.length*0.8 && pressureFraction<0.20 && underCommandFraction<0.25;
+    const reason=usable<4 || usable<rows.length*0.8 ? "Coffee machine telemetry/frame coverage insufficient; keep command" :
+      pressureFraction>=0.20 ? "Pressure limiter may be active; cup-flow target may be unreachable. Keep command, do not increase pressure" :
+      underCommandFraction>=0.25 ? "Machine flow is not tracking the shot command; withhold numeric correction" :
+      "Coffee pressure and actuator quality gates passed";
+    return {eligible,reason,pressureLimitBar:limit,samples:usable,expectedSamples:rows.length,
+      pressureLimitedFraction:round(pressureFraction,3),underCommandFraction:round(underCommandFraction,3)};
+  }
+
   function stage1AdaptiveEvidence(run) {
+    if (!stageActuatorEvidence(run, "stage1").eligible) return null;
     if (!run || (run.kind || "hyperex") !== "hyperex") return null;
     const m = stage1StartupMetrics(run);
     const cfg = run.config || {};
@@ -1300,6 +1356,7 @@ function createPlugin(host) {
   }
 
   function stage2AdaptiveEvidence(run) {
+    if (!stageActuatorEvidence(run, "stage2").eligible) return null;
     if (!run || (run.kind || "hyperex") !== "hyperex") return null;
     const p = diagnosticPhaseSummary(run, "stage2");
     const cfg = run.config || {};
@@ -1315,6 +1372,7 @@ function createPlugin(host) {
   }
 
   function stage3AdaptiveEvidence(run) {
+    if (!stageActuatorEvidence(run, "stage3").eligible) return null;
     if (!run || (run.kind || "hyperex") !== "hyperex") return null;
     const st = stage3StabilityDiagnostics(run);
     const phase = diagnosticPhaseSummary(run, "stage3");
@@ -1405,6 +1463,7 @@ function createPlugin(host) {
         finiteOrNull(state.flowMultiplierCurrent) === null || !multiplierClose(state.flowMultiplierCurrent, calibrationBaseMultiplier())) return null;
     return {
       schema: 3,
+      basketContext: state.cfg.basketContext,
       mapCreatedAt: String(state.calibrationMap.createdAt || ""),
       lutSchema: state.calibrationMap.schema,
       lutAlgorithm: state.calibrationMap.algorithm || "",
@@ -1424,11 +1483,95 @@ function createPlugin(host) {
     };
   }
 
+  function refreshLearningStage() {
+    if (!state.cfg || state.phase!=="idle") return state.learningStage;
+    const status={automatic:true,minEmptyShots:2,maxEmptyShots:3,emptyShots:0};
+    const finish=(stage,message,extra={})=>{
+      state.learningStage={...status,stage,message,...extra};
+      return state.learningStage;
+    };
+    if (!state.calibrationMapUsable) {
+      state.cfg.basketContext="empty";
+      return finish("STEP 1 · EMPTY CALIBRATION","Run Step 1 with an empty locked-in basket to save the original LUT.");
+    }
+    const key=fp=>{if(!fp)return "";const q={...fp};delete q.basketContext;return adaptiveHistoryFingerprintKey(q);};
+    const fingerprint=key(adaptiveHistoryFingerprint());
+    const rows=state.persistentHistoryFile && state.persistentHistoryFile.shots || [];
+    const matching=fingerprint?rows.filter(r=>r && /^completed at /i.test(String(r.result||"")) &&
+      r.profileTruthSchema===3 && r.profileTruthVerified===true && key(r.fingerprint)===fingerprint):[];
+    const empty=matching.filter(r=>(r.basketContext||"unknown")!=="coffee");
+    const coffee=matching.filter(r=>r.basketContext==="coffee");
+    status.emptyShots=empty.length;
+    if (coffee.length) {
+      state.cfg.basketContext="coffee";
+      return finish("NORMAL COFFEE · AUTO","Continue normal coffees; the retained empty baseline is refined from completed coffee evidence.");
+    }
+    // Never change a run's interpretation while its automatic application is
+    // queued/in flight, nor use an unverified/failed storage write as readiness.
+    const applyStatus=state.autoApplyLastStatus && state.autoApplyLastStatus.status;
+    if (["scheduled","applying"].includes(applyStatus)) return finish("STEP 2 · APPLYING","Wait for the pending next-shot decision and verified application. Do not start an extra test cup.");
+    if (!state.runtimeProfileVerified || !state.machineProfileAckKey || state.persistentHistoryAvailable!==true || state.pendingHistoryWrite) {
+      return finish("STEP 2 · CHECKING","Waiting for verified workflow and history readback; do not add test cups while checks are pending.");
+    }
+    if (applyStatus==="error") return finish("STEP 2 · BLOCKED","Automatic application failed. Read the raw workflow/error and fix it; do not add empty-basket cups.");
+    const usable=(r,strict)=>{
+      const a=r.s2||{},b=r.s3||{};
+      return [a.rawRegressionGS,b.rawRegressionGS].every(x=>finiteOrNull(x)!==null && Number(x)>0) &&
+        Number(a.windowS)>=4 && Number(b.windowS)>=5 &&
+        Number(a.rawRegressionR2)>=(strict ? .97 : .93) && Number(b.rawRegressionR2)>=(strict ? .93 : .85) &&
+        !(r.s3Stability&&r.s3Stability.stall&&r.s3Stability.stall.suspected);
+    };
+    const last=empty.slice(-2);
+    const inBand=r=>["s2","s3"].every(k=>{
+      const q=r[k];return Number(q.targetGS)>0 && Math.abs(Number(q.rawRegressionGS)/Number(q.targetGS)-1)<=.12;
+    });
+    const variation=k=>{
+      const a=Number(last[0]&&last[0][k]&&last[0][k].rawRegressionGS);
+      const b=Number(last[1]&&last[1][k]&&last[1][k].rawRegressionGS);
+      return Math.abs(a-b)/((a+b)/2);
+    };
+    const stable=last.length===2 && last.every(r=>usable(r,true)&&inBand(r)) && variation("s2")<=.15 && variation("s3")<=.20;
+    const capped=empty.length>=3 && last.length===2 && last.every(r=>usable(r,false));
+    if (stable || capped) {
+      state.cfg.basketContext="coffee";
+      return finish("READY FOR COFFEE · AUTO",stable?
+        "Two clean stable empty-basket shots are sufficient. You can fill the basket and brew normally; no further empty-basket tuning.":
+        "Empty-basket tuning has reached its 3-shot limit. Preserve this baseline and begin coffee use; at most one dedicated filled-basket acceptance shot.",
+        {transitionBasis:stable?"two stable shots":"bounded empty-basket test budget",limitedEmptyImprovement:!stable});
+    }
+    state.cfg.basketContext="empty";
+    return finish(empty.length>=3?"STEP 2 · BLOCKED":"STEP 2 · EMPTY BASELINE",empty.length>=3?
+      "The 3-shot limit is reached but data/stall checks need attention. Stop empty-basket tests and inspect existing diagnostics.":
+      "Run Step 2 with an empty basket. The plugin refines the next-shot command mapping while preserving the original LUT. It will prompt you automatically after 2–3 shots.");
+  }
+
+  function baselineFeedForwardPayload() {
+    const fingerprint=adaptiveHistoryFingerprint();
+    const baseKey=fp=>{
+      if (!fp || typeof fp!=="object") return "";
+      const copy={...fp};delete copy.basketContext;
+      return adaptiveHistoryFingerprintKey(copy);
+    };
+    const key=baseKey(fingerprint);
+    const rows=state.persistentHistoryFile && state.persistentHistoryFile.shots || [];
+    const references=key ? rows.filter(row=>row && /^completed at /i.test(String(row.result||"")) && row.profileTruthSchema===3 && row.profileTruthVerified===true &&
+      (row.basketContext||"unknown")!=="coffee" && baseKey(row.fingerprint)===key) : [];
+    const latest=references.length?references[references.length-1]:null;
+    const override=testOverrideStatus();
+    return {role:"feed-forward prior; not a matching coffee consensus shot",
+      calibrationRetained:!!state.calibrationMapUsable,referenceShots:references.length,
+      sourceRunIds:references.map(row=>row.runId),sourceClassification:"empty/pre-upgrade reference",
+      commandSeedRetained:!!(override.valid && override.baselinePrior && override.activeStages.length),
+      sourceCommands:latest&&latest.commands||null,
+      priorCupResponse:latest?{stage1:latest.s1Startup||latest.s1,stage2:latest.s2,stage3:latest.s3,stage3Stability:latest.s3Stability}:null,
+      note:"Retain LUT, validated command baseline and historical cup-response reference. Coffee backpressure changes the response; numeric coffee updates require new coffee evidence and actuator/pressure quality."};
+  }
+
   function trustedAdaptiveRun(run) {
     const c = run && run.config;
     const key = adaptiveHistoryFingerprintKey(adaptiveHistoryFingerprint());
     return !!(run && run.kind === "hyperex" && /^completed at /i.test(String(run.result || "")) && c &&
-      c.profileTruthVerified === true && c.profileTruthSchema === 3 && key &&
+      c.profileTruthVerified === true && c.profileTruthSchema === 3 && c.basketContext === state.cfg.basketContext && key &&
       adaptiveHistoryFingerprintKey(c.adaptiveFingerprint) === key);
   }
 
@@ -1444,6 +1587,7 @@ function createPlugin(host) {
       status: state.persistentHistoryStatus || "unknown",
       savedShots: shots,
       compatibleShots: Number(state.persistentHistoryCompatibleCount || 0),
+      baselineReferenceShots: baselineFeedForwardPayload().referenceShots,
       maxShots: HISTORY_FILE_MAX_SHOTS,
       storageKey: STORAGE_HISTORY_FILE
     };
@@ -1492,7 +1636,8 @@ function createPlugin(host) {
     const st = summary.stage3Stability || null;
     return {
       runId: String(run.runId),
-      pluginVersion: "0.1.51",
+      pluginVersion: "0.1.52",
+      basketContext: run.config && run.config.basketContext || "unknown",
       startedAt: run.startedAt || null, endedAt: run.endedAt || null, result: run.result || null,
       fingerprint: run.config && run.config.adaptiveFingerprint || null,
       profileTruthSchema: run.config && run.config.profileTruthSchema || 0,
@@ -1515,7 +1660,7 @@ function createPlugin(host) {
     // Never overwrite disk before the initial read, and serialize full-file writes.
     if (!state.persistentHistoryLoaded || !state.storageProbeVerified || state.persistentHistoryAvailable === false || !state.persistentHistoryFile) return false;
     if (state.pendingHistoryWrite) { state.historyWriteDirty = true; return true; }
-    state.persistentHistoryFile.writerVersion = "0.1.51";
+    state.persistentHistoryFile.writerVersion = "0.1.52";
     state.persistentHistoryFile.updatedAt = new Date().toISOString();
     state.persistentHistoryFile.writeToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     state.pendingHistoryWrite = JSON.stringify(state.persistentHistoryFile);
@@ -1540,7 +1685,7 @@ function createPlugin(host) {
     const record = compactPersistentShotRecord(run, evidence);
     if (!record) return;
     if (!state.persistentHistoryFile || typeof state.persistentHistoryFile !== "object") {
-      state.persistentHistoryFile = { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:"0.1.51", createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(), shots:[] };
+      state.persistentHistoryFile = { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:"0.1.52", createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(), shots:[] };
     }
     if (!Array.isArray(state.persistentHistoryFile.shots)) state.persistentHistoryFile.shots = [];
     state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.filter(x => x && x.runId !== record.runId);
@@ -1550,6 +1695,7 @@ function createPlugin(host) {
   }
 
   function restoreAdaptiveHistoryFromPersistentFile() {
+    refreshLearningStage();
     const fpKey = adaptiveHistoryFingerprintKey(adaptiveHistoryFingerprint());
     const compatible = row => row && row.profileTruthSchema === 3 && row.fingerprint &&
       adaptiveHistoryFingerprintKey(row.fingerprint) === fpKey;
@@ -1779,8 +1925,13 @@ function createPlugin(host) {
         }
       }
     }
+    const actuatorGuards={stage1:stageActuatorEvidence(run,"stage1"),stage2:stageActuatorEvidence(run,"stage2"),stage3:stageActuatorEvidence(run,"stage3")};
+    for (const [key,guard] of [["s1",actuatorGuards.stage1],["s2",actuatorGuards.stage2],["s3",actuatorGuards.stage3]]) {
+      const decision=key==="s1"?s1:key==="s2"?s2:s3;
+      if (!guard.eligible) Object.assign(decision,{usable:false,action:"LIMITED / HOLD",confidence:"INSUFFICIENT",reason:guard.reason,actuatorGuard:guard});
+    }
     const actionable=!!((s1.usable&&s1.action==="ADJUST"&&Number.isFinite(Number(s1.suggestedCommandMlS)))||(s2.usable&&s2.action==="ADJUST"&&Number.isFinite(Number(s2.suggestedCommandMlS)))||(s3.usable&&s3.suggestedShape));
-    return {usable:!!(s1.usable||s2.usable||s3.usable),actionable,runId:run.runId,mode:"SHOT-TO-SHOT ONLY",s1,s2,s3,note:"All three stages use completed-shot evidence only. No running-shot scale control, no extra skipStep calls, and the calibration LUT is never rewritten."};
+    return {usable:!!(s1.usable||s2.usable||s3.usable),actionable,basketContext:run.config.basketContext||"unknown",actuatorGuards,runId:run.runId,mode:"SHOT-TO-SHOT ONLY",s1,s2,s3,note:"All three stages use completed-shot evidence only. No running-shot scale control, no extra skipStep calls, and the calibration LUT is never rewritten."};
   }
 
 
@@ -1830,7 +1981,7 @@ function createPlugin(host) {
     }
     const previousOverrides = state.testOverrides ? JSON.parse(JSON.stringify(state.testOverrides)) : null;
     try {
-      state.testOverrides = { schema:3, writerVersion:"0.1.51", savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, targets:binding.targets, stages, s3Shape, adaptiveSource:{ runId:suggestion.runId, appliedAt:new Date().toISOString(), mode:String(source || "manual") } };
+      state.testOverrides = { schema:3, writerVersion:"0.1.52", savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, basketContext:binding.basketContext, targets:binding.targets, stages, s3Shape, adaptiveSource:{ runId:suggestion.runId, appliedAt:new Date().toISOString(), mode:String(source || "manual") } };
       storageWrite(STORAGE_TEST_OVERRIDES, state.testOverrides);
 
       const verifyStatus = testOverrideStatus();
@@ -1879,6 +2030,8 @@ function createPlugin(host) {
 
   async function autoApplyNextShotIfEligible(run) {
     if (!state.autoApplyNextShot || !run) return;
+    if (state.autoApplyLastStatus && state.autoApplyLastStatus.runId === run.runId &&
+        ["applying","applied","manual-applied"].includes(state.autoApplyLastStatus.status)) return;
     const suggestion = nextShotAdaptiveSuggestion(run);
     if (!suggestion || !suggestion.actionable) {
       state.autoApplyLastStatus = {
@@ -1887,8 +2040,11 @@ function createPlugin(host) {
       };
       emitSkinChanged();
       log(`AUTO APPLY waiting after ${run.runId}: ${state.autoApplyLastStatus.message}.`);
+      refreshLearningStage();
       return;
     }
+    state.autoApplyLastStatus = {runId:run.runId,status:"applying",at:new Date().toISOString(),message:"Applying proposal; awaiting workflow readback and machine upload acknowledgement"};
+    emitSkinChanged();
     try {
       const result = await applyNextShotAdaptiveSuggestion(run, "auto");
       state.autoApplyLastStatus = {
@@ -1898,6 +2054,7 @@ function createPlugin(host) {
       };
       emitSkinChanged();
       log(`AUTO APPLY completed for ${run.runId}.`);
+      refreshLearningStage();
     } catch (error) {
       state.autoApplyLastStatus = {
         runId: run.runId, status: "error", at: new Date().toISOString(),
@@ -1906,6 +2063,43 @@ function createPlugin(host) {
       emitSkinChanged();
       log(`AUTO APPLY failed safely for ${run.runId}: ${error.message || error}`);
     }
+  }
+
+  async function adaptiveAuditPayload() {
+    const revision=state.workflowSelectionRevision;
+    const basketContext=state.cfg.basketContext;
+    const fingerprint=adaptiveHistoryFingerprintKey(adaptiveHistoryFingerprint());
+    const expected=profileObject();
+    const response=await api("/workflow",{method:"GET"});
+    const body=await response.json();
+    const actual=body && body.profile && typeof body.profile==="object" ? body.profile : null;
+    const contextStable=revision===state.workflowSelectionRevision && basketContext===state.cfg.basketContext && fingerprint===adaptiveHistoryFingerprintKey(adaptiveHistoryFingerprint()) && profileExecutionEquivalent(expected,profileObject());
+    const proposal=nextShotAdaptiveSuggestion(state.diagnosticLast);
+    const commands=actual?profileCommandSummaryFromProfile(actual):null;
+    const close=(a,b)=>finiteOrNull(a)!==null && finiteOrNull(b)!==null && Math.abs(Number(a)-Number(b))<=0.001;
+    let proposalMatchesWorkflow=null;
+    if (proposal && proposal.actionable) {
+      proposalMatchesWorkflow=!!(contextStable && commands);
+      for (const [key,field] of [["s1","stage1CommandMlS"],["s2","stage2CommandMlS"]]) {
+        const q=proposal[key];
+        if (q && q.usable && q.action==="ADJUST") proposalMatchesWorkflow=proposalMatchesWorkflow && close(commands&&commands[field],q.suggestedCommandMlS);
+      }
+      if (proposal.s3 && proposal.s3.usable && proposal.s3.suggestedShape) {
+        const shape=commands && commands.s3Shape;
+        proposalMatchesWorkflow=proposalMatchesWorkflow && !!(shape&&shape.enabled) &&
+          ["earlyCommand","earlySeconds","midCommand","midSeconds","lateCommand"].every(k=>close(shape[k],proposal.s3.suggestedShape[k]));
+      }
+    }
+    // Read-only: never repairs or uploads a profile. A proposal is separate
+    // from the workflow and neither is independent DE1 firmware-memory proof.
+    return {serverTime:new Date().toISOString(),basketContext,
+      contextStable,rawWorkflowProfile:actual,actualCommands:actual?profileCommandSummaryFromProfile(actual):null,
+      expectedCommands:profileCommandSummaryFromProfile(expected),
+      workflowMatchesExpected:contextStable && profileExecutionEquivalent(actual,expected),
+      differences:profileExecutionDifferences(actual,expected),
+      proposal,proposalMatchesWorkflow,baselinePrior:baselineFeedForwardPayload(),
+      autoApply:state.autoApplyLastStatus,cachedProfileTruth:runtimeProfileTruthPayload(),
+      machineProfileIndependentlyReadBack:false};
   }
 
   function diagnosticRunCommandSnapshot(run) {
@@ -2184,7 +2378,9 @@ function createPlugin(host) {
       const ds = diagnosticSummary(state.diagnosticLast);
       const r2 = ds && ds.kind === "hyperex" && ds.stage2 && ds.stage2.rawRegressionGS !== null ? `S2 ${ds.stage2.rawRegressionGS}g/s` : (state.calibrationMapUsable ? "CAL READY" : "FLOW CAL / DIAG");
       surfaces.push({
-        id: "hyperex-diag-header", kind: "header-button", label: "DIAG / CAL", text: r2,
+        id: "hyperex-diag-header", kind: "header-button",
+        label: state.learningStage && state.learningStage.stage === "READY FOR COFFEE · AUTO" ? "READY · ADD COFFEE" : "DIAG / CAL",
+        text: state.learningStage && state.learningStage.stage === "READY FOR COFFEE · AUTO" ? "EMPTY BASELINE COMPLETE" : r2,
         action: { type: "open", view: "diag-dashboard", presentation: "page" }
       });
     }
@@ -2196,7 +2392,7 @@ function createPlugin(host) {
     return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 html,body{margin:0;width:100%;min-height:100%;background:transparent;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;color:#f7f7f8;overflow-x:hidden}.card{width:860px;max-width:96vw;box-sizing:border-box;padding:22px;border-radius:20px;background:#17191d;box-shadow:0 18px 60px rgba(0,0,0,.45)}html.diagview,body.diagview{background:#17191d;min-width:100%;min-height:100vh}body.diagview .card{width:100vw;max-width:none;min-height:100vh;border-radius:0;box-shadow:none;padding:24px 30px}body.diagview .chart{height:250px}body.diagview textarea{height:190px}.k{font-size:13px;letter-spacing:.12em;opacity:.65}.t{font-size:27px;font-weight:800;margin:7px 0}.d{font-size:15px;line-height:1.45}.row{display:flex;gap:9px;margin-top:14px;flex-wrap:wrap}.b{border:0;border-radius:12px;padding:12px 14px;font-size:14px;font-weight:800;cursor:pointer}.p{background:#ff4fa3;color:#fff}.s{background:#343840;color:#fff}.warn{background:#8a4b18;color:#fff}.danger{background:#8a2530;color:#fff}.primaryAction{background:#f27a22;color:#fff;padding:14px 20px;font-size:15px;box-shadow:0 5px 18px rgba(0,0,0,.28)}.secondaryAction{background:#2b2f36;color:#e7e9ec;border:1px solid #555b65;padding:10px 13px;font-size:13px}.tertiaryAction{background:transparent;color:#c9cdd3;border:1px solid #3d424a;padding:10px 13px;font-size:13px}.actionBadge{display:inline-block;margin-left:8px;padding:3px 7px;border-radius:999px;background:#4a321d;color:#ffd4ac;font-size:9px;font-weight:800;letter-spacing:.08em;vertical-align:middle}.manualPanel{margin-top:10px;padding:12px;border-radius:10px;background:#1c1f24;border:1px solid #30343b}.active{outline:2px solid #fff}.m{margin-top:12px;font:12px ui-monospace,monospace;opacity:.78}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}.stat{background:#23262c;border-radius:11px;padding:10px}.stat b{display:block;font-size:17px;margin-top:4px}.small{font-size:11px;opacity:.68}.section{margin-top:14px;padding-top:13px;border-top:1px solid #343840}.section h3{margin:0 0 8px;font-size:16px}.good{color:#77d98b}.bad{color:#ff8c92}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}textarea{width:100%;height:150px;box-sizing:border-box;background:#0f1114;color:#dfe6ef;border:1px solid #343840;border-radius:10px;padding:9px;font:10px ui-monospace,monospace;resize:vertical}table{width:100%;border-collapse:collapse;font-size:11px}th,td{text-align:right;padding:5px 6px;border-bottom:1px solid #292d33}th:first-child,td:first-child{text-align:left}.chart{width:100%;height:205px;background:#101216;border:1px solid #2f333a;border-radius:10px;margin-top:8px}.legend{font-size:11px;opacity:.8;line-height:1.5}.stepHead{margin-top:18px;padding:14px 16px;border-radius:14px;background:#20242a;border:1px solid #3a4049}.stepHead b{font-size:19px}.stepBadge{float:right;padding:4px 9px;border-radius:999px;background:#343840;font-size:10px;letter-spacing:.06em}.stepBadge.good{background:#173b25}.stepBadge.bad{background:#4a2024}.stepHint{margin-top:5px;font-size:12px;opacity:.72;line-height:1.45}
-</style></head><body><div class="card"><div class="k">HYPEREX v0.1.51</div><div id="title" class="t">Checking…</div><div id="detail" class="d"></div>
+</style></head><body><div class="card"><div class="k">HYPEREX v0.1.52</div><div id="title" class="t">Checking…</div><div id="detail" class="d"></div>
 <div id="diag" style="display:none">
   <div class="d" style="margin:2px 0 12px;padding:10px 12px;border-radius:10px;background:#23262c"><b>ENTRY</b> · Dashboard <b>DIAG / CAL</b> is enabled by default. If another plugin occupies the reserved header slot, open <b>Plugins → HyperEx Pulse Filter</b>.</div>
 
@@ -2205,11 +2401,11 @@ html,body{margin:0;width:100%;min-height:100%;background:transparent;font-family
 
   <div class="stepHead"><span id="step2badge" class="stepBadge">WAITING</span><b>STEP 2 · SHOT-TO-SHOT AUTO ADAPTIVE</b><div class="stepHint">Normal daily workflow after calibration. Every completed HyperEx shot is measured with RAW scale weight + timestamp regression. S1, S2 and S3 are evaluated separately; verified changes apply only to the <b>next shot</b>. No running-shot scale closed loop and no extra skipStep calls.</div></div>
   <div id="historystatus" class="d" style="margin-top:10px;padding:10px 12px;border-radius:10px;background:#23262c"><b>ADAPTIVE HISTORY</b> · checking persistent storage…</div>
-  <div class="section"><h3>NEXT SHOT · APPLIED PROFILE</h3><div class="small">Actual workflow commands below come from GET /workflow. Real g/s targets and LUT commands remain reference values. VERIFIED also requires successful machine upload acknowledgement.</div><div id="appliedcommands" class="m"></div></div>
+  <div class="section"><h3>NEXT SHOT · APPLIED PROFILE</h3><div class="small">Actual workflow commands below come from GET /workflow. Real g/s targets and LUT commands remain reference values. VERIFIED also requires successful machine upload acknowledgement.</div><div id="appliedcommands" class="m"></div><div id="auditstatus" class="small"></div><button id="readworkflow" class="b s">READ RAW WORKFLOW</button><details><summary>Raw workflow / adaptive audit JSON</summary><textarea id="auditjson" readonly></textarea></details></div>
   <div class="section"><h3>LATEST SHOT · COMMAND SNAPSHOT</h3><div class="small">Historical command snapshot captured at shot start. It may differ from NEXT SHOT after adaptation.</div><div id="runcommands" class="m"></div></div>
   <div class="section"><h3>LATEST SHOT · VALIDATION</h3><div class="small">RAW real flow is a multi-second linear regression of unmodified scale weight vs scale timestamp. Instantaneous RAW dW/dt is not the acceptance reference.</div><div id="validation" class="grid"></div><div id="validationtable" class="m"></div></div>
   <div class="section"><h3>S1 STARTUP / S3 STABILITY</h3><div class="small">S1 separates first-rise delay from active cup flow. S3 tracks EARLY / MID / LATE stability and stall/decay behavior.</div><div id="stability" class="m"></div></div>
-  <div class="section"><h3>NEXT SHOT ADAPTIVE <span class="actionBadge">AUTOMATIC PATH</span></h3><div id="autoapplybox" class="m"></div><div class="small">S1 startup, S2 level and S3 LEVEL + SHAPE use repeated completed-shot evidence and bounded corrections. Calibration LUT is never rewritten by adaptive history.</div><div id="adaptive" class="m"></div></div>
+  <div class="section"><h3>NEXT SHOT ADAPTIVE <span class="actionBadge">AUTOMATIC PATH</span></h3><div id="basketcontext" class="m"></div><div id="autoapplybox" class="m"></div><div class="small">S1 startup, S2 level and S3 LEVEL + SHAPE use repeated completed-shot evidence and bounded corrections. Calibration LUT is never rewritten by adaptive history.</div><div id="adaptive" class="m"></div></div>
   <div class="section"><h3>LIVE / END-OF-RUN TELEMETRY</h3><div id="stats" class="grid"></div></div>
   <div class="section"><h3>REAL SCALE CURVES</h3><div class="legend">Flow: target / DE1 machine Flow / Decaid weightFlow / RAW-scale 1 s slope. Weight chart is the unmodified scale weight stream.</div><svg id="flowchart" class="chart" viewBox="0 0 800 205" preserveAspectRatio="none"></svg><svg id="weightchart" class="chart" viewBox="0 0 800 205" preserveAspectRatio="none"></svg></div>
 
@@ -2259,7 +2455,7 @@ const ADV_SETTING_KEYS={temperature:'Temperature',stage1Flow:'Stage1Flow',stage1
 const ADV_FIELDS=Object.keys(ADV_SETTING_KEYS);
 async function loadAdvancedSettings(){try{const r=await fetch(base+'/advanced-settings');if(!r.ok)return;const j=await r.json(),a=j.settings||{};for(const k of ADV_FIELDS){const q=$('adv_'+k);if(q&&a[k]!=null)q.value=a[k]}const meta=$('advancedmeta');if(meta){const bt=j.basicCurve||{};meta.innerHTML='Single settings source · core curve: S1 <b>'+esc(bt.stage1WeightG)+'g</b> → settle <b>'+esc(bt.releaseSettleSeconds)+'s</b> → soak <b>'+esc(bt.soakSeconds)+'s</b> → S2→S3 <b>'+esc(bt.stage2WeightG)+'g</b> → final <b>'+esc(bt.finalWeightG)+'g</b> · GHC timeout <b>'+esc(bt.ghcConfirmTimeoutSeconds)+'s</b>.'}}catch(e){const meta=$('advancedmeta');if(meta)meta.textContent='Settings load error: '+e}}
 async function saveAdvancedSettings(){const payload={};for(const k of ADV_FIELDS){const q=$('adv_'+k);if(!q)continue;const v=Number(q.value);if(!Number.isFinite(v)){alert('Invalid setting: '+k);return}payload[ADV_SETTING_KEYS[k]]=v}if(!confirm('Save these values to the normal HyperEx plugin Settings?\\n\\nThis uses the same settings source shown on the Plugins page and reloads HyperEx once.'))return;const r=await fetch(coreSettings,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});if(!r.ok){alert('Save failed: '+await r.text());return}alert('Settings saved. HyperEx is reloading; reopen DIAG / CAL if this page closes.');setTimeout(()=>location.reload(),1200)}
-async function loadCal(){try{const r=await fetch(base+'/calibration-status');const c=await r.json();renderAppliedCommands(c.commandFlows||{},c.profileTruth||{});latestAutoApplyEnabled=c.autoApplyNextShot!==false;latestAutoApplyStatus=c.autoApplyLastStatus||null;renderAutoApplyBox();renderAdaptive(latestAdaptiveSummary);const ok=c.calibrationUsable;const b1=$("step1badge"),b2=$("step2badge");if(b1){b1.textContent=ok?"CAL READY":"REQUIRED FIRST";b1.className="stepBadge "+(ok?"good":"bad")}if(b2){b2.textContent=ok?"ACTIVE · AUTO NEXT SHOT":"WAITING FOR VALID LUT";b2.className="stepBadge "+(ok?"good":"bad")}const hs=c.persistentHistory||{},hb=$("historystatus");if(hb){if(hs.available===true){hb.style.background="#173b25";hb.style.color="#9ff0b5";hb.innerHTML='<b>ADAPTIVE HISTORY · PERSISTENT</b> · '+esc(hs.savedShots)+' saved shot(s), '+esc(hs.compatibleShots)+' compatible with the current calibration/LUT. Cross-reload/version regression is enabled.'}else if(hs.available===false){hb.style.background="#4a2024";hb.style.color="#ffb4b8";hb.innerHTML='<b>ADAPTIVE HISTORY · SESSION ONLY</b> · '+esc(hs.status)+'<br>Shot-to-shot adaptation still works in this session, but cross-reload/version regression is disabled.'}else{hb.style.background="#3b2d16";hb.style.color="#ffd58a";hb.innerHTML='<b>ADAPTIVE HISTORY</b> · checking pluginStorage write/readback…'}}if($("t1")){ $("t1").value=c.commandFlows&&c.commandFlows.stage1DesiredGS!=null?c.commandFlows.stage1DesiredGS:""; $("t2").value=c.commandFlows&&c.commandFlows.stage2DesiredGS!=null?c.commandFlows.stage2DesiredGS:""; $("t3").value=c.commandFlows&&c.commandFlows.stage3DesiredGS!=null?c.commandFlows.stage3DesiredGS:"";}if(calmode){calmode.innerHTML=(c.calibrationModes||[{id:'low',label:'Low Water'},{id:'full',label:'Full'}]).map(x=>'<button class="b s '+(c.calibrationMode===x.id?'active':'')+'" data-mode="'+esc(x.id)+'">'+esc(x.label)+(x.id==='low'?' · DEFAULT':'')+'</button>').join('');calmode.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-mode',{mode:q.dataset.mode});await loadCal()})}if(waterwarn){const w=c.waterPreflight||{};const wc=w.status==='ok'?'#163b26':w.status==='warn'?'#3b2d16':'#4a2024';const fg=w.status==='ok'?'#9ff0b5':w.status==='warn'?'#ffd58a':'#ffb4b8';waterwarn.style.background=wc;waterwarn.style.color=fg;let tank='Tank level unavailable';if(w.available)tank='Tank: <b>'+esc(w.currentLevelMm)+' mm</b> · refill threshold: <b>'+esc(w.refillLevelMm)+' mm</b> · margin: <b>'+esc(w.marginMm)+' mm</b>';waterwarn.innerHTML='<b>WATER / VESSEL / TANK PREFLIGHT · '+esc(c.calibrationModeLabel)+' · '+esc((w.status||'unknown').toUpperCase())+'</b><br>'+tank+'<br>Prime: '+esc(c.primeFlow)+' ml/s × '+esc(c.primeSeconds)+' s · '+esc(c.calibrationSteps)+' calibration plateaus × '+esc(c.calibrationStepSeconds)+' s · nominal DE1 command water <b>≈'+esc(c.nominalCommandWaterMl)+' ml</b>.<br>Use a <b>'+esc(c.recommendedContainerMl)+' ml or larger</b> catch vessel. Plugin actively stops around <b>'+esc(c.calibrationHardStopG)+' g</b> actual collected water. '+esc(w.message||'');}calstatus.innerHTML='<b class="'+(ok?'good':'bad')+'">'+(ok?'CALIBRATION READY':'CALIBRATION NOT READY')+'</b><br>Mode: <b>'+esc(c.calibrationModeLabel)+'</b> · Profile: <b>'+esc(c.calibrationProfileTitle)+'</b><br>Scope: <b>'+esc(c.scopeLabel)+'</b> · DE1 multiplier: <b>'+esc(c.currentFlowMultiplier)+'</b> · map base: <b>'+esc(c.calibrationBaseMultiplier)+'</b> · suggested: <b>'+esc(c.suggestedFlowMultiplier)+'</b><br>'+esc(c.calibrationStaleReason||'LUT valid')+(c.lastCalibrationValid===false?'<br><b class="bad">LAST CAL RUN INVALID — previous valid LUT retained</b>':c.lastCalibrationValid===true?'<br><b class="good">LAST CAL RUN VALID</b>':'')+'<br>Real→command: S1 '+esc(c.commandFlows&&c.commandFlows.stage1DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage1CommandMlS)+' · S2 '+esc(c.commandFlows&&c.commandFlows.stage2DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage2CommandMlS)+' · S3 '+esc(c.commandFlows&&c.commandFlows.stage3DesiredGS)+'→'+appliedS3Text(c.commandFlows||{})+'<br>Test mode: <b>'+esc((c.commandFlows&&c.commandFlows.manualTestStatus)||'none')+'</b>';renderTestCommands(c.commandFlows||{},latestAdvisorySummary||{});scope.innerHTML=['off','hyperex','global'].map(x=>'<button class="b s '+(c.scope===x?'active':'')+'" data-scope="'+x+'">'+(x==='off'?'OFF':x==='hyperex'?'HYPEREX ONLY':'GLOBAL')+'</button>').join('');scope.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-scope',{scope:q.dataset.scope});await loadCal()});const last=c.lastCalibration||null;const rows=last&&Array.isArray(last.plateauResults)?last.plateauResults:[];const anchors=last&&last.map&&Array.isArray(last.map.targetAnchors)?last.map.targetAnchors:[];const anchorHtml=anchors.length?'<div style="margin:8px 0"><b>TARGET LUT:</b> '+anchors.map(a=>esc(a.blockId)+' '+esc(a.actualFlow)+' g/s → '+esc(a.commandFlow)+' ml/s ('+esc(a.quality)+')').join(' · ')+'</div>':'';map.innerHTML=rows.length?anchorHtml+'<table><tr><th>Frame</th><th>Block / target</th><th>DE1 cmd</th><th>RAW real g/s</th><th>DE1 flow</th><th>R²</th><th>Status</th></tr>'+rows.map(p=>'<tr><td>'+esc(p.frame)+'</td><td>'+esc((p.blockId||'—')+(p.targetReal!=null?' / '+p.targetReal:'') )+'</td><td>'+esc(p.commandFlow)+'</td><td>'+esc(p.actualFlow)+'</td><td>'+esc(p.machineFlow)+'</td><td>'+esc(p.r2)+'</td><td class="'+(p.acceptedInMap?'good':(p.valid?'':'bad'))+'">'+esc(p.acceptedInMap?'ANCHOR SOURCE':(p.reason||'REJECTED'))+'</td></tr>').join('')+'</table><div style="margin-top:8px">'+esc(c.profileSyncStatus||'')+'</div>':'No calibration run yet. Low Water automatically searches the three HyperEx real-flow targets and generates the LUT only when all targets pass. Full remains the wide engineering staircase.';const cur=c.stage1StartupCorrection||1;startupbox.innerHTML='<b>Stable skip topology:</b> scale feedback is advisory only. Optional S3 DECAY COMP may use 5 profile frames, but S3 subframes advance only by their own timers and never add plugin skipStep calls.'+(Number(cur)!==1?(' <br><span class="bad">Legacy S1 startup factor '+esc(cur)+'× is stored but ignored in v0.1.51.</span> <button id=clearstartup class="b s">CLEAR LEGACY</button>'):'');const cl=$("clearstartup");if(cl)cl.onclick=async()=>{try{await post('startup-clear',{});await loadCal()}catch(e){alert('Clear failed: '+e)}};}catch(e){calstatus.textContent='Calibration status error: '+e}}
+async function loadCal(){try{const r=await fetch(base+'/calibration-status');const c=await r.json();renderAppliedCommands(c.commandFlows||{},c.profileTruth||{});renderBasketContext(c);latestAutoApplyEnabled=c.autoApplyNextShot!==false;latestAutoApplyStatus=c.autoApplyLastStatus||null;renderAutoApplyBox();renderAdaptive(latestAdaptiveSummary);const ok=c.calibrationUsable;const b1=$("step1badge"),b2=$("step2badge");if(b1){b1.textContent=ok?"CAL READY":"REQUIRED FIRST";b1.className="stepBadge "+(ok?"good":"bad")}if(b2){b2.textContent=ok?"ACTIVE · AUTO NEXT SHOT":"WAITING FOR VALID LUT";b2.className="stepBadge "+(ok?"good":"bad")}const hs=c.persistentHistory||{},hb=$("historystatus");if(hb){if(hs.available===true){hb.style.background="#173b25";hb.style.color="#9ff0b5";hb.innerHTML='<b>ADAPTIVE HISTORY · PERSISTENT</b> · '+esc(hs.savedShots)+' saved shot(s), '+esc(hs.compatibleShots)+' compatible with the current calibration/LUT and basket context. '+esc(hs.baselineReferenceShots||0)+' empty/pre-upgrade baseline references retained; coffee consensus accumulates from normal coffees.'}else if(hs.available===false){hb.style.background="#4a2024";hb.style.color="#ffb4b8";hb.innerHTML='<b>ADAPTIVE HISTORY · SESSION ONLY</b> · '+esc(hs.status)+'<br>Shot-to-shot adaptation still works in this session, but cross-reload/version regression is disabled.'}else{hb.style.background="#3b2d16";hb.style.color="#ffd58a";hb.innerHTML='<b>ADAPTIVE HISTORY</b> · checking pluginStorage write/readback…'}}if($("t1")){ $("t1").value=c.commandFlows&&c.commandFlows.stage1DesiredGS!=null?c.commandFlows.stage1DesiredGS:""; $("t2").value=c.commandFlows&&c.commandFlows.stage2DesiredGS!=null?c.commandFlows.stage2DesiredGS:""; $("t3").value=c.commandFlows&&c.commandFlows.stage3DesiredGS!=null?c.commandFlows.stage3DesiredGS:"";}if(calmode){calmode.innerHTML=(c.calibrationModes||[{id:'low',label:'Low Water'},{id:'full',label:'Full'}]).map(x=>'<button class="b s '+(c.calibrationMode===x.id?'active':'')+'" data-mode="'+esc(x.id)+'">'+esc(x.label)+(x.id==='low'?' · DEFAULT':'')+'</button>').join('');calmode.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-mode',{mode:q.dataset.mode});await loadCal()})}if(waterwarn){const w=c.waterPreflight||{};const wc=w.status==='ok'?'#163b26':w.status==='warn'?'#3b2d16':'#4a2024';const fg=w.status==='ok'?'#9ff0b5':w.status==='warn'?'#ffd58a':'#ffb4b8';waterwarn.style.background=wc;waterwarn.style.color=fg;let tank='Tank level unavailable';if(w.available)tank='Tank: <b>'+esc(w.currentLevelMm)+' mm</b> · refill threshold: <b>'+esc(w.refillLevelMm)+' mm</b> · margin: <b>'+esc(w.marginMm)+' mm</b>';waterwarn.innerHTML='<b>WATER / VESSEL / TANK PREFLIGHT · '+esc(c.calibrationModeLabel)+' · '+esc((w.status||'unknown').toUpperCase())+'</b><br>'+tank+'<br>Prime: '+esc(c.primeFlow)+' ml/s × '+esc(c.primeSeconds)+' s · '+esc(c.calibrationSteps)+' calibration plateaus × '+esc(c.calibrationStepSeconds)+' s · nominal DE1 command water <b>≈'+esc(c.nominalCommandWaterMl)+' ml</b>.<br>Use a <b>'+esc(c.recommendedContainerMl)+' ml or larger</b> catch vessel. Plugin actively stops around <b>'+esc(c.calibrationHardStopG)+' g</b> actual collected water. '+esc(w.message||'');}calstatus.innerHTML='<b class="'+(ok?'good':'bad')+'">'+(ok?'CALIBRATION READY':'CALIBRATION NOT READY')+'</b><br>Mode: <b>'+esc(c.calibrationModeLabel)+'</b> · Profile: <b>'+esc(c.calibrationProfileTitle)+'</b><br>Scope: <b>'+esc(c.scopeLabel)+'</b> · DE1 multiplier: <b>'+esc(c.currentFlowMultiplier)+'</b> · map base: <b>'+esc(c.calibrationBaseMultiplier)+'</b> · suggested: <b>'+esc(c.suggestedFlowMultiplier)+'</b><br>'+esc(c.calibrationStaleReason||'LUT valid')+(c.lastCalibrationValid===false?'<br><b class="bad">LAST CAL RUN INVALID — previous valid LUT retained</b>':c.lastCalibrationValid===true?'<br><b class="good">LAST CAL RUN VALID</b>':'')+'<br>Real→command: S1 '+esc(c.commandFlows&&c.commandFlows.stage1DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage1CommandMlS)+' · S2 '+esc(c.commandFlows&&c.commandFlows.stage2DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage2CommandMlS)+' · S3 '+esc(c.commandFlows&&c.commandFlows.stage3DesiredGS)+'→'+appliedS3Text(c.commandFlows||{})+'<br>Test mode: <b>'+esc((c.commandFlows&&c.commandFlows.manualTestStatus)||'none')+'</b>';renderTestCommands(c.commandFlows||{},latestAdvisorySummary||{});scope.innerHTML=['off','hyperex','global'].map(x=>'<button class="b s '+(c.scope===x?'active':'')+'" data-scope="'+x+'">'+(x==='off'?'OFF':x==='hyperex'?'HYPEREX ONLY':'GLOBAL')+'</button>').join('');scope.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-scope',{scope:q.dataset.scope});await loadCal()});const last=c.lastCalibration||null;const rows=last&&Array.isArray(last.plateauResults)?last.plateauResults:[];const anchors=last&&last.map&&Array.isArray(last.map.targetAnchors)?last.map.targetAnchors:[];const anchorHtml=anchors.length?'<div style="margin:8px 0"><b>TARGET LUT:</b> '+anchors.map(a=>esc(a.blockId)+' '+esc(a.actualFlow)+' g/s → '+esc(a.commandFlow)+' ml/s ('+esc(a.quality)+')').join(' · ')+'</div>':'';map.innerHTML=rows.length?anchorHtml+'<table><tr><th>Frame</th><th>Block / target</th><th>DE1 cmd</th><th>RAW real g/s</th><th>DE1 flow</th><th>R²</th><th>Status</th></tr>'+rows.map(p=>'<tr><td>'+esc(p.frame)+'</td><td>'+esc((p.blockId||'—')+(p.targetReal!=null?' / '+p.targetReal:'') )+'</td><td>'+esc(p.commandFlow)+'</td><td>'+esc(p.actualFlow)+'</td><td>'+esc(p.machineFlow)+'</td><td>'+esc(p.r2)+'</td><td class="'+(p.acceptedInMap?'good':(p.valid?'':'bad'))+'">'+esc(p.acceptedInMap?'ANCHOR SOURCE':(p.reason||'REJECTED'))+'</td></tr>').join('')+'</table><div style="margin-top:8px">'+esc(c.profileSyncStatus||'')+'</div>':'No calibration run yet. Low Water automatically searches the three HyperEx real-flow targets and generates the LUT only when all targets pass. Full remains the wide engineering staircase.';const cur=c.stage1StartupCorrection||1;startupbox.innerHTML='<b>Stable skip topology:</b> scale feedback is advisory only. Optional S3 DECAY COMP may use 5 profile frames, but S3 subframes advance only by their own timers and never add plugin skipStep calls.'+(Number(cur)!==1?(' <br><span class="bad">Legacy S1 startup factor '+esc(cur)+'× is stored but ignored in v0.1.52.</span> <button id=clearstartup class="b s">CLEAR LEGACY</button>'):'');const cl=$("clearstartup");if(cl)cl.onclick=async()=>{try{await post('startup-clear',{});await loadCal()}catch(e){alert('Clear failed: '+e)}};}catch(e){calstatus.textContent='Calibration status error: '+e}}
 function svgPath(points,xmin,xmax,ymin,ymax){const W=800,H=205,pad=18,dx=Math.max(.001,xmax-xmin),dy=Math.max(.001,ymax-ymin);let out='';for(const q of points){if(!Number.isFinite(q[0])||!Number.isFinite(q[1]))continue;const x=pad+(q[0]-xmin)/dx*(W-pad*2),y=H-pad-(q[1]-ymin)/dy*(H-pad*2);out+=(out?' L ':'M ')+x.toFixed(1)+' '+y.toFixed(1)}return out}
 function renderChart(svg,series,ymin,ymax){if(!svg)return;let all=[];series.forEach(s=>all=all.concat(s.points));if(!all.length){svg.innerHTML='';return}const xs=all.map(p=>p[0]).filter(Number.isFinite),ys=all.map(p=>p[1]).filter(Number.isFinite);const xmin=Math.min(...xs),xmax=Math.max(...xs);if(ymin==null)ymin=Math.min(...ys);if(ymax==null)ymax=Math.max(...ys);if(ymax-ymin<.01)ymax=ymin+1;let h='<line x1="18" y1="187" x2="782" y2="187" stroke="#3a3f47"/><line x1="18" y1="18" x2="18" y2="187" stroke="#3a3f47"/>';for(const s of series){const path=svgPath(s.points,xmin,xmax,ymin,ymax);if(path)h+='<path d="'+path+'" fill="none" stroke="'+s.stroke+'" stroke-width="'+(s.width||1.7)+'" opacity="'+(s.opacity||1)+'"/>'}h+='<text x="24" y="16" fill="#aeb6c2" font-size="10">'+Number(ymax).toFixed(1)+'</text><text x="24" y="184" fill="#aeb6c2" font-size="10">'+Number(ymin).toFixed(1)+'</text>';svg.innerHTML=h}
 function renderCharts(run){if(!run)return;const combined=run.samples||[],raw=run.rawScaleSamples||[];const target=combined.map(s=>[Number(s.tMs)/1000,Number(s.targetFlowMlS)]),machine=combined.map(s=>[Number(s.tMs)/1000,Number(s.machineFlowMlS)]),decaid=combined.map(s=>[Number(s.tMs)/1000,Number(s.decaidWeightFlowGS)]);const rawSlope=[];for(let i=0;i<raw.length;i++){let j=i-1;while(j>0&&Number(raw[i].tMs)-Number(raw[j].tMs)<900)j--;if(j>=0){let reset=false;for(let k=j+1;k<=i;k++)if(raw[k].tareReset){reset=true;break}const dt=(Number(raw[i].scaleTimestampSeconds)-Number(raw[j].scaleTimestampSeconds));if(!reset&&Number.isFinite(dt)&&dt>.25){rawSlope.push([Number(raw[i].tMs)/1000,(Number(raw[i].weightG)-Number(raw[j].weightG))/dt])}}}const flowYs=[...target,...machine,...decaid,...rawSlope].map(p=>p[1]).filter(v=>Number.isFinite(v)&&v>-1&&v<20);const fymax=Math.max(6,flowYs.length?Math.min(12,Math.ceil(Math.max(...flowYs)+.5)):8);renderChart($('flowchart'),[{points:target,stroke:'#f0c75e',width:1.4},{points:machine,stroke:'#71a7ff',width:1.8},{points:decaid,stroke:'#c77dff',width:1.5,opacity:.8},{points:rawSlope,stroke:'#63d89b',width:2.1}],0,fymax);const wp=raw.map(r=>[Number(r.tMs)/1000,Number(r.weightG)]);if(wp.length){const wy=wp.map(p=>p[1]).filter(Number.isFinite);renderChart($('weightchart'),[{points:wp,stroke:'#e5e8ed',width:2}],Math.min(...wy),Math.max(...wy))}}
@@ -2292,7 +2488,7 @@ function renderAdaptive(s){
   if(s3.normalizedShapeVariabilityPct!=null)s3meas+=' · normalized shape var '+esc(s3.normalizedShapeVariabilityPct)+'%';
   if(s3.suggestedShape){const q=s3.suggestedShape;s3next='<b>'+esc(s3.action)+'<br>'+esc(q.earlyCommand)+' × '+esc(q.earlySeconds)+'s → '+esc(q.midCommand)+' × '+esc(q.midSeconds)+'s → '+esc(q.lateCommand)+'</b>';if(s3.levelFactor!=null)s3next+='<br><span class="small">LEVEL ×'+esc(s3.levelFactor)+' · normalized SHAPE '+(s3.shapeFactors||[]).map(x=>'×'+esc(x)).join(' / ')+'</span>'}
   h+='<tr><td>S3</td><td>'+s3meas+'<br>late/early '+esc(s3.lateToEarlyRatio)+' · '+esc(s3.status||'—')+'</td><td>'+s3shot+'</td><td>'+s3next+'</td><td>'+esc(s3.confidence||'—')+'</td></tr>';
-  h+='</table><div class="small" style="margin-top:7px">'+esc(a.note||'')+'<br>S1: '+esc(s1.maxStepRule||s1.reason||'—')+'<br>S2: '+esc(s2.maxStepRule||s2.reason||'—')+'<br>S3: '+esc(s3.maxStepRule||'')+'<br>'+esc(s3.reason||'—')+'</div>';
+  h+='</table><div class="small" style="margin-top:7px">'+esc(a.note||'')+'<br>S1: '+esc(s1.maxStepRule||'')+'<br>'+esc(s1.reason||'—')+'<br>S2: '+esc(s2.maxStepRule||'')+'<br>'+esc(s2.reason||'—')+'<br>S3: '+esc(s3.maxStepRule||'')+'<br>'+esc(s3.reason||'—')+'</div>';
   if(ready){
     if(latestAutoApplyEnabled){
       if(appliedForRun)h+='<div class="row"><span class="good"><b>APPLIED ✓ TO NEXT SHOT</b></span><span class="small" style="align-self:center">Readback and profile sync completed. The NEXT SHOT · APPLIED PROFILE block above is authoritative.</span></div>';
@@ -2304,7 +2500,21 @@ function renderAdaptive(s){
   const q=$('applynext');
   if(q)q.onclick=async()=>{if(!confirm('Apply the bounded NEXT SHOT adaptive suggestion?\\n\\nThis changes only future-shot profile commands. It does NOT modify the calibration LUT and does NOT change a running shot.'))return;try{const r=await post('adaptive-next-apply',{});if(r&&r.verified!==true)throw new Error('server did not verify the applied override');alert('Next-shot suggestion VERIFIED and applied.\\n\\nThe NEXT SHOT · APPLIED PROFILE block is authoritative.');await loadDiag()}catch(e){alert('Apply next shot failed: '+e)}}
 }
-function renderAutoApplyBox(){const box=$('autoapplybox');if(!box)return;const on=!!latestAutoApplyEnabled;const st=latestAutoApplyStatus||{};let status=st.message?('<span class="small">Last: '+esc(st.message)+(st.runId?' · '+esc(st.runId):'')+'</span>'):'';box.innerHTML='<div class="row"><button id="autoapplytoggle" class="b '+(on?'primaryAction':'tertiaryAction')+'">AUTO APPLY NEXT SHOT: '+(on?'ON':'OFF')+'</button><span class="small" style="align-self:center">'+(on?'Default mode · verified actionable suggestions apply automatically.':'Manual mode · enter DIAG and press APPLY NEXT SHOT when a numeric suggestion is available.')+'</span></div>'+status;const q=$('autoapplytoggle');if(q)q.onclick=async()=>{const next=!latestAutoApplyEnabled;if(!confirm((next?'Enable':'Disable')+' AUTO APPLY NEXT SHOT?\\n\\n'+(next?'Verified actionable suggestions will apply automatically after completed HyperEx shots.':'The plugin will return to the v0.1.39 manual APPLY NEXT SHOT workflow.')))return;try{const r=await post('adaptive-auto-set',{enabled:next});latestAutoApplyEnabled=!!r.autoApplyNextShot;latestAutoApplyStatus=r.autoApplyLastStatus||null;renderAutoApplyBox();renderAdaptive(latestAdaptiveSummary)}catch(e){alert('AUTO APPLY setting failed: '+e)}}}
+function renderBasketContext(c){
+ const el=$('basketcontext');if(!el)return;const prior=c.baselinePrior||{},stage=c.learningStage||{};
+ el.innerHTML='<b>'+esc(stage.stage||'CHECKING BASELINE')+'</b><div>'+esc(stage.message||'Checking calibration and saved empty-basket evidence.')+'</div><div class="small">Empty-basket Step 2: '+esc(stage.emptyShots||0)+' / '+esc(stage.maxEmptyShots||3)+' maximum. '+esc(prior.referenceShots||0)+' empty/pre-upgrade references retained. Starting LUT and bounded commands are kept; normal coffees then refine the next-shot trajectory automatically.</div>';
+}
+async function readRawWorkflow(){
+ const status=$('auditstatus'),out=$('auditjson');if(status)status.textContent='Reading fresh workflow without repair/upload…';
+ try{
+  const r=await fetch(base+'/adaptive-audit');const a=await r.json();
+  if(out)out.value=JSON.stringify(a,null,2);
+  if(!r.ok)throw Error(a.error||'Read failed');
+  status.textContent='RAW GET /workflow · '+a.serverTime+' · expected current profile match: '+a.workflowMatchesExpected+' · latest proposal match: '+(a.proposalMatchesWorkflow==null?'no actionable proposal':a.proposalMatchesWorkflow)+' · auto apply: '+((a.autoApply||{}).status||'no attempt recorded')+'. Upload acknowledgement is not independent DE1 memory readback.';
+ }catch(e){if(status)status.textContent='Raw readback unavailable: '+e}
+}
+if($('readworkflow'))$('readworkflow').onclick=readRawWorkflow;
+function renderAutoApplyBox(){const box=$('autoapplybox');if(!box)return;const on=!!latestAutoApplyEnabled;const st=latestAutoApplyStatus||{};let status=st.message?('<span class="small">Auto apply state: <b>'+esc(st.status||'unknown')+'</b> · '+esc(st.message)+(st.runId?' · '+esc(st.runId):'')+'</span>'):'';box.innerHTML='<div class="row"><button id="autoapplytoggle" class="b '+(on?'primaryAction':'tertiaryAction')+'">AUTO APPLY NEXT SHOT: '+(on?'ON':'OFF')+'</button><span class="small" style="align-self:center">'+(on?'Default mode · verified actionable suggestions apply automatically.':'Manual mode · enter DIAG and press APPLY NEXT SHOT when a numeric suggestion is available.')+'</span></div>'+status;const q=$('autoapplytoggle');if(q)q.onclick=async()=>{const next=!latestAutoApplyEnabled;if(!confirm((next?'Enable':'Disable')+' AUTO APPLY NEXT SHOT?\\n\\n'+(next?'Verified actionable suggestions will apply automatically after completed HyperEx shots.':'The plugin will return to the v0.1.39 manual APPLY NEXT SHOT workflow.')))return;try{const r=await post('adaptive-auto-set',{enabled:next});latestAutoApplyEnabled=!!r.autoApplyNextShot;latestAutoApplyStatus=r.autoApplyLastStatus||null;renderAutoApplyBox();renderAdaptive(latestAdaptiveSummary)}catch(e){alert('AUTO APPLY setting failed: '+e)}}}
 function renderS3Shape(c,st){if(!s3shape)return;const saved=c&&c.s3Shape&&c.s3Shape.enabled?c.s3Shape:null;const sug=shapeSuggestion(c,st);const q=saved||sug||{early:c.stage3CommandMlS,earlySeconds:8,mid:c.stage3CommandMlS,midSeconds:14,late:c.stage3CommandMlS};const ap=latestNextShotAdaptive&&latestNextShotAdaptive.s3;const hint=(ap&&ap.action&&(ap.action==='REPEAT SAME SHAPE'||ap.action==='VARIABLE / REPEAT'))?('NEXT SHOT: '+ap.action+' · keep the current shape unchanged until repeated evidence is consistent.'):('Suggested '+(sug&&sug.source==='NEXT SHOT ADAPTIVE'?'from NEXT SHOT ADAPTIVE':'from latest LATE DECAY')+': '+(sug?(sug.early+' × '+sug.earlySeconds+'s → '+sug.mid+' × '+sug.midSeconds+'s → '+sug.late):'—'));s3shape.innerHTML='<b>S3 SHAPE OVERRIDE EDITOR</b> · profile-time only, no extra skipStep<div class="small">'+(saved?'<span class="good"><b>APPLIED SHAPE</b></span> · inputs below are loaded from the current applied override.':'<b>NOT APPLIED</b> · inputs below are only a TEST/PROPOSED editor until APPLY TEST COMMANDS succeeds.')+'</div><table><tr><th>Mode</th><th>EARLY cmd</th><th>EARLY time</th><th>MID cmd</th><th>MID time</th><th>LATE cmd</th></tr><tr><td><select id="s3shape_mode"><option value="off" '+(!saved?'selected':'')+'>FLAT</option><option value="decay" '+(saved?'selected':'')+'>DECAY COMP TEST</option></select></td><td><input id="s3shape_early" type="number" min=".10" max="8" step=".01" value="'+esc(q.earlyCommand??q.early)+'" style="width:76px"></td><td><input id="s3shape_early_s" type="number" min="3" max="30" step="1" value="'+esc(q.earlySeconds)+'" style="width:62px"> s</td><td><input id="s3shape_mid" type="number" min=".10" max="8" step=".01" value="'+esc(q.midCommand??q.mid)+'" style="width:76px"></td><td><input id="s3shape_mid_s" type="number" min="3" max="30" step="1" value="'+esc(q.midSeconds)+'" style="width:62px"> s</td><td><input id="s3shape_late" type="number" min=".10" max="8" step=".01" value="'+esc(q.lateCommand??q.late)+'" style="width:76px"></td></tr></table><div class="small">Commands must be non-decreasing. Adjacent rises are bounded to ≤35% and ≤0.25 ml/s. '+hint+' The shape is enabled automatically only when AUTO APPLY is ON and a verified actionable adaptive suggestion passes all safety checks.</div>'}
 function renderTestCommands(c,a){if(!testcommands)return;testcommands.innerHTML='<table><tr><th>Stage</th><th>Target g/s</th><th>LUT cmd</th><th>Ref range</th><th>Editor mode</th><th>Editor flat cmd</th><th>CURRENTLY APPLIED</th></tr>'+stageTestRow('S1','stage1',c,a)+stageTestRow('S2','stage2',c,a)+stageTestRow('S3','stage3',c,a)+'</table><div class="small" style="margin-top:7px">DE1 command hard limit: 0.10–8.00 ml/s. MANUAL TEST changes only the HyperEx profile command; calibration LUT data remains untouched. If S3 DECAY COMP is enabled, its three shape commands override the flat S3 command.</div>';renderS3Shape(c,latestStage3Stability)}
 async function applyTestCommands(){const stages={};for(const key of ['stage1','stage2','stage3']){const mode=$('mode_'+key).value;const command=Number($('cmd_'+key).value);if(mode==='manual'&&(!Number.isFinite(command)||command<0.10||command>8.00)){alert(key.toUpperCase()+' manual command must be 0.10–8.00 ml/s.');return}stages[key]={mode,command}}const sm=$('s3shape_mode');const s3Shape={enabled:!!sm&&sm.value==='decay',earlyCommand:Number($('s3shape_early').value),earlySeconds:Number($('s3shape_early_s').value),midCommand:Number($('s3shape_mid').value),midSeconds:Number($('s3shape_mid_s').value),lateCommand:Number($('s3shape_late').value)};if(s3Shape.enabled){if([s3Shape.earlyCommand,s3Shape.midCommand,s3Shape.lateCommand].some(x=>!Number.isFinite(x)||x<.10||x>8)){alert('S3 shape commands must be 0.10–8.00 ml/s.');return}if(s3Shape.earlyCommand>s3Shape.midCommand||s3Shape.midCommand>s3Shape.lateCommand){alert('S3 DECAY COMP commands must be non-decreasing: EARLY ≤ MID ≤ LATE.');return}if(!Number.isFinite(s3Shape.earlySeconds)||s3Shape.earlySeconds<3||s3Shape.earlySeconds>30||!Number.isFinite(s3Shape.midSeconds)||s3Shape.midSeconds<3||s3Shape.midSeconds>30){alert('S3 EARLY/MID times must be 3–30 seconds.');return}}if(!confirm('Apply these TEST commands to HyperEx?\\n\\nS1/S2/manual flat commands are static. S3 DECAY COMP, if enabled, advances only by profile time and adds NO plugin skipStep calls. Calibration LUT remains unchanged. Use empty-basket validation first.'))return;try{await post('test-command-set',{stages,s3Shape});await loadDiag()}catch(e){alert('Apply failed: '+e)}}
@@ -2375,6 +2585,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     clearTimer("armReinforceTimer");
     clearTimer("armReinforceTimer2");
     clearTimer("autoApplyTimer");
+    clearTimer("completionTimer");
   }
 
   function profileObject() {
@@ -2460,7 +2671,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     return {
       title: calibrationProfileTitle(normalizedMode),
       author: "ladiosupp / HyperEx",
-      notes: `EMPTY BASKET ONLY. HyperEx v0.1.51 ${wp.modeLabel} real-flow calibration. Prime ${wp.primeFlow.toFixed(2)} ml/s × ${wp.primeSeconds.toFixed(1)} s, then ${wp.steps} ${wp.algorithm === "target-lut" ? "target-search" : "calibration"} plateaus × ${wp.stepSeconds.toFixed(1)} s; nominal DE1 commanded water ≈${wp.nominalCommandWaterMl} ml. Use a ${wp.recommendedContainerMl} ml or larger catch vessel. The plugin actively stops calibration at about ${wp.hardStopG} g actual collected water to preserve margin below 300 ml. Tank level is checked before PREPARE when live DE1 water-level telemetry is available. Tare the scale, start Espresso manually, and leave the vessel in place until Idle.`,
+      notes: `EMPTY BASKET ONLY. HyperEx v0.1.52 ${wp.modeLabel} real-flow calibration. Prime ${wp.primeFlow.toFixed(2)} ml/s × ${wp.primeSeconds.toFixed(1)} s, then ${wp.steps} ${wp.algorithm === "target-lut" ? "target-search" : "calibration"} plateaus × ${wp.stepSeconds.toFixed(1)} s; nominal DE1 commanded water ≈${wp.nominalCommandWaterMl} ml. Use a ${wp.recommendedContainerMl} ml or larger catch vessel. The plugin actively stops calibration at about ${wp.hardStopG} g actual collected water to preserve margin below 300 ml. Tank level is checked before PREPARE when live DE1 water-level telemetry is available. Tare the scale, start Espresso manually, and leave the vessel in place until Idle.`,
       beverage_type: "espresso",
       steps: [
         ...(wp.primeSeconds > 0 ? [{
@@ -2753,7 +2964,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
         invalidateProfileTruth('checking fresh workflow / multiplier readback', false);
         await requireIdleMachineForProfileSync();
         checkProfileSelection(revision);
-        if (!state.calibrationStorageLoaded || !state.overrideStorageLoaded || !state.scopeStorageLoaded || !state.scopedOriginalStorageLoaded) throw new Error('Waiting for stored calibration and overrides / multiplier scope');
+        if (!state.calibrationStorageLoaded || !state.overrideStorageLoaded || !state.scopeStorageLoaded || !state.scopedOriginalStorageLoaded || !state.learningContextLoaded) throw new Error('Waiting for stored calibration and overrides / multiplier scope / history context');
         if (state.scopeMode === 'hyperex') {
           if (state.scopeChangeBusy) throw new Error('Scoped multiplier change still pending');
           await enterHyperExScopedMultiplier('profile verification', revision);
@@ -2881,6 +3092,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       machineState,
       substate,
       pressure: n(m.pressure !== undefined ? m.pressure : p.pressure, 0),
+      telemetryValid: finiteOrNull(m.pressure !== undefined ? m.pressure : p.pressure)!==null && finiteOrNull(m.flow !== undefined ? m.flow : p.flow)!==null,
       flow: n(m.flow !== undefined ? m.flow : p.flow, 0),
       targetFlow: Number.isFinite(Number(m.targetFlow !== undefined ? m.targetFlow : p.targetFlow)) ? Number(m.targetFlow !== undefined ? m.targetFlow : p.targetFlow) : null,
       targetPressure: Number.isFinite(Number(m.targetPressure !== undefined ? m.targetPressure : p.targetPressure)) ? Number(m.targetPressure !== undefined ? m.targetPressure : p.targetPressure) : null,
@@ -3422,9 +3634,14 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
 
   function calibrationStatusPayload() {
     recomputeCalibrationUsability();
+    refreshLearningStage();
     const map = state.calibrationMap;
     return {
-      pluginVersion: '0.1.51',
+      pluginVersion: '0.1.52',
+      basketContext: state.cfg ? state.cfg.basketContext : "unknown",
+      learningStage: state.learningStage,
+      baselinePrior: baselineFeedForwardPayload(),
+      overrideContextStatus: testOverrideStatus().reason,
       autoApplyNextShot: !!state.autoApplyNextShot,
       autoApplyLastStatus: state.autoApplyLastStatus,
       calibrationMode: state.calibrationMode,
@@ -3661,7 +3878,11 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     if (reason) log(`Sequence reset (${previous} -> idle): ${reason}`);
     if (reason && state.workflowTitle === (state.cfg && state.cfg.profileTitle)) scheduleProfileVerification('sequence reset');
     if (completedDiagnosticRun && /^completed at /i.test(String(reason || "")) && state.autoApplyNextShot) {
-      state.autoApplyTimer = setTimeout(() => { state.autoApplyTimer = null; autoApplyNextShotIfEligible(completedDiagnosticRun); }, 250);
+      state.autoApplyLastStatus = {runId:completedDiagnosticRun.runId,status:"scheduled",at:new Date().toISOString(),message:"Completed shot queued for next-shot evaluation"};
+      state.autoApplyTimer = setTimeout(() => {
+        state.autoApplyTimer = null;
+        return autoApplyNextShotIfEligible(completedDiagnosticRun);
+      }, 250);
     }
   }
 
@@ -3681,6 +3902,8 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
   }
 
   function startSequence(rawWeight) {
+    refreshLearningStage();
+    if (state.autoApplyTimer !== null) state.autoApplyLastStatus = {status:"cancelled",at:new Date().toISOString(),message:"New shot started before pending adaptation; current shot commands retained"};
     clearAllTimers();
     state.phase = "stage1";
     state.lowFlowSamples = 0;
@@ -3744,6 +3967,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     state.lastMachineState = machine.machineState;
     state.lastSubstate = machine.substate;
     state.lastPressure = machine.pressure;
+    state.lastMachineTelemetryValid = machine.telemetryValid === true;
     state.lastFlow = machine.flow;
     state.lastTargetFlow = machine.targetFlow;
     state.lastTargetPressure = machine.targetPressure;
@@ -3980,6 +4204,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
         state.lastMachineState = machine.machineState;
         state.lastSubstate = machine.substate;
         state.lastPressure = machine.pressure;
+    state.lastMachineTelemetryValid = machine.telemetryValid === true;
         state.lastFlow = machine.flow;
         const pourHasBegun = machine.substate === "preinfusion" || machine.substate === "pouring";
         if (machine.machineState === "espresso" && pourHasBegun) {
@@ -4161,8 +4386,15 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     }
 
     if (state.phase === "finishing" && machine.machineState === "idle") {
+      if (state.completionTimer !== null) return;
       const finalWeight = state.cumulativeWeight;
-      setTimeout(() => resetSequence(`completed at ${finalWeight.toFixed(2)} g`), 500);
+      const sequenceToken = state.sequenceStartedAtMs;
+      const run = state.diagnosticCurrent;
+      state.completionTimer = setTimeout(() => {
+        state.completionTimer = null;
+        if (state.phase !== "finishing" || state.sequenceStartedAtMs !== sequenceToken || state.diagnosticCurrent !== run) return;
+        resetSequence(`completed at ${finalWeight.toFixed(2)} g`);
+      }, 500);
       return;
     }
 
@@ -4229,10 +4461,11 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
 
   return {
     id: ID,
-    version: "0.1.51",
+    version: "0.1.52",
 
     onLoad(settings) {
       state.cfg = loadConfig(settings || {});
+      state.learningContextLoaded = false;
       state.scopeMode = normalizeScope(state.cfg.flowMultiplierScope);
       state.calibrationMode = normalizeCalibrationMode(state.cfg.calibrationMode);
       state.autoApplyNextShot = state.cfg.autoApplyNextShot !== false;
@@ -4249,7 +4482,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       state.runtimeProfileMismatchAbortSent = false;
       state.calibrationArmed = false;
       resetSequence();
-      log(`Loaded v0.1.51. Stable two-skip topology; scale feedback is validation/advisory only; optional S3 decay-compensation subframes advance by profile time and add no skipStep calls. Dual calibration profiles are installed/updated at first load; HyperEx flow settings are desired REAL mass flow: ${state.cfg.stage1Flow}/${state.cfg.stage2Flow}/${state.cfg.stage3Flow} g/s. flowMultiplier scope=${scopeLabel(state.scopeMode)}. Dashboard idle shortcut=${state.cfg.idleDashboardShortcut ? "enabled" : "off (plugin page primary)"}. Brew state machine remains v0.1.16/v0.1.17 baseline.`);
+      log(`Loaded v0.1.52. Stable two-skip topology; scale feedback is validation/advisory only; optional S3 decay-compensation subframes advance by profile time and add no skipStep calls. Dual calibration profiles are installed/updated at first load; HyperEx flow settings are desired REAL mass flow: ${state.cfg.stage1Flow}/${state.cfg.stage2Flow}/${state.cfg.stage3Flow} g/s. flowMultiplier scope=${scopeLabel(state.scopeMode)}. Dashboard idle shortcut=${state.cfg.idleDashboardShortcut ? "enabled" : "off (plugin page primary)"}. Brew state machine remains v0.1.16/v0.1.17 baseline.`);
       connectScaleStream();
       connectWaterLevelStream();
       storageRead(STORAGE_CAL);
@@ -4284,6 +4517,10 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       if (request.endpoint === "diagnostics-csv") {
         const run = state.diagnosticLast;
         return pluginHttpText(request, run ? 200 : 404, "text/csv; charset=utf-8", diagnosticCsv(run), run ? { "Content-Disposition": `attachment; filename=hyperex-${run.runId}.csv` } : {});
+      }
+      if (request.endpoint === "adaptive-audit") {
+        try { return pluginHttpJson(request,200,await adaptiveAuditPayload()); }
+        catch(error) { return pluginHttpJson(request,503,{error:String(error.message||error),autoApply:state.autoApplyLastStatus}); }
       }
       if (request.endpoint === "calibration-status") {
         await refreshFlowMultiplier(true);
@@ -4361,7 +4598,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
             s3Shape = { enabled:true, earlyCommand:round(earlyCommand,3), earlySeconds:round(earlySeconds,1), midCommand:round(midCommand,3), midSeconds:round(midSeconds,1), lateCommand:round(lateCommand,3) };
           }
           const binding = testOverrideBinding();
-          state.testOverrides = { schema:3, writerVersion:"0.1.51", savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, targets:binding.targets, stages, s3Shape };
+          state.testOverrides = { schema:3, writerVersion:"0.1.52", savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, basketContext:binding.basketContext, targets:binding.targets, stages, s3Shape };
           storageWrite(STORAGE_TEST_OVERRIDES, state.testOverrides);
           await syncHyperExProfile(state.workflowTitle === state.cfg.profileTitle);
           log(`Manual test commands updated: ${JSON.stringify(commandFlowSummary())}`);
@@ -4486,7 +4723,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
         return pluginHttpJson(request, 200, calibrationStatusPayload());
       }
       if (request.endpoint === "startup-apply") {
-        return pluginHttpJson(request, 409, { error: "Legacy startup-apply is disabled in v0.1.51. S1 is handled only by the unified shot-to-shot adaptive engine after two matching MEDIUM-confidence startup shots." });
+        return pluginHttpJson(request, 409, { error: "Legacy startup-apply is disabled in v0.1.52. S1 is handled only by the unified shot-to-shot adaptive engine after two matching MEDIUM-confidence startup shots." });
       }
       if (request.endpoint === "startup-clear") {
         state.stage1StartupCorrection = null; storageWrite(STORAGE_S1_STARTUP, '');
@@ -4595,12 +4832,13 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
           if (!state.persistentHistoryLoaded) {
             const sessionRows = state.persistentHistoryFile && state.persistentHistoryFile.shots || [];
             state.persistentHistoryFile = parsed && Number(parsed.schema || 0) >= 2 && Array.isArray(parsed.shots) ? parsed
-              : { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:"0.1.51", shots:[] };
+              : { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:"0.1.52", shots:[] };
             for (const row of sessionRows) {
               state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.filter(x => x && x.runId !== row.runId).concat(row);
             }
             state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.slice(-HISTORY_FILE_MAX_SHOTS);
             state.persistentHistoryLoaded = true;
+            state.learningContextLoaded = true;
             if (state.storageProbeVerified) { clearTimer('storageProbeTimer'); persistHistoryFile(); }
           } else if (state.pendingHistoryWrite) {
             if (!parsed || adaptiveHistoryFingerprintKey(parsed) !== adaptiveHistoryFingerprintKey(JSON.parse(state.pendingHistoryWrite))) {
@@ -4614,6 +4852,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
             }
           }
           restoreAdaptiveHistoryFromPersistentFile();
+          scheduleProfileVerification("history context loaded");
           emitSkinChanged();
 
 

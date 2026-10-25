@@ -2,7 +2,7 @@ name: Sync HyperEx package
 on:
   push:
     paths:
-      - 'HyperExPulseFilter_sync.zip'
+      - 'HyperExPulseFilter_sync.complete'
 permissions:
   contents: write
 jobs:
@@ -10,18 +10,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Unpack plugin package
+      - name: Rebuild and unpack plugin package
         run: |
+          cat HyperExPulseFilter_sync.part* | base64 -d > /tmp/HyperExPulseFilter_sync.zip
           rm -rf /tmp/hyperex-sync
           mkdir -p /tmp/hyperex-sync
-          unzip -q HyperExPulseFilter_sync.zip -d /tmp/hyperex-sync
+          unzip -q /tmp/HyperExPulseFilter_sync.zip -d /tmp/hyperex-sync
           cp -f /tmp/hyperex-sync/decenthyperexplugin.reaplugin/plugin.js decenthyperexplugin.reaplugin/plugin.js
           cp -f /tmp/hyperex-sync/decenthyperexplugin.reaplugin/manifest.json decenthyperexplugin.reaplugin/manifest.json
           cp -f /tmp/hyperex-sync/decenthyperexplugin.reaplugin/README.md decenthyperexplugin.reaplugin/README.md
           cp -f /tmp/hyperex-sync/decenthyperexplugin.reaplugin/HyperEx_Flow_Calibration_Low_Water.json decenthyperexplugin.reaplugin/HyperEx_Flow_Calibration_Low_Water.json
           cp -f /tmp/hyperex-sync/decenthyperexplugin.reaplugin/HyperEx_Flow_Calibration_Full.json decenthyperexplugin.reaplugin/HyperEx_Flow_Calibration_Full.json
           rm -f decenthyperexplugin.reaplugin/HyperEx_Pulse_Filter.json
-          rm -f HyperExPulseFilter_sync.zip
+          rm -f HyperExPulseFilter_sync.part* HyperExPulseFilter_sync.complete
           rm -f .github/workflows/sync-hyperex-package.yml
       - name: Commit synchronized v0.1.48 source
         run: |

@@ -1,4 +1,58 @@
-# HyperEx Pulse Filter v0.1.49
+# HyperEx Pulse Filter v0.1.51
+
+## Current candidate: independent conservative S3 SHAPE fallback
+
+Based on the exact v0.1.50 ZIP (SHA-256 dbdb995b68e1ced18b2d712ed077580fec15196f17fdabff675f47e993b72711). v0.1.50 passed workflow verification on the user's machine. Three shots showed stable S2, inconsistent S1 startup quality, and repeated S3 decay with varying absolute frame flows.
+
+- S1 quality thresholds are unchanged. Diagnostics now lists the failed checks, sample count and active duration. A 0.70 s 20–80% interval remains below the 0.90 s minimum.
+- When the existing absolute S3 variability gate rejects a pair, a separate SHAPE-only fallback can use two clean same-command/same-timing/same-measurement-basis shots. Both must show late decay in quarters and profile frames. Each regression R² ≥0.95, frame windows ≥3 s, normalized frame variability ≤15%, overall variability ≤20%, and frame late/early ratio difference ≤0.12.
+- LEVEL factor stays 1 in this fallback. Each command change is bounded by 4% and 0.05 ml/s; monotonicity, hard limits and adjacent-rise limits remain enforced. Measurement-window-weighted command exposure must remain within 0.2% after rounding. This is an engineering constraint, not a guarantee of unchanged cup flow or final water volume.
+- Existing normal S3 and stall paths remain. Mixed measurement bases cannot form a pair. Next-shot-only application still requires idle, valid LUT and verified workflow upload/readback.
+- No calibration LUT rewriting, running-shot scale feedback or new skipStep calls.
+- Diagnostics shows the SHAPE ONLY / LEVEL HOLD action, normalized variability and decision reason.
+
+Validation: 81/81 Node checks passed, including the original 70, screenshot-derived frame evidence (not a replay of unavailable RAW logs), synthetic full RAW pipeline, idle guard, verified DTO upload, upload-failure rollback, command bounds and rendered browser-script syntax. Real-machine correction behavior remains unverified.
+
+Install 0.1.51 over the same plugin without uninstalling/clearing data. Preserve parameters, valid LUT and manual seed. Confirm CAL READY, PERSISTENT history and WORKFLOW READBACK VERIFIED before any shot. Upgrade restores compatible compact evidence but does not automatically recompute the previous run's suggestion: a new completed shot is normally needed. Do not assume old latest-shot details survive reload. Capture the next-shot action and actual commands after that shot; if correction applied, validate its execution on the following shot.
+
+Run:
+```sh
+node --check plugin.js
+node tests/verify_v0151.cjs
+```
+
+See HANDOFF_v0151.md for current state. Earlier release notes below are historical.
+
+---
+
+# Historical v0.1.50 release notes
+
+## v0.1.50 — Decaid profile serialization compatibility
+
+The first v0.1.49 hardware screenshot showed PERSISTENT history and retained LUT values, but `Final GET /workflow does not match expected LUT/adaptive profile`. The v0.1.49 simulations echoed submitted JSON and missed Decaid's real serialization.
+
+The [official Decaid model](https://github.com/decentespresso/decaid/blob/f2248a756f80639c5f96e1fbdd4c426c956fbca4/lib/src/models/data/profile.dart) omits top-level import-only `type` and `legacy_profile_type`, and a flow step serializes `flow` without its unused `pressure` field. v0.1.49 compared those discarded keys and could reject a correctly applied profile indefinitely.
+
+v0.1.50 compares Decaid-retained profile content, applies numeric string/number normalization, and compares the actuator appropriate to each pump type. Library upsert deduplication uses the same retained-content model. **Actual flow, pressure for pressure steps, temperature, duration, weight/volume stops, limiter, and step exit conditions remain verified.** A mismatch still prevents arming and now reports differing field paths and expected/actual values. Diagnostics labels actual commands explicitly as GET /workflow results.
+
+The evidence truth schema advances to 3 because the comparator now also verifies step exits. Old evidence stays diagnostic-only. Valid LUTs and compatible manual seed commands are retained; this upgrade alone does not require recalibration. The first new verified completed shot begins current consensus evidence.
+
+Verification: **70/70 simulated checks pass**, including Decaid DTO roundtrips, literal 2/5/1.5 repair, S3 seed shape, unchanged profile write deduplication, genuine mismatch gating and field-level diagnostics. This is not a claim of hardware validation.
+
+### Immediate hardware test
+
+1. Install v0.1.50 and confirm CAL READY. Do not rerun calibration or alter targets/multiplier/manual commands.
+2. Select HyperEx, open Diagnostics, and wait for WORKFLOW READBACK VERIFIED. Before running a shot, send a photo of that area including actual commands and history status.
+3. If still NOT VERIFIED, do not run a shot. Capture the full error: it now names differing fields.
+4. Once verified, complete two shots without manual changes or APPLY TEST COMMANDS. Capture workflow commands, shot snapshots, RAW regression and adaptive decisions. Add a third shot only if a next-shot correction needs validation.
+
+The machine upload status is an HTTP acknowledgement, not independent DE1 internal-profile readback. Dashboard CLOSE/HOME remains a separate open hardware/UI issue.
+
+Run: `node --check plugin.js` and `node tests/verify_v0150.cjs` from this directory. The runner uses only Node.js built-ins and injects test hooks into memory, not the shipped runtime code.
+
+Earlier release notes below describe their historical versions; use this section and HANDOFF_v0150.md for the current state.
+
+
 
 ## v0.1.49 — profile truth and persistent history hardening
 

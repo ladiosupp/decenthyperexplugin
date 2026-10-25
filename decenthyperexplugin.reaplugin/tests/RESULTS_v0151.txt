@@ -1,0 +1,83 @@
+PASS LUT translates real targets to .719 / 2.507 / .569
+PASS matching workflow event cannot arm without GET and upload
+PASS old literal profile repaired, uploaded and read back
+PASS unchanged repeated verification skips every PUT and POST
+PASS parallel requests are serialized and do not duplicate uploads
+PASS GET failure cannot use cached matching profile
+PASS machine upload failure is fatal to verification
+PASS workflow PUT failure stays unarmed
+PASS final readback mismatch fails after upload
+PASS null workflow does not produce fabricated actual commands
+PASS final readback failure clears old acknowledgement
+PASS active phase rejects all profile writes
+PASS machine espresso blocks even if plugin phase is idle
+PASS shot starting during verification blocks subsequent uploads
+PASS switching workflows mid-verification never arms new workflow
+PASS away-and-back selection revision invalidates in-flight verification
+PASS expected profile changing mid-flight cannot arm stale commands
+PASS strict multiplier GET cannot fall back to cached multiplier
+PASS mismatched actual multiplier blocks arming
+PASS missing stored override read blocks premature arming
+PASS profile truth reports acknowledgement, not hardware memory readback
+PASS LUT point change invalidates fingerprint even with same creation date
+PASS actual multiplier and real target changes invalidate fingerprint
+PASS snapshot fingerprint is not recomputed at shot completion
+PASS old 1.48 truth and interrupted shots cannot suggest numeric changes
+PASS incompatible and legacy rows excluded from persistent restore
+PASS SESSION ONLY never restores disk evidence and preserves session evidence
+PASS storage failure removes restored evidence but keeps session rows
+PASS probe arriving before initial history read cannot overwrite disk
+PASS initial history read arriving before probe is also safe
+PASS history file mismatch reports SESSION ONLY despite successful probe
+PASS history file timeout reports SESSION ONLY
+PASS starting a shot cannot cancel storage verification timeout
+PASS concurrent history updates serialize and persist newest file
+PASS late initial history read merges new session record without loss
+PASS confirmed next-shot application is stored separately from source evidence
+PASS S2 two high-quality HIT measurements HOLD the existing command
+PASS S2 repeated high flow correction stays within both bounds
+PASS unverified pouring sends Idle only once and never starts diagnostics
+PASS S1 insufficient startup data yields REPEAT without numeric trim
+PASS S1 delay is separate from active flow
+PASS S2 uses timestamp regression despite misleading instantaneous derivatives
+PASS S3 fallback retains actual .698 / .720 / .778 commands
+PASS two matching clean S3 shots produce bounded next-shot LEVEL and SHAPE
+PASS shape factors are normalized independently from S3 level factor
+PASS invalid empty calibration retains previous LUT and history
+PASS compact history keeps real diagnostic field values
+PASS pressure and phase weight changes isolate old adaptive evidence
+PASS HyperEx-only scope restores calibrated multiplier before verification
+PASS GLOBAL scope never writes multiplier automatically
+PASS selection switch before scoped multiplier write cancels it
+PASS leaving scope during multiplier upload restores original multiplier
+PASS failed scoped restore retains saved original multiplier for retry
+PASS verification deferred during espresso retries after machine returns idle
+PASS late stored scope cannot trigger default HyperEx multiplier writes
+PASS late saved-original read cannot overwrite a newly captured multiplier
+PASS real Decaid serialization roundtrip preserves equivalent execution
+PASS matching real DTO workflow arms without unnecessary PUT
+PASS old literal machine-flow workflow repairs through actual DTO serialization
+PASS repeated DTO roundtrips skip library, workflow and machine rewrites
+PASS real DTO S3 seed shape survives readback verification
+PASS changed actual flow is never hidden by DTO normalization
+PASS unexpected step exit condition blocks verification
+PASS changed limiter, duration, temperature, weight or target blocks equivalence
+PASS missing required numeric command is not equivalent to zero
+PASS null and omitted no-exit condition are equivalent
+PASS pressure step compares pressure and ignores unused flow
+PASS stored-profile equivalence ignores dropped import metadata but preserves author and notes
+PASS mismatch error names the actual field and preserves the guard
+PASS truth schema 2 evidence from 1.49 is excluded from new consensus
+PASS photographed shots 2/3 allow SHAPE ONLY while LEVEL stays held
+PASS shape-only rejects opposite frame trend even if status says decay
+PASS shape-only rejects different measurement basis and command provenance
+PASS shape-only rejects weak regressions, short windows and stall evidence
+PASS shape-only rejects inconsistent normalized shape and excessive level variability
+PASS S1 short clean startup explains rejection without relaxing 0.90 s gate
+PASS S1 clean sufficient window reports passed gates and retains MEDIUM evidence
+PASS varying level with repeated decay reaches shape-only through full RAW evidence pipeline
+PASS shape-only applies only while idle, verifies DTO readback and leaves LUT untouched
+PASS shape-only upload failure preserves previous overrides and cannot arm
+PASS rendered diagnostics browser scripts compile and show quality/shape action labels
+
+81/81 checks passed

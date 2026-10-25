@@ -1,4 +1,4 @@
-// Run: node tests/verify_v0149.cjs [path/to/plugin.js]
+// Run: node tests/verify_v0151.cjs [path/to/plugin.js]
 // Hooks are injected in memory only. The shipped plugin has no test exports.
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const file=process.argv[2]||require('path').join(__dirname,'..','plugin.js');
@@ -15,7 +15,7 @@ function setup(options={}) {
  trustedAdaptiveRun,restoreAdaptiveHistoryFromPersistentFile,previousMatchingAdaptiveEvidence,nextShotAdaptiveSuggestion,rememberAdaptiveEvidence,
  compactPersistentShotRecord,persistHistoryFile,appendPersistentHistoryShot,startPersistentHistoryProbe,setPersistentHistoryUnavailable,
  startDiagnostics,finalizeCalibrationRun,clearAllTimers,stage1StartupMetrics,stage3StabilityDiagnostics,diagnosticSummary,scalarConsensusSuggestion,stage1AdaptiveEvidence,stage2AdaptiveEvidence,stage3AdaptiveEvidence,
- testOverrideBinding,recordNextShotApplied,extractMachine,
+ testOverrideBinding,recordNextShotApplied,buildGhcOverlayHtml,stage3ShapeOnlyConsensus,applyNextShotAdaptiveSuggestion,extractMachine,profilesEquivalent,profileExecutionEquivalent,profileExecutionDifferences,
  enterHyperExScopedMultiplier,restoreHyperExScopedMultiplier,setApi(fn){api=fn;}};\n`;
  const token='  return {\n    id: ID,';assert(source.includes(token));
  vm.runInContext(source.replace(token,injection+token),context);plugin=context.createPlugin(host);h=context.hooks;
@@ -29,9 +29,9 @@ function setup(options={}) {
   let data;
   if(path==='/machine/calibration') {if(method==='POST')mock.multiplier=JSON.parse(opt.body).flowMultiplier;data={flowMultiplier:mock.multiplier};}
   else if(path==='/machine/state')data={state:mock.machineState,substate:'idle'};
-  else if(path.startsWith('/profiles?'))data=mock.profiles;
+  else if(path.startsWith('/profiles?'))data=mock.roundtrip?mock.profiles.map(r=>({...r,profile:decaidRoundTrip(r.profile)})):mock.profiles;
   else if(path==='/profiles'||path.startsWith('/profiles/')){const body=JSON.parse(opt.body);data={id:'hyperex',profile:body.profile};mock.profiles=[data];}
-  else if(path==='/workflow'){if(method==='PUT'){mock.workflow=JSON.parse(opt.body).profile;if(mock.eventOnPut)h.handleWorkflowUpdated({profile:copy(mock.workflow)});}data={profile:copy(mock.workflow)};}
+  else if(path==='/workflow'){if(method==='PUT'){mock.workflow=mock.roundtrip?decaidRoundTrip(JSON.parse(opt.body).profile):JSON.parse(opt.body).profile;if(mock.eventOnPut)h.handleWorkflowUpdated({profile:copy(mock.workflow)});}data={profile:mock.roundtrip?decaidRoundTrip(mock.workflow):copy(mock.workflow)};}
   else if(path==='/machine/profile')data={};
   else if(path.startsWith('/machine/state'))data={};
   else throw Error('unhandled '+method+' '+path);
@@ -46,10 +46,10 @@ function setup(options={}) {
  return {h,s,plugin,expected,mock,calls,writes,timers,run,storage,storageCalls,pendingReads,deliverRead,flushReads,event};
 }
 function evidenceRun(e,id='run') {
- return {runId:id,kind:'hyperex',result:'completed at 100 g',config:{profileTruthVerified:true,profileTruthSchema:2,adaptiveFingerprint:copy(e.h.adaptiveHistoryFingerprint())},summary:{},samples:[],rawScaleSamples:[]};
+ return {runId:id,kind:'hyperex',result:'completed at 100 g',config:{profileTruthVerified:true,profileTruthSchema:3,adaptiveFingerprint:copy(e.h.adaptiveHistoryFingerprint())},summary:{},samples:[],rawScaleSamples:[]};
 }
 function historyRow(e,id='old'){
- const fp=copy(e.h.adaptiveHistoryFingerprint());return {runId:id,profileTruthVerified:true,profileTruthSchema:2,fingerprint:fp,evidence:{runId:id,profileTruthSchema:2,fingerprint:fp,s2:{runId:id,targetGS:5,command:2.507,measured:6.5}}};
+ const fp=copy(e.h.adaptiveHistoryFingerprint());return {runId:id,profileTruthVerified:true,profileTruthSchema:3,fingerprint:fp,evidence:{runId:id,profileTruthSchema:3,fingerprint:fp,s2:{runId:id,targetGS:5,command:2.507,measured:6.5}}};
 }
 
 test('LUT translates real targets to .719 / 2.507 / .569',()=>{const e=setup();assert.deepEqual(e.expected.steps.map(x=>+x.flow),[.719,2.507,.569]);});
@@ -76,7 +76,7 @@ test('profile truth reports acknowledgement, not hardware memory readback',async
 test('LUT point change invalidates fingerprint even with same creation date',()=>{const e=setup();const before=e.h.adaptiveHistoryFingerprintKey(e.h.adaptiveHistoryFingerprint());e.s.calibrationMap.points[1].commandFlow=.8;assert.notEqual(before,e.h.adaptiveHistoryFingerprintKey(e.h.adaptiveHistoryFingerprint()));});
 test('actual multiplier and real target changes invalidate fingerprint',()=>{const e=setup();const before=e.h.adaptiveHistoryFingerprintKey(e.h.adaptiveHistoryFingerprint());e.s.flowMultiplierCurrent=1.001;assert.notEqual(before,e.h.adaptiveHistoryFingerprintKey(e.h.adaptiveHistoryFingerprint()));e.s.flowMultiplierCurrent=1;e.s.cfg.stage2Flow=4.9;assert.notEqual(before,e.h.adaptiveHistoryFingerprintKey(e.h.adaptiveHistoryFingerprint()));});
 test('snapshot fingerprint is not recomputed at shot completion',()=>{const e=setup();const run=evidenceRun(e);const fp=copy(run.config.adaptiveFingerprint);e.s.calibrationMap.points[0].commandFlow=.6;assert.deepEqual(copy(e.h.compactPersistentShotRecord(run,null).fingerprint),fp);assert.equal(e.h.trustedAdaptiveRun(run),false);});
-test('old 1.48 truth and interrupted shots cannot suggest numeric changes',()=>{const e=setup();const run=evidenceRun(e);run.config.profileTruthSchema=undefined;assert.equal(e.h.nextShotAdaptiveSuggestion(run),null);run.config.profileTruthSchema=2;run.result='manual stop';assert.equal(e.h.nextShotAdaptiveSuggestion(run),null);});
+test('old 1.48 truth and interrupted shots cannot suggest numeric changes',()=>{const e=setup();const run=evidenceRun(e);run.config.profileTruthSchema=undefined;assert.equal(e.h.nextShotAdaptiveSuggestion(run),null);run.config.profileTruthSchema=3;run.result='manual stop';assert.equal(e.h.nextShotAdaptiveSuggestion(run),null);});
 test('incompatible and legacy rows excluded from persistent restore',()=>{const e=setup();e.s.persistentHistoryAvailable=true;const valid=historyRow(e);const legacy=copy(valid);legacy.runId='legacy';legacy.profileTruthSchema=undefined;const other=copy(valid);other.runId='other';other.fingerprint.actualFlowMultiplier=1.1;e.s.persistentHistoryFile={shots:[legacy,other,valid]};e.h.restoreAdaptiveHistoryFromPersistentFile();assert.deepEqual(copy(e.s.adaptiveHistory.map(x=>x.runId)),['old']);});
 test('SESSION ONLY never restores disk evidence and preserves session evidence',()=>{const e=setup();const row=historyRow(e);e.s.persistentHistoryAvailable=false;e.s.persistentHistoryFile={shots:[row]};const session=copy(row.evidence);session.runId='session';e.s.adaptiveHistory=[session];e.h.restoreAdaptiveHistoryFromPersistentFile();assert.deepEqual(copy(e.s.adaptiveHistory.map(x=>x.runId)),['session']);});
 test('storage failure removes restored evidence but keeps session rows',()=>{const e=setup();const row=historyRow(e);e.s.persistentHistoryAvailable=true;e.s.persistentHistoryFile={shots:[row]};e.h.restoreAdaptiveHistoryFromPersistentFile();const session=copy(row.evidence);session.runId='session';e.s.adaptiveHistory.push(session);e.h.setPersistentHistoryUnavailable('test failure');assert.deepEqual(copy(e.s.adaptiveHistory.map(x=>x.runId)),['session']);});
@@ -124,4 +124,116 @@ test('verification deferred during espresso retries after machine returns idle',
 
 test('late stored scope cannot trigger default HyperEx multiplier writes',async()=>{const e=setup({multiplier:1.2});e.s.scopeMode='hyperex';e.s.scopeStorageLoaded=false;await assert.rejects(e.h.syncHyperExProfile(true),/Waiting for stored/);assert.equal(e.calls.some(x=>x.path==='/machine/calibration'&&x.method==='POST'),false);});
 test('late saved-original read cannot overwrite a newly captured multiplier',async()=>{const e=setup({multiplier:1.2});e.s.scopeMode='hyperex';e.s.scopedOriginalStorageLoaded=false;await assert.rejects(e.h.syncHyperExProfile(true),/Waiting for stored/);assert.equal(e.s.scopedOriginalMultiplier,null);assert.equal(e.calls.some(x=>x.path==='/machine/calibration'&&x.method==='POST'),false);});
+
+// Projection of the official Dart Profile.fromJson/toJson and flow/pressure-step
+// serializers. Independent of plugin normalization; no legacy import-only keys.
+// Reference: https://github.com/decentespresso/decaid/blob/main/lib/src/models/data/profile.dart
+function decaidRoundTrip(p) {
+ if(!p)return null;
+ const optional=v=>v===null||v===undefined||v===''?null:Number(v);
+ return {version:p.version==null?null:String(p.version),title:p.title,notes:p.notes||'',author:p.author||'',beverage_type:p.beverage_type||'espresso',
+  steps:p.steps.map(s=>({name:s.name,pump:s.pump,transition:s.transition,exit:s.exit?{type:s.exit.type,condition:s.exit.condition,value:Number(s.exit.value)}:null,
+   volume:Number(s.volume),seconds:Number(s.seconds),weight:optional(s.weight),temperature:Number(s.temperature),sensor:s.sensor,
+   ...(s.pump==='flow'?{flow:Number(s.flow)}:{pressure:Number(s.pressure)}),
+   limiter:s.limiter?{value:Number(s.limiter.value),range:Number(s.limiter.range)}:null})),
+  target_volume:optional(p.target_volume),target_weight:optional(p.target_weight),target_volume_count_start:Number(p.target_volume_count_start),tank_temperature:Number(p.tank_temperature)};
+}
+test('real Decaid serialization roundtrip preserves equivalent execution',()=>{const e=setup();const actual=decaidRoundTrip(e.expected);assert.equal(actual.type,undefined);assert.equal(actual.legacy_profile_type,undefined);assert.equal(actual.steps[0].pressure,undefined);assert.equal(e.h.profileExecutionEquivalent(actual,e.expected),true);});
+test('matching real DTO workflow arms without unnecessary PUT',async()=>{const e=setup({roundtrip:true});await e.h.syncHyperExProfile(true);assert.equal(e.s.armed,true);assert.equal(e.writes().filter(c=>c.path==='/workflow').length,0);});
+test('old literal machine-flow workflow repairs through actual DTO serialization',async()=>{const e=setup({roundtrip:true,eventOnPut:true});e.mock.workflow.steps.forEach((s,i)=>s.flow=['2','5','1.5'][i]);await e.h.syncHyperExProfile(true);assert.equal(e.s.armed,true);assert.deepEqual(e.mock.workflow.steps.map(x=>+x.flow),[.719,2.507,.569]);});
+test('repeated DTO roundtrips skip library, workflow and machine rewrites',async()=>{const e=setup({roundtrip:true});await e.h.syncHyperExProfile(true);e.calls.length=0;await e.h.syncHyperExProfile(true);assert.equal(e.writes().length,0);});
+test('real DTO S3 seed shape survives readback verification',async()=>{const e=setup({roundtrip:true,eventOnPut:true});e.s.testOverrides={schema:3,...copy(e.h.testOverrideBinding()),s3Shape:{enabled:true,earlyCommand:.698,earlySeconds:8,midCommand:.72,midSeconds:14,lateCommand:.778},stages:{}};await e.h.syncHyperExProfile(true);assert.equal(e.s.armed,true);assert.deepEqual(e.mock.workflow.steps.slice(2).map(s=>+s.flow),[.698,.72,.778]);});
+test('changed actual flow is never hidden by DTO normalization',()=>{const e=setup();const a=decaidRoundTrip(e.expected);a.steps[0].flow=2;assert.equal(e.h.profileExecutionEquivalent(a,e.expected),false);const d=e.h.profileExecutionDifferences(a,e.expected);assert.equal(d[0].field,'steps[0].flow');assert.equal(d[0].expected,.719);assert.equal(d[0].actual,2);});
+test('unexpected step exit condition blocks verification',()=>{const e=setup();const a=decaidRoundTrip(e.expected);a.steps[0].exit={type:'flow',condition:'over',value:1};assert.equal(e.h.profileExecutionEquivalent(a,e.expected),false);});
+test('changed limiter, duration, temperature, weight or target blocks equivalence',()=>{const e=setup();for(const mutate of [a=>a.steps[0].limiter.value+=1,a=>a.steps[0].seconds-=1,a=>a.steps[0].temperature+=1,a=>a.steps[0].weight=4,a=>a.target_weight=40,a=>a.steps[0].pump='pressure']){const a=decaidRoundTrip(e.expected);mutate(a);assert.equal(e.h.profileExecutionEquivalent(a,e.expected),false);}});
+test('missing required numeric command is not equivalent to zero',()=>{const e=setup();const a=decaidRoundTrip(e.expected);const b=copy(a);a.steps[0].flow=0;delete b.steps[0].flow;assert.equal(e.h.profileExecutionEquivalent(a,b),false);});
+test('null and omitted no-exit condition are equivalent',()=>{const e=setup();const a=decaidRoundTrip(e.expected);delete a.steps[0].exit;assert.equal(e.h.profileExecutionEquivalent(a,e.expected),true);});
+test('pressure step compares pressure and ignores unused flow',()=>{const e=setup();const p=copy(e.expected);p.steps[0].pump='pressure';p.steps[0].pressure='3';p.steps[0].flow='';const a=decaidRoundTrip(p);assert.equal(e.h.profileExecutionEquivalent(a,p),true);a.steps[0].pressure=4;assert.equal(e.h.profileExecutionEquivalent(a,p),false);});
+test('stored-profile equivalence ignores dropped import metadata but preserves author and notes',()=>{const e=setup();const a=decaidRoundTrip(e.expected);assert.equal(e.h.profilesEquivalent(a,e.expected),true);a.notes+='changed';assert.equal(e.h.profilesEquivalent(a,e.expected),false);});
+test('mismatch error names the actual field and preserves the guard',async()=>{const e=setup({roundtrip:true});e.mock.after=p=>{if(p==='/machine/profile')e.mock.workflow.steps[1].flow=5;};await assert.rejects(e.h.syncHyperExProfile(true),/steps\[1\]\.flow: expected 2\.507, actual 5/);assert.equal(e.s.armed,false);});
+test('truth schema 2 evidence from 1.49 is excluded from new consensus',()=>{const e=setup();const r=evidenceRun(e);r.config.profileTruthSchema=2;assert.equal(e.h.nextShotAdaptiveSuggestion(r),null);});
+
+function photographedS3(which) {
+ const data=which===2?{overall:1.790,ratio:.711,rates:[2.06,1.843,1.546],seconds:[5.07,13.41,6.39]}:
+ {overall:1.48,ratio:.660,rates:[1.734,1.558,1.182],seconds:[5.02,13.31,12.72]};
+ return {targetGS:1.5,status:'LATE DECAY',stall:false,stallQualitative:false,
+  overallGS:data.overall,overallR2:.996,lateToEarlyRatio:data.ratio,earlySeconds:8,midSeconds:14,
+  measurementBasis:'profile-frame regression',
+  source:data.rates.map((measured,i)=>({name:['S3 EARLY','S3 MID','S3 LATE'][i],
+   command:[.698,.72,.778][i],measured,r2:.968,seconds:data.seconds[i],quality:'clean'}))};
+}
+test('photographed shots 2/3 allow SHAPE ONLY while LEVEL stays held',()=>{
+ const e=setup(),a=photographedS3(2),b=photographedS3(3),q=e.h.stage3ShapeOnlyConsensus(b,a);
+ assert(q);assert.equal(q.action,'SHAPE ONLY / LEVEL HOLD');assert.equal(q.levelFactor,1);
+ assert(q.normalizedShapeVariabilityPct<=15);assert(Math.abs(q.weightedCommandChangePct)<=.2);
+ const c=[q.suggestedShape.earlyCommand,q.suggestedShape.midCommand,q.suggestedShape.lateCommand];
+ assert(c[0]<.698);assert(c[2]>.778);
+ c.forEach((x,i)=>{assert(Math.abs(x/[.698,.72,.778][i]-1)<=.04);assert(Math.abs(x-[.698,.72,.778][i])<=.05);});
+ assert(c[0]<=c[1]&&c[1]<=c[2]);assert.equal(e.writes().length,0);
+});
+test('shape-only rejects opposite frame trend even if status says decay',()=>{
+ const e=setup(),a=photographedS3(2),b=photographedS3(3);b.source[2].measured=2.3;
+ assert.equal(e.h.stage3ShapeOnlyConsensus(b,a),null);
+});
+test('shape-only rejects different measurement basis and command provenance',()=>{
+ const e=setup(),a=photographedS3(2),b=photographedS3(3);
+ b.measurementBasis='stability 25/50/25 fallback';assert.equal(e.h.stage3ShapeOnlyConsensus(b,a),null);
+ b.measurementBasis=a.measurementBasis;b.source[0].command+=.01;assert.equal(e.h.stage3ShapeOnlyConsensus(b,a),null);
+});
+test('shape-only rejects weak regressions, short windows and stall evidence',()=>{
+ const e=setup(),a=photographedS3(2);
+ for(const change of [b=>b.source[0].r2=.94,b=>b.source[1].seconds=2.9,b=>b.stall=true,b=>b.stallQualitative=true,b=>b.overallR2=.94]){
+  const b=photographedS3(3);change(b);assert.equal(e.h.stage3ShapeOnlyConsensus(b,a),null);
+ }
+});
+test('shape-only rejects inconsistent normalized shape and excessive level variability',()=>{
+ const e=setup(),a=photographedS3(2);
+ let b=photographedS3(3);b.source[1].measured=2.4;assert.equal(e.h.stage3ShapeOnlyConsensus(b,a),null);
+ b=photographedS3(3);b.overallGS=1;assert.equal(e.h.stage3ShapeOnlyConsensus(b,a),null);
+});
+test('S1 short clean startup explains rejection without relaxing 0.90 s gate',()=>{
+ const e=setup(),r=syntheticRun(e);r.rawScaleSamples=r.rawScaleSamples.filter(x=>x.phase!=='stage1');
+ for(let i=0;i<=100;i++){const t=i*.05;r.rawScaleSamples.push(rawSample('stage1',t,t<2.9?0:Math.min(3.3,(t-2.9)*2.834)));}
+ const m=e.h.stage1StartupMetrics(r);
+ assert(m.transit20to80S<.9);assert.equal(m.confidence,'INSUFFICIENT');
+ assert(m.rejectionReasons.includes('20–80% transit < 0.90 s'));
+ assert.equal(e.h.stage1AdaptiveEvidence(r),null);
+ assert.match(e.h.nextShotAdaptiveSuggestion(r).s1.reason,/transit < 0.90/);
+});
+test('S1 clean sufficient window reports passed gates and retains MEDIUM evidence',()=>{
+ const e=setup(),r=syntheticRun(e),m=e.h.stage1StartupMetrics(r);
+ assert.equal(m.rejectionReasons.length,0);assert.equal(m.confidence,'MEDIUM');assert(e.h.stage1AdaptiveEvidence(r));
+});
+test('varying level with repeated decay reaches shape-only through full RAW evidence pipeline',()=>{
+ const e=setup(),a=syntheticRun(e,'a',[2.1,1.843,1.50]),b=syntheticRun(e,'b',[1.734,1.558,1.182]);
+ e.h.rememberAdaptiveEvidence(a);const q=e.h.nextShotAdaptiveSuggestion(b);
+ assert.equal(q.s3.action,'SHAPE ONLY / LEVEL HOLD');assert.equal(q.actionable,true);
+ assert.equal(q.s2.action,'HOLD');assert.equal(e.writes().length,0);
+});
+test('shape-only applies only while idle, verifies DTO readback and leaves LUT untouched',async()=>{
+ const e=setup({roundtrip:true}),a=syntheticRun(e,'a',[2.1,1.843,1.50]),b=syntheticRun(e,'b',[1.734,1.558,1.182]);
+ e.h.rememberAdaptiveEvidence(a);const lut=JSON.stringify(e.s.calibrationMap),snapshot=JSON.stringify(b.config);
+ e.s.phase='stage3';await assert.rejects(e.h.applyNextShotAdaptiveSuggestion(b,'auto'),/idle/);
+ assert.equal(e.writes().length,0);e.s.phase='idle';
+ await e.h.applyNextShotAdaptiveSuggestion(b,'auto');
+ assert.equal(e.s.armed,true);assert.equal(e.s.testOverrides.adaptiveSource.mode,'auto');
+ assert.equal(JSON.stringify(e.s.calibrationMap),lut);assert.equal(JSON.stringify(b.config),snapshot);
+ assert.equal(e.s.testOverrides.stages.stage2.mode,'auto');
+ assert.equal(e.mock.workflow.steps[2].flow,e.s.testOverrides.s3Shape.earlyCommand);
+});
+test('shape-only upload failure preserves previous overrides and cannot arm',async()=>{
+ const e=setup({roundtrip:true}),a=syntheticRun(e,'a',[2.1,1.843,1.50]),b=syntheticRun(e,'b',[1.734,1.558,1.182]);
+ e.h.rememberAdaptiveEvidence(a);const old=JSON.stringify(e.s.testOverrides);
+ e.mock.fail=(p)=>p==='/machine/profile'?'upload failed':null;
+ await assert.rejects(e.h.applyNextShotAdaptiveSuggestion(b,'auto'),/upload failed/);
+ assert.equal(JSON.stringify(e.s.testOverrides),old);assert.equal(e.s.armed,false);
+});
+
+test('rendered diagnostics browser scripts compile and show quality/shape action labels',()=>{
+ const e=setup(),html=e.h.buildGhcOverlayHtml();
+ const scripts=[...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)];
+ assert(scripts.length>0);scripts.forEach(x=>new vm.Script(x[1]));
+ assert.match(html,/Quality:/);assert.match(html,/normalized shape var/);
+});
+
 (async()=>{let failed=0;for(const [name,fn]of tests){try{await fn();console.log('PASS '+name);}catch(err){failed++;console.error('FAIL '+name+'\n'+err.stack);}}console.log(`\n${tests.length-failed}/${tests.length} checks passed`);process.exitCode=failed?1:0;})();

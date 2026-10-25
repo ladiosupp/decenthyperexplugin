@@ -161,8 +161,18 @@ function createPlugin(host) {
     workflowTitle: "",
     workflowProfile: null,
     runtimeProfileVerified: false,
+    profileSyncQueue: Promise.resolve(),
+    machineProfileAckKey: "",
+    profileReadbackAt: null,
+    calibrationStorageLoaded: false,
+    overrideStorageLoaded: false,
+    scopeStorageLoaded: false,
+    scopedOriginalStorageLoaded: false,
+    workflowSelectionRevision: 0,
     runtimeProfileStatus: "not verified",
     runtimeProfileRepairBusy: false,
+    profileVerificationPending: false,
+    profileVerificationRetryAtMs: 0,
     runtimeProfileMismatchAbortSent: false,
     armed: false,
     phase: "idle", // idle|stage1|dumping|soak|restart_wait|stage2|stage3|finishing|aborted
@@ -257,6 +267,10 @@ function createPlugin(host) {
     legacyAdaptiveHistory: [],
     persistentHistoryFile: null,
     persistentHistoryLoaded: false,
+    storageProbeVerified: false,
+    pendingHistoryWrite: null,
+    historyWriteDirty: false,
+    historyWriteTimer: null,
     persistentHistoryAvailable: null,
     persistentHistoryStatus: "checking persistent history storage",
     persistentHistoryCompatibleCount: 0,
@@ -671,7 +685,7 @@ function createPlugin(host) {
     };
   }
 
-  async function refreshFlowMultiplier(force) {
+  async function refreshFlowMultiplier(force, strict) {
     const now = Date.now();
     if (!force && finiteOrNull(state.flowMultiplierCurrent) !== null && now - state.flowMultiplierReadAtMs < 3000) {
       return finiteOrNull(state.flowMultiplierCurrent);
@@ -681,6 +695,7 @@ function createPlugin(host) {
       const j = await r.json();
       const v = Number(j && j.flowMultiplier);
       if (Number.isFinite(v)) {
+        noteMultiplierChange(v);
         state.flowMultiplierCurrent = v;
         state.flowMultiplierReadAtMs = now;
         recomputeCalibrationUsability();
@@ -688,7 +703,9 @@ function createPlugin(host) {
       }
     } catch (error) {
       log(`Could not read DE1 flowMultiplier: ${error.message || error}`);
+      if (strict) throw error;
     }
+    if (strict) throw new Error('Fresh DE1 flowMultiplier readback unavailable');
     return finiteOrNull(state.flowMultiplierCurrent) !== null ? finiteOrNull(state.flowMultiplierCurrent) : null;
   }
 
@@ -700,6 +717,7 @@ function createPlugin(host) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ flowMultiplier: v })
     });
+    noteMultiplierChange(v);
     state.flowMultiplierCurrent = v;
     state.flowMultiplierReadAtMs = Date.now();
     recomputeCalibrationUsability();
@@ -711,7 +729,7 @@ function createPlugin(host) {
     return !!state.cfg && (title === state.cfg.profileTitle || isCalibrationProfileTitle(title));
   }
 
-  async function enterHyperExScopedMultiplier(reason) {
+  async function enterHyperExScopedMultiplier(reason, expectedRevision) {
     if (state.scopeMode !== "hyperex") return;
     const mapBase = calibrationBaseMultiplier();
     const target = state.calibrationArmed && finiteOrNull(state.calibrationPendingMultiplier) !== null
@@ -720,13 +738,17 @@ function createPlugin(host) {
     if (state.scopeChangeBusy) return;
     state.scopeChangeBusy = true;
     try {
-      const current = await refreshFlowMultiplier(true);
+      const current = await refreshFlowMultiplier(true, expectedRevision !== undefined);
+      if (expectedRevision !== undefined) checkProfileSelection(expectedRevision);
       if (!Number.isFinite(current)) return;
       if (finiteOrNull(state.scopedOriginalMultiplier) === null) { state.scopedOriginalMultiplier = current; storageWrite(STORAGE_SCOPED_ORIGINAL, String(current)); }
       await writeFlowMultiplier(target, reason || "HyperEx scoped");
       state.scopedAppliedMultiplier = target;
     } finally {
       state.scopeChangeBusy = false;
+      if (!inHyperExScope(state.workflowTitle) && finiteOrNull(state.scopedOriginalMultiplier) !== null) {
+        await restoreHyperExScopedMultiplier('selection left scope during multiplier update');
+      }
     }
   }
 
@@ -735,14 +757,18 @@ function createPlugin(host) {
     if (state.scopeChangeBusy) return;
     state.scopeChangeBusy = true;
     const original = finiteOrNull(state.scopedOriginalMultiplier);
+    let restored = false;
     try {
       await writeFlowMultiplier(original, reason || "restore previous");
+      restored = true;
     } catch (error) {
       log(`Could not restore previous flowMultiplier ${original}: ${error.message || error}`);
     } finally {
-      state.scopedOriginalMultiplier = null;
-      state.scopedAppliedMultiplier = null;
-      storageWrite(STORAGE_SCOPED_ORIGINAL, '');
+      if (restored) {
+        state.scopedOriginalMultiplier = null;
+        state.scopedAppliedMultiplier = null;
+        storageWrite(STORAGE_SCOPED_ORIGINAL, '');
+      }
       state.scopeChangeBusy = false;
     }
   }
@@ -769,7 +795,7 @@ function createPlugin(host) {
     state.diagnosticCurrent = {
       schema: 3,
       kind: String(kind || "hyperex"),
-      pluginVersion: "0.1.48",
+      pluginVersion: "0.1.49",
       runId: `${now}-${state.diagnosticRunSeq}`,
       profileTitle: state.workflowTitle || (state.cfg ? state.cfg.profileTitle : ""),
       startedAt: new Date(now).toISOString(),
@@ -797,7 +823,12 @@ function createPlugin(host) {
         sampleIntervalMs: state.cfg.diagnosticSampleIntervalMs,
         flowMultiplier: state.flowMultiplierCurrent,
         profileTruthVerified: !!state.runtimeProfileVerified,
+        profileTruthSchema: 2,
+        adaptiveFingerprint: adaptiveHistoryFingerprint(),
+        profileReadbackAt: state.profileReadbackAt,
+        machineProfileUploadAcknowledged: !!state.machineProfileAckKey,
         workflowProfileCommands: profileCommandSummaryFromProfile(state.workflowProfile),
+        workflowProfileExecution: normalizedProfileExecution(state.workflowProfile),
         calibrationMode: state.calibrationMode,
         calibrationCommands: calibrationCommands(),
         calibrationProgram: calibrationProgram(),
@@ -1361,18 +1392,35 @@ function createPlugin(host) {
   }
 
   function adaptiveHistoryFingerprint() {
-    if (!state.cfg || !state.calibrationMap || state.calibrationMap.valid !== true) return null;
+    if (!state.cfg || !state.calibrationMapUsable || !state.calibrationMap || state.calibrationMap.valid !== true ||
+        finiteOrNull(state.flowMultiplierCurrent) === null || !multiplierClose(state.flowMultiplierCurrent, calibrationBaseMultiplier())) return null;
     return {
-      schema: 1,
+      schema: 2,
       mapCreatedAt: String(state.calibrationMap.createdAt || ""),
+      lutSchema: state.calibrationMap.schema,
+      lutAlgorithm: state.calibrationMap.algorithm || "",
+      lutPoints: canonicalProfileValue(calibrationPoints()),
+      targetAnchors: canonicalProfileValue(state.calibrationMap.targetAnchors || []),
       baseFlowMultiplier: round(calibrationBaseMultiplier(), 4),
-      targets: {
-        stage1: round(state.cfg.stage1Flow, 4),
-        stage2: round(state.cfg.stage2Flow, 4),
-        stage3: round(state.cfg.stage3Flow, 4)
+      actualFlowMultiplier: round(state.flowMultiplierCurrent, 4),
+      targets: { stage1:round(state.cfg.stage1Flow,4), stage2:round(state.cfg.stage2Flow,4), stage3:round(state.cfg.stage3Flow,4) },
+      shotSettings: {
+        temperature:state.cfg.temperature, stage1Weight:state.cfg.stage1Weight, soakSeconds:state.cfg.soakSeconds,
+        stage2Weight:state.cfg.stage2Weight, finalWeight:state.cfg.finalWeight,
+        stage1PressureLimit:state.cfg.stage1PressureLimit, stage2PressureLimit:state.cfg.stage2PressureLimit,
+        stage3PressureLimit:state.cfg.stage3PressureLimit, hardPressureLimit:state.cfg.hardPressureLimit
       },
-      model: "hyperex-realflow-lut-nextshot-v1"
+      profileTruthSchema: 2,
+      model: "hyperex-realflow-lut-nextshot-v2"
     };
+  }
+
+  function trustedAdaptiveRun(run) {
+    const c = run && run.config;
+    const key = adaptiveHistoryFingerprintKey(adaptiveHistoryFingerprint());
+    return !!(run && run.kind === "hyperex" && /^completed at /i.test(String(run.result || "")) && c &&
+      c.profileTruthVerified === true && c.profileTruthSchema === 2 && key &&
+      adaptiveHistoryFingerprintKey(c.adaptiveFingerprint) === key);
   }
 
   function adaptiveHistoryFingerprintKey(fp) {
@@ -1394,6 +1442,11 @@ function createPlugin(host) {
 
   function setPersistentHistoryUnavailable(reason) {
     state.persistentHistoryAvailable = false;
+    state.storageProbeVerified = false;
+    state.pendingHistoryWrite = null;
+    state.adaptiveHistory = (state.adaptiveHistory || []).filter(ev => !ev.restoredFromDisk);
+    state.persistentHistoryCompatibleCount = 0;
+    if (state.historyWriteTimer) { clearTimeout(state.historyWriteTimer); state.historyWriteTimer = null; }
     state.persistentHistoryStatus = `SESSION ONLY: ${reason || 'pluginStorage unavailable'}`;
     if (state.storageProbeTimer) { clearTimeout(state.storageProbeTimer); state.storageProbeTimer = null; }
     log(`Persistent adaptive history unavailable. Shot-to-shot adaptation remains active for this plugin session, but cross-reload/version history is disabled. ${reason || ''}`);
@@ -1403,19 +1456,18 @@ function createPlugin(host) {
   function startPersistentHistoryProbe() {
     if (state.storageProbeTimer) clearTimeout(state.storageProbeTimer);
     state.storageProbeToken = `${Date.now()}-${Math.random().toString(36).slice(2,10)}`;
+    state.storageProbeVerified = false;
     state.persistentHistoryAvailable = null;
     state.persistentHistoryStatus = "checking pluginStorage write/readback";
+    // Arm timeout before requesting a read, including hosts that reply synchronously.
+    state.storageProbeTimer = setTimeout(() => {
+      if (state.persistentHistoryAvailable !== true) setPersistentHistoryUnavailable("write/readback probe timed out");
+    }, 3500);
     if (!storageWrite(STORAGE_HISTORY_PROBE, state.storageProbeToken)) {
       setPersistentHistoryUnavailable("probe write failed");
       return;
     }
-    if (!storageRead(STORAGE_HISTORY_PROBE)) {
-      setPersistentHistoryUnavailable("probe read request failed");
-      return;
-    }
-    state.storageProbeTimer = setTimeout(() => {
-      if (state.persistentHistoryAvailable !== true) setPersistentHistoryUnavailable("write/readback probe timed out");
-    }, 3500);
+    if (!storageRead(STORAGE_HISTORY_PROBE)) setPersistentHistoryUnavailable("probe read request failed");
   }
 
   function compactPersistentShotRecord(run, evidence) {
@@ -1425,42 +1477,61 @@ function createPlugin(host) {
       const q = summary[phase] || {};
       return {
         targetGS: q.desiredRealFlowGS, rawRegressionGS: q.rawRegressionGS, rawRegressionR2: q.rawRegressionR2,
-        windowS: q.rawRegressionSeconds, de1Flow: q.machineFlowMedian, decaidWeightFlow: q.scaleFlowMedian, status: q.status, errorPct: q.errorPct
+        windowS: q.rawRegressionSeconds, de1Flow: q.machineFlowAvg, decaidWeightFlow: q.gflowAvg, status: q.validationStatus, errorPct: q.rawErrorPct
       };
     };
     const st = summary.stage3Stability || null;
     return {
       runId: String(run.runId),
-      pluginVersion: "0.1.48",
+      pluginVersion: "0.1.49",
       startedAt: run.startedAt || null, endedAt: run.endedAt || null, result: run.result || null,
-      fingerprint: adaptiveHistoryFingerprint(),
+      fingerprint: run.config && run.config.adaptiveFingerprint || null,
+      profileTruthSchema: run.config && run.config.profileTruthSchema || 0,
       profileTruthVerified: !!(run.config && run.config.profileTruthVerified),
       workflowProfileCommands: run.config && run.config.workflowProfileCommands ? run.config.workflowProfileCommands : null,
+      profileReadbackAt: run.config && run.config.profileReadbackAt || null,
+      machineUploadAcknowledged: !!(run.config && run.config.machineProfileUploadAcknowledged),
       commands: diagnosticRunCommandSnapshot(run),
       flowMultiplier: run.config ? round(run.config.flowMultiplier,4) : null,
       s1: compactPhase("stage1"), s2: compactPhase("stage2"), s3: compactPhase("stage3"),
       s1Startup: summary.stage1Startup ? { confidence:summary.stage1Startup.confidence, firstRiseDelayS:summary.stage1Startup.firstRiseDelayS, midFlowGS:summary.stage1Startup.midFlowGS, midR2:summary.stage1Startup.midR2, activeFlowGS:summary.stage1Startup.activeFlowGS } : null,
       s3Stability: st ? { status:st.status, lateToEarlyRatio:st.lateToEarlyRatio, early:st.early, mid:st.mid, late:st.late, stall:st.stall } : null,
       adaptiveDecision: summary.nextShotAdaptive || null,
+      nextShotApplied: null,
       evidence: evidence || null
     };
   }
 
   function persistHistoryFile() {
-    if (!state.persistentHistoryFile || typeof state.persistentHistoryFile !== "object") return false;
-    state.persistentHistoryFile.writerVersion = "0.1.48";
+    // Never overwrite disk before the initial read, and serialize full-file writes.
+    if (!state.persistentHistoryLoaded || !state.storageProbeVerified || state.persistentHistoryAvailable === false || !state.persistentHistoryFile) return false;
+    if (state.pendingHistoryWrite) { state.historyWriteDirty = true; return true; }
+    state.persistentHistoryFile.writerVersion = "0.1.49";
     state.persistentHistoryFile.updatedAt = new Date().toISOString();
-    if (state.persistentHistoryAvailable === false) return false;
-    const ok = storageWrite(STORAGE_HISTORY_FILE, state.persistentHistoryFile);
-    if (!ok) setPersistentHistoryUnavailable("history write failed");
-    return ok;
+    state.persistentHistoryFile.writeToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    state.pendingHistoryWrite = JSON.stringify(state.persistentHistoryFile);
+    state.historyWriteDirty = false;
+    state.historyWriteTimer = setTimeout(() => setPersistentHistoryUnavailable('history file readback timed out'), 3500);
+    if (!storageWrite(STORAGE_HISTORY_FILE, state.pendingHistoryWrite) || !storageRead(STORAGE_HISTORY_FILE)) {
+      setPersistentHistoryUnavailable('history file write/read request failed');
+      return false;
+    }
+    return true;
+  }
+
+  function recordNextShotApplied(run, commandFlows) {
+    const rows = state.persistentHistoryFile && state.persistentHistoryFile.shots;
+    const row = Array.isArray(rows) && rows.find(x => x && x.runId === run.runId);
+    if (!row) return;
+    row.nextShotApplied = { at:new Date().toISOString(), commandFlows, profileTruth:runtimeProfileTruthPayload() };
+    persistHistoryFile();
   }
 
   function appendPersistentHistoryShot(run, evidence) {
     const record = compactPersistentShotRecord(run, evidence);
     if (!record) return;
     if (!state.persistentHistoryFile || typeof state.persistentHistoryFile !== "object") {
-      state.persistentHistoryFile = { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:"0.1.48", createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(), shots:[] };
+      state.persistentHistoryFile = { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:"0.1.49", createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(), shots:[] };
     }
     if (!Array.isArray(state.persistentHistoryFile.shots)) state.persistentHistoryFile.shots = [];
     state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.filter(x => x && x.runId !== record.runId);
@@ -1471,30 +1542,25 @@ function createPlugin(host) {
 
   function restoreAdaptiveHistoryFromPersistentFile() {
     const fpKey = adaptiveHistoryFingerprintKey(adaptiveHistoryFingerprint());
-    if (!fpKey || !state.persistentHistoryFile || !Array.isArray(state.persistentHistoryFile.shots)) return false;
-    const compatible = state.persistentHistoryFile.shots.filter(row => row && row.evidence && row.profileTruthVerified === true && adaptiveHistoryFingerprintKey(row.fingerprint) === fpKey);
-    state.persistentHistoryCompatibleCount = compatible.length;
-    if (compatible.length) {
-      state.adaptiveHistory = compatible.map(row => row.evidence).filter(ev => ev && ev.runId).slice(-20);
-      log(`Restored ${state.adaptiveHistory.length} compatible adaptive evidence row(s) from persistent history file.`);
-      emitSkinChanged();
-      return true;
+    const compatible = row => row && row.profileTruthSchema === 2 && row.fingerprint &&
+      adaptiveHistoryFingerprintKey(row.fingerprint) === fpKey;
+    // Session evidence remains usable even when persistent storage is unavailable.
+    const session = (state.adaptiveHistory || []).filter(ev => compatible(ev) && (!ev.restoredFromDisk || state.persistentHistoryAvailable === true));
+    const saved = state.persistentHistoryAvailable === true && fpKey && state.persistentHistoryFile && Array.isArray(state.persistentHistoryFile.shots)
+      ? state.persistentHistoryFile.shots.filter(row => row && row.evidence && row.profileTruthVerified === true && compatible(row)) : [];
+    state.persistentHistoryCompatibleCount = saved.length;
+    const merged = new Map();
+    for (const ev of saved.map(row => ({...row.evidence, restoredFromDisk:true})).concat(session)) {
+      if (ev && ev.runId && compatible(ev)) merged.set(ev.runId, ev);
     }
-    // Legacy v1 evidence predates workflow-profile truth verification. Keep it out of
-    // numeric adaptation so an old 2/5/1.5 machine profile can never contaminate the
-    // new real-flow regression history. v0.1.48 intentionally starts trusted evidence
-    // from the first shot whose workflow execution profile was read back and verified.
-    if (Array.isArray(state.legacyAdaptiveHistory) && state.legacyAdaptiveHistory.length) {
-      log(`Ignored ${state.legacyAdaptiveHistory.length} legacy adaptive evidence row(s): they predate workflow-profile truth verification.`);
-    }
-    state.adaptiveHistory = [];
+    state.adaptiveHistory = Array.from(merged.values()).slice(-20);
     emitSkinChanged();
-    return false;
+    return state.adaptiveHistory.length > 0;
   }
 
   function rememberAdaptiveEvidence(run) {
-    const truthVerified = !!(run && run.kind === "hyperex" && run.config && run.config.profileTruthVerified === true);
-    const ev = truthVerified ? { runId:run && run.runId, s1:stage1AdaptiveEvidence(run), s2:stage2AdaptiveEvidence(run), s3:stage3AdaptiveEvidence(run) } : null;
+    const truthVerified = trustedAdaptiveRun(run);
+    const ev = truthVerified ? { runId:run && run.runId, profileTruthSchema:2, fingerprint:run.config.adaptiveFingerprint, s1:stage1AdaptiveEvidence(run), s2:stage2AdaptiveEvidence(run), s3:stage3AdaptiveEvidence(run) } : null;
     if (!truthVerified) {
       appendPersistentHistoryShot(run, null);
       if (run && run.kind === "hyperex") log(`Adaptive evidence excluded: workflow profile truth was not verified at shot start (${run.runId || 'unknown run'}).`);
@@ -1517,6 +1583,7 @@ function createPlugin(host) {
     for (let i=state.adaptiveHistory.length-1;i>=0;i--) {
       const row=state.adaptiveHistory[i];
       if (!row || row.runId === current.runId) continue;
+      if ((row.restoredFromDisk && state.persistentHistoryAvailable !== true) || row.profileTruthSchema !== 2 || adaptiveHistoryFingerprintKey(row.fingerprint) !== adaptiveHistoryFingerprintKey(adaptiveHistoryFingerprint())) return null;
       const ev=row[key] || (key === "s3" && row.source ? row : null);
       if (!ev) return null;
       return (key === "s3" ? sameStage3Shape(current,ev) : sameScalarAdaptiveEvidence(current,ev)) ? ev : null;
@@ -1548,7 +1615,7 @@ function createPlugin(host) {
   }
 
   function nextShotAdaptiveSuggestion(run) {
-    if (!run || (run.kind || "hyperex") !== "hyperex") return null;
+    if (!trustedAdaptiveRun(run)) return null;
     const s1ev=stage1AdaptiveEvidence(run), s2ev=stage2AdaptiveEvidence(run), s3ev=stage3AdaptiveEvidence(run);
     const s1=scalarConsensusSuggestion("S1 startup",s1ev,previousMatchingAdaptiveEvidence(s1ev,"s1"),{
       deadbandPct:12,maxVariability:0.18,gain:0.18,maxFraction:0.04,maxAbs:0.04,rule:"2 matching MEDIUM-confidence startup shots; ±12% deadband; max ±4% and ±0.04 ml/s per next shot"
@@ -1693,7 +1760,7 @@ function createPlugin(host) {
     }
     const previousOverrides = state.testOverrides ? JSON.parse(JSON.stringify(state.testOverrides)) : null;
     try {
-      state.testOverrides = { schema:3, writerVersion:"0.1.48", savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, targets:binding.targets, stages, s3Shape, adaptiveSource:{ runId:suggestion.runId, appliedAt:new Date().toISOString(), mode:String(source || "manual") } };
+      state.testOverrides = { schema:3, writerVersion:"0.1.49", savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, targets:binding.targets, stages, s3Shape, adaptiveSource:{ runId:suggestion.runId, appliedAt:new Date().toISOString(), mode:String(source || "manual") } };
       storageWrite(STORAGE_TEST_OVERRIDES, state.testOverrides);
 
       const verifyStatus = testOverrideStatus();
@@ -1729,6 +1796,7 @@ function createPlugin(host) {
       if (suggestion.s3 && suggestion.s3.usable && suggestion.s3.suggestedShape && commandFlows.stage3Mode !== "shape") {
         throw new Error(`S3 profile verification failed: effective mode is ${commandFlows.stage3Mode}`);
       }
+      recordNextShotApplied(run, commandFlows);
       log(`Next-shot adaptive suggestion VERIFIED (${source || "manual"}) from ${suggestion.runId}: ${JSON.stringify(commandFlows)}`);
       return { verified:true, suggestion, commandFlows };
     } catch (applyError) {
@@ -2058,7 +2126,7 @@ function createPlugin(host) {
     return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 html,body{margin:0;width:100%;min-height:100%;background:transparent;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;color:#f7f7f8;overflow-x:hidden}.card{width:860px;max-width:96vw;box-sizing:border-box;padding:22px;border-radius:20px;background:#17191d;box-shadow:0 18px 60px rgba(0,0,0,.45)}html.diagview,body.diagview{background:#17191d;min-width:100%;min-height:100vh}body.diagview .card{width:100vw;max-width:none;min-height:100vh;border-radius:0;box-shadow:none;padding:24px 30px}body.diagview .chart{height:250px}body.diagview textarea{height:190px}.k{font-size:13px;letter-spacing:.12em;opacity:.65}.t{font-size:27px;font-weight:800;margin:7px 0}.d{font-size:15px;line-height:1.45}.row{display:flex;gap:9px;margin-top:14px;flex-wrap:wrap}.b{border:0;border-radius:12px;padding:12px 14px;font-size:14px;font-weight:800;cursor:pointer}.p{background:#ff4fa3;color:#fff}.s{background:#343840;color:#fff}.warn{background:#8a4b18;color:#fff}.danger{background:#8a2530;color:#fff}.primaryAction{background:#f27a22;color:#fff;padding:14px 20px;font-size:15px;box-shadow:0 5px 18px rgba(0,0,0,.28)}.secondaryAction{background:#2b2f36;color:#e7e9ec;border:1px solid #555b65;padding:10px 13px;font-size:13px}.tertiaryAction{background:transparent;color:#c9cdd3;border:1px solid #3d424a;padding:10px 13px;font-size:13px}.actionBadge{display:inline-block;margin-left:8px;padding:3px 7px;border-radius:999px;background:#4a321d;color:#ffd4ac;font-size:9px;font-weight:800;letter-spacing:.08em;vertical-align:middle}.manualPanel{margin-top:10px;padding:12px;border-radius:10px;background:#1c1f24;border:1px solid #30343b}.active{outline:2px solid #fff}.m{margin-top:12px;font:12px ui-monospace,monospace;opacity:.78}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}.stat{background:#23262c;border-radius:11px;padding:10px}.stat b{display:block;font-size:17px;margin-top:4px}.small{font-size:11px;opacity:.68}.section{margin-top:14px;padding-top:13px;border-top:1px solid #343840}.section h3{margin:0 0 8px;font-size:16px}.good{color:#77d98b}.bad{color:#ff8c92}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}textarea{width:100%;height:150px;box-sizing:border-box;background:#0f1114;color:#dfe6ef;border:1px solid #343840;border-radius:10px;padding:9px;font:10px ui-monospace,monospace;resize:vertical}table{width:100%;border-collapse:collapse;font-size:11px}th,td{text-align:right;padding:5px 6px;border-bottom:1px solid #292d33}th:first-child,td:first-child{text-align:left}.chart{width:100%;height:205px;background:#101216;border:1px solid #2f333a;border-radius:10px;margin-top:8px}.legend{font-size:11px;opacity:.8;line-height:1.5}.stepHead{margin-top:18px;padding:14px 16px;border-radius:14px;background:#20242a;border:1px solid #3a4049}.stepHead b{font-size:19px}.stepBadge{float:right;padding:4px 9px;border-radius:999px;background:#343840;font-size:10px;letter-spacing:.06em}.stepBadge.good{background:#173b25}.stepBadge.bad{background:#4a2024}.stepHint{margin-top:5px;font-size:12px;opacity:.72;line-height:1.45}
-</style></head><body><div class="card"><div class="k">HYPEREX v0.1.48</div><div id="title" class="t">Checking…</div><div id="detail" class="d"></div>
+</style></head><body><div class="card"><div class="k">HYPEREX v0.1.49</div><div id="title" class="t">Checking…</div><div id="detail" class="d"></div>
 <div id="diag" style="display:none">
   <div class="d" style="margin:2px 0 12px;padding:10px 12px;border-radius:10px;background:#23262c"><b>ENTRY</b> · Dashboard <b>DIAG / CAL</b> is enabled by default. If another plugin occupies the reserved header slot, open <b>Plugins → HyperEx Pulse Filter</b>.</div>
 
@@ -2115,13 +2183,13 @@ function esc(v){return String(v==null?'—':v).replace(/[&<>]/g,c=>({'&':'&amp;'
 function commandModeLabel(v){v=String(v||'auto').toLowerCase();return v==='shape'?'SHAPE':v==='manual'?'MANUAL TEST':'AUTO / LUT'}
 function shapeCommandText(sh){if(!sh||sh.enabled!==true)return null;return esc(sh.earlyCommand)+' × '+esc(sh.earlySeconds)+'s → '+esc(sh.midCommand)+' × '+esc(sh.midSeconds)+'s → '+esc(sh.lateCommand)+' ml/s'}
 function appliedS3Text(c){const sh=c&&c.s3Shape;const shaped=shapeCommandText(sh);if(shaped)return shaped;const flat=c&&c.stage3FlatCommandMlS!=null?c.stage3FlatCommandMlS:(c&&c.stage3CommandMlS);return esc(flat)+' ml/s FLAT'}
-function renderAppliedCommands(c,truth){if(!appliedcommands)return;if(!c||!c.appliedProfile){appliedcommands.innerHTML='<span class="bad">Current profile command state unavailable.</span>';return}const p=c.appliedProfile,src=c.adaptiveSource||null;const expectedS3=p.stage3||{};const t=truth||{};const a=t.actual||null;let ap1=p.stage1&&p.stage1.commandMlS,ap2=p.stage2&&p.stage2.commandMlS,mode=expectedS3.mode,ap3=expectedS3.mode==='shape'?shapeCommandText(expectedS3.shape):(esc(expectedS3.flatCommandMlS)+' ml/s');if(a){ap1=a.stage1CommandMlS;ap2=a.stage2CommandMlS;mode=a.stage3Mode==='shape'?'shape':'actual';ap3=a.stage3Mode==='shape'?shapeCommandText(a.s3Shape):(esc(a.stage3CommandMlS)+' ml/s')}let source='<b>Source:</b> '+esc(c.manualTestStatus||'AUTO / LUT');if(src&&src.runId)source='<b>Source:</b> NEXT SHOT ADAPTIVE '+esc(String(src.mode||'').toUpperCase())+' · run '+esc(src.runId)+(src.appliedAt?' · '+esc(src.appliedAt):'');const truthLine=t.verified?'<span class="good"><b>WORKFLOW READBACK VERIFIED</b></span> · '+esc(t.status||''):'<span class="bad"><b>WORKFLOW NOT VERIFIED</b></span> · '+esc(t.status||'')+' · expected commands are shown only as a reference until repair succeeds.';appliedcommands.innerHTML='<table><tr><th>Stage</th><th>Target REAL g/s</th><th>LUT cmd</th><th>Mode</th><th>ACTUAL WORKFLOW COMMAND</th></tr><tr><td>S1</td><td>'+esc(p.stage1&&p.stage1.desiredGS)+' g/s</td><td>'+esc(p.stage1&&p.stage1.lutCommandMlS)+'</td><td>'+commandModeLabel(p.stage1&&p.stage1.mode)+'</td><td><b>'+esc(ap1)+' ml/s</b></td></tr><tr><td>S2</td><td>'+esc(p.stage2&&p.stage2.desiredGS)+' g/s</td><td>'+esc(p.stage2&&p.stage2.lutCommandMlS)+'</td><td>'+commandModeLabel(p.stage2&&p.stage2.mode)+'</td><td><b>'+esc(ap2)+' ml/s</b></td></tr><tr><td>S3</td><td>'+esc(expectedS3.desiredGS)+' g/s</td><td>'+esc(expectedS3.lutCommandMlS)+'</td><td>'+commandModeLabel(mode)+'</td><td><b>'+ap3+'</b></td></tr></table><div class="small" style="margin-top:7px">'+truthLine+'<br>'+source+'</div>'}
+function renderAppliedCommands(c,truth){if(!appliedcommands)return;if(!c||!c.appliedProfile){appliedcommands.innerHTML='<span class="bad">Current profile command state unavailable.</span>';return}const p=c.appliedProfile,src=c.adaptiveSource||null;const expectedS3=p.stage3||{};const t=truth||{};const a=t.actual||null;let ap1=p.stage1&&p.stage1.commandMlS,ap2=p.stage2&&p.stage2.commandMlS,mode=expectedS3.mode,ap3=expectedS3.mode==='shape'?shapeCommandText(expectedS3.shape):(esc(expectedS3.flatCommandMlS)+' ml/s');if(!a){ap1='unavailable';ap2='unavailable';ap3='unavailable';mode='unverified'}if(a){ap1=a.stage1CommandMlS;ap2=a.stage2CommandMlS;mode=a.stage3Mode==='shape'?'shape':'actual';ap3=a.stage3Mode==='shape'?shapeCommandText(a.s3Shape):(esc(a.stage3CommandMlS)+' ml/s')}let source='<b>Source:</b> '+esc(c.manualTestStatus||'AUTO / LUT');if(src&&src.runId)source='<b>Source:</b> NEXT SHOT ADAPTIVE '+esc(String(src.mode||'').toUpperCase())+' · run '+esc(src.runId)+(src.appliedAt?' · '+esc(src.appliedAt):'');const truthLine=t.verified?'<span class="good"><b>WORKFLOW READBACK VERIFIED</b></span> · '+esc(t.status||''):'<span class="bad"><b>WORKFLOW NOT VERIFIED</b></span> · '+esc(t.status||'')+' · expected commands are shown only as a reference until repair succeeds.';appliedcommands.innerHTML='<table><tr><th>Stage</th><th>Target REAL g/s</th><th>LUT cmd</th><th>Mode</th><th>ACTUAL WORKFLOW COMMAND</th></tr><tr><td>S1</td><td>'+esc(p.stage1&&p.stage1.desiredGS)+' g/s</td><td>'+esc(p.stage1&&p.stage1.lutCommandMlS)+'</td><td>'+commandModeLabel(p.stage1&&p.stage1.mode)+'</td><td><b>'+esc(ap1)+' ml/s</b></td></tr><tr><td>S2</td><td>'+esc(p.stage2&&p.stage2.desiredGS)+' g/s</td><td>'+esc(p.stage2&&p.stage2.lutCommandMlS)+'</td><td>'+commandModeLabel(p.stage2&&p.stage2.mode)+'</td><td><b>'+esc(ap2)+' ml/s</b></td></tr><tr><td>S3</td><td>'+esc(expectedS3.desiredGS)+' g/s</td><td>'+esc(expectedS3.lutCommandMlS)+'</td><td>'+commandModeLabel(mode)+'</td><td><b>'+ap3+'</b></td></tr></table><div class="small" style="margin-top:7px">'+truthLine+'<br>'+source+'</div>'}
 function renderRunCommands(s){if(!runcommands)return;const p=s&&s.shotCommands;if(!p){runcommands.innerHTML='<span class="small">No completed HyperEx shot command snapshot is available.</span>';return}const s3=p.stage3||{};const s3txt=s3.mode==='shape'?shapeCommandText(s3.shape):(esc(s3.flatCommandMlS)+' ml/s');runcommands.innerHTML='<table><tr><th>Stage</th><th>Target</th><th>LUT cmd</th><th>Mode AT SHOT START</th><th>COMMANDS USED BY THIS SHOT</th></tr><tr><td>S1</td><td>'+esc(p.stage1&&p.stage1.desiredGS)+' g/s</td><td>'+esc(p.stage1&&p.stage1.lutCommandMlS)+'</td><td>'+commandModeLabel(p.stage1&&p.stage1.mode)+'</td><td><b>'+esc(p.stage1&&p.stage1.commandMlS)+' ml/s</b></td></tr><tr><td>S2</td><td>'+esc(p.stage2&&p.stage2.desiredGS)+' g/s</td><td>'+esc(p.stage2&&p.stage2.lutCommandMlS)+'</td><td>'+commandModeLabel(p.stage2&&p.stage2.mode)+'</td><td><b>'+esc(p.stage2&&p.stage2.commandMlS)+' ml/s</b></td></tr><tr><td>S3</td><td>'+esc(s3.desiredGS)+' g/s</td><td>'+esc(s3.lutCommandMlS)+'</td><td>'+commandModeLabel(s3.mode)+'</td><td><b>'+s3txt+'</b></td></tr></table><div class="small" style="margin-top:7px">Historical snapshot only. It does not change when NEXT SHOT ADAPTIVE writes a new profile after this shot.</div>'}
 const ADV_SETTING_KEYS={temperature:'Temperature',stage1Flow:'Stage1Flow',stage1PressureLimit:'Stage1PressureLimit',dumpFlowThreshold:'DumpFlowThreshold',dumpFlowStableSamples:'DumpFlowStableSamples',dumpFallbackSeconds:'DumpFallbackSeconds',dumpTimeoutSeconds:'DumpTimeoutSeconds',stage2Flow:'Stage2Flow',stage2PressureLimit:'Stage2PressureLimit',stage3Flow:'Stage3Flow',stage3PressureLimit:'Stage3PressureLimit',hardPressureLimit:'HardPressureLimit',scaleResetThreshold:'ScaleResetThreshold',noScaleTimeoutSeconds:'NoScaleTimeoutSeconds',autoArmRetry1Seconds:'AutoArmRetry1Seconds',autoArmRetry2Seconds:'AutoArmRetry2Seconds',diagnosticSampleIntervalMs:'DiagnosticSampleIntervalMs',maxRunSeconds:'MaxRunSeconds'};
 const ADV_FIELDS=Object.keys(ADV_SETTING_KEYS);
 async function loadAdvancedSettings(){try{const r=await fetch(base+'/advanced-settings');if(!r.ok)return;const j=await r.json(),a=j.settings||{};for(const k of ADV_FIELDS){const q=$('adv_'+k);if(q&&a[k]!=null)q.value=a[k]}const meta=$('advancedmeta');if(meta){const bt=j.basicCurve||{};meta.innerHTML='Single settings source · core curve: S1 <b>'+esc(bt.stage1WeightG)+'g</b> → settle <b>'+esc(bt.releaseSettleSeconds)+'s</b> → soak <b>'+esc(bt.soakSeconds)+'s</b> → S2→S3 <b>'+esc(bt.stage2WeightG)+'g</b> → final <b>'+esc(bt.finalWeightG)+'g</b> · GHC timeout <b>'+esc(bt.ghcConfirmTimeoutSeconds)+'s</b>.'}}catch(e){const meta=$('advancedmeta');if(meta)meta.textContent='Settings load error: '+e}}
 async function saveAdvancedSettings(){const payload={};for(const k of ADV_FIELDS){const q=$('adv_'+k);if(!q)continue;const v=Number(q.value);if(!Number.isFinite(v)){alert('Invalid setting: '+k);return}payload[ADV_SETTING_KEYS[k]]=v}if(!confirm('Save these values to the normal HyperEx plugin Settings?\\n\\nThis uses the same settings source shown on the Plugins page and reloads HyperEx once.'))return;const r=await fetch(coreSettings,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});if(!r.ok){alert('Save failed: '+await r.text());return}alert('Settings saved. HyperEx is reloading; reopen DIAG / CAL if this page closes.');setTimeout(()=>location.reload(),1200)}
-async function loadCal(){try{const r=await fetch(base+'/calibration-status');const c=await r.json();renderAppliedCommands(c.commandFlows||{},c.profileTruth||{});latestAutoApplyEnabled=c.autoApplyNextShot!==false;latestAutoApplyStatus=c.autoApplyLastStatus||null;renderAutoApplyBox();renderAdaptive(latestAdaptiveSummary);const ok=c.calibrationUsable;const b1=$("step1badge"),b2=$("step2badge");if(b1){b1.textContent=ok?"CAL READY":"REQUIRED FIRST";b1.className="stepBadge "+(ok?"good":"bad")}if(b2){b2.textContent=ok?"ACTIVE · AUTO NEXT SHOT":"WAITING FOR VALID LUT";b2.className="stepBadge "+(ok?"good":"bad")}const hs=c.persistentHistory||{},hb=$("historystatus");if(hb){if(hs.available===true){hb.style.background="#173b25";hb.style.color="#9ff0b5";hb.innerHTML='<b>ADAPTIVE HISTORY · PERSISTENT</b> · '+esc(hs.savedShots)+' saved shot(s), '+esc(hs.compatibleShots)+' compatible with the current calibration/LUT. Cross-reload/version regression is enabled.'}else if(hs.available===false){hb.style.background="#4a2024";hb.style.color="#ffb4b8";hb.innerHTML='<b>ADAPTIVE HISTORY · SESSION ONLY</b> · '+esc(hs.status)+'<br>Shot-to-shot adaptation still works in this session, but cross-reload/version regression is disabled.'}else{hb.style.background="#3b2d16";hb.style.color="#ffd58a";hb.innerHTML='<b>ADAPTIVE HISTORY</b> · checking pluginStorage write/readback…'}}if($("t1")){ $("t1").value=c.commandFlows&&c.commandFlows.stage1DesiredGS!=null?c.commandFlows.stage1DesiredGS:""; $("t2").value=c.commandFlows&&c.commandFlows.stage2DesiredGS!=null?c.commandFlows.stage2DesiredGS:""; $("t3").value=c.commandFlows&&c.commandFlows.stage3DesiredGS!=null?c.commandFlows.stage3DesiredGS:"";}if(calmode){calmode.innerHTML=(c.calibrationModes||[{id:'low',label:'Low Water'},{id:'full',label:'Full'}]).map(x=>'<button class="b s '+(c.calibrationMode===x.id?'active':'')+'" data-mode="'+esc(x.id)+'">'+esc(x.label)+(x.id==='low'?' · DEFAULT':'')+'</button>').join('');calmode.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-mode',{mode:q.dataset.mode});await loadCal()})}if(waterwarn){const w=c.waterPreflight||{};const wc=w.status==='ok'?'#163b26':w.status==='warn'?'#3b2d16':'#4a2024';const fg=w.status==='ok'?'#9ff0b5':w.status==='warn'?'#ffd58a':'#ffb4b8';waterwarn.style.background=wc;waterwarn.style.color=fg;let tank='Tank level unavailable';if(w.available)tank='Tank: <b>'+esc(w.currentLevelMm)+' mm</b> · refill threshold: <b>'+esc(w.refillLevelMm)+' mm</b> · margin: <b>'+esc(w.marginMm)+' mm</b>';waterwarn.innerHTML='<b>WATER / VESSEL / TANK PREFLIGHT · '+esc(c.calibrationModeLabel)+' · '+esc((w.status||'unknown').toUpperCase())+'</b><br>'+tank+'<br>Prime: '+esc(c.primeFlow)+' ml/s × '+esc(c.primeSeconds)+' s · '+esc(c.calibrationSteps)+' calibration plateaus × '+esc(c.calibrationStepSeconds)+' s · nominal DE1 command water <b>≈'+esc(c.nominalCommandWaterMl)+' ml</b>.<br>Use a <b>'+esc(c.recommendedContainerMl)+' ml or larger</b> catch vessel. Plugin actively stops around <b>'+esc(c.calibrationHardStopG)+' g</b> actual collected water. '+esc(w.message||'');}calstatus.innerHTML='<b class="'+(ok?'good':'bad')+'">'+(ok?'CALIBRATION READY':'CALIBRATION NOT READY')+'</b><br>Mode: <b>'+esc(c.calibrationModeLabel)+'</b> · Profile: <b>'+esc(c.calibrationProfileTitle)+'</b><br>Scope: <b>'+esc(c.scopeLabel)+'</b> · DE1 multiplier: <b>'+esc(c.currentFlowMultiplier)+'</b> · map base: <b>'+esc(c.calibrationBaseMultiplier)+'</b> · suggested: <b>'+esc(c.suggestedFlowMultiplier)+'</b><br>'+esc(c.calibrationStaleReason||'LUT valid')+(c.lastCalibrationValid===false?'<br><b class="bad">LAST CAL RUN INVALID — previous valid LUT retained</b>':c.lastCalibrationValid===true?'<br><b class="good">LAST CAL RUN VALID</b>':'')+'<br>Real→command: S1 '+esc(c.commandFlows&&c.commandFlows.stage1DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage1CommandMlS)+' · S2 '+esc(c.commandFlows&&c.commandFlows.stage2DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage2CommandMlS)+' · S3 '+esc(c.commandFlows&&c.commandFlows.stage3DesiredGS)+'→'+appliedS3Text(c.commandFlows||{})+'<br>Test mode: <b>'+esc((c.commandFlows&&c.commandFlows.manualTestStatus)||'none')+'</b>';renderTestCommands(c.commandFlows||{},latestAdvisorySummary||{});scope.innerHTML=['off','hyperex','global'].map(x=>'<button class="b s '+(c.scope===x?'active':'')+'" data-scope="'+x+'">'+(x==='off'?'OFF':x==='hyperex'?'HYPEREX ONLY':'GLOBAL')+'</button>').join('');scope.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-scope',{scope:q.dataset.scope});await loadCal()});const last=c.lastCalibration||null;const rows=last&&Array.isArray(last.plateauResults)?last.plateauResults:[];const anchors=last&&last.map&&Array.isArray(last.map.targetAnchors)?last.map.targetAnchors:[];const anchorHtml=anchors.length?'<div style="margin:8px 0"><b>TARGET LUT:</b> '+anchors.map(a=>esc(a.blockId)+' '+esc(a.actualFlow)+' g/s → '+esc(a.commandFlow)+' ml/s ('+esc(a.quality)+')').join(' · ')+'</div>':'';map.innerHTML=rows.length?anchorHtml+'<table><tr><th>Frame</th><th>Block / target</th><th>DE1 cmd</th><th>RAW real g/s</th><th>DE1 flow</th><th>R²</th><th>Status</th></tr>'+rows.map(p=>'<tr><td>'+esc(p.frame)+'</td><td>'+esc((p.blockId||'—')+(p.targetReal!=null?' / '+p.targetReal:'') )+'</td><td>'+esc(p.commandFlow)+'</td><td>'+esc(p.actualFlow)+'</td><td>'+esc(p.machineFlow)+'</td><td>'+esc(p.r2)+'</td><td class="'+(p.acceptedInMap?'good':(p.valid?'':'bad'))+'">'+esc(p.acceptedInMap?'ANCHOR SOURCE':(p.reason||'REJECTED'))+'</td></tr>').join('')+'</table><div style="margin-top:8px">'+esc(c.profileSyncStatus||'')+'</div>':'No calibration run yet. Low Water automatically searches the three HyperEx real-flow targets and generates the LUT only when all targets pass. Full remains the wide engineering staircase.';const cur=c.stage1StartupCorrection||1;startupbox.innerHTML='<b>Stable skip topology:</b> scale feedback is advisory only. Optional S3 DECAY COMP may use 5 profile frames, but S3 subframes advance only by their own timers and never add plugin skipStep calls.'+(Number(cur)!==1?(' <br><span class="bad">Legacy S1 startup factor '+esc(cur)+'× is stored but ignored in v0.1.48.</span> <button id=clearstartup class="b s">CLEAR LEGACY</button>'):'');const cl=$("clearstartup");if(cl)cl.onclick=async()=>{try{await post('startup-clear',{});await loadCal()}catch(e){alert('Clear failed: '+e)}};}catch(e){calstatus.textContent='Calibration status error: '+e}}
+async function loadCal(){try{const r=await fetch(base+'/calibration-status');const c=await r.json();renderAppliedCommands(c.commandFlows||{},c.profileTruth||{});latestAutoApplyEnabled=c.autoApplyNextShot!==false;latestAutoApplyStatus=c.autoApplyLastStatus||null;renderAutoApplyBox();renderAdaptive(latestAdaptiveSummary);const ok=c.calibrationUsable;const b1=$("step1badge"),b2=$("step2badge");if(b1){b1.textContent=ok?"CAL READY":"REQUIRED FIRST";b1.className="stepBadge "+(ok?"good":"bad")}if(b2){b2.textContent=ok?"ACTIVE · AUTO NEXT SHOT":"WAITING FOR VALID LUT";b2.className="stepBadge "+(ok?"good":"bad")}const hs=c.persistentHistory||{},hb=$("historystatus");if(hb){if(hs.available===true){hb.style.background="#173b25";hb.style.color="#9ff0b5";hb.innerHTML='<b>ADAPTIVE HISTORY · PERSISTENT</b> · '+esc(hs.savedShots)+' saved shot(s), '+esc(hs.compatibleShots)+' compatible with the current calibration/LUT. Cross-reload/version regression is enabled.'}else if(hs.available===false){hb.style.background="#4a2024";hb.style.color="#ffb4b8";hb.innerHTML='<b>ADAPTIVE HISTORY · SESSION ONLY</b> · '+esc(hs.status)+'<br>Shot-to-shot adaptation still works in this session, but cross-reload/version regression is disabled.'}else{hb.style.background="#3b2d16";hb.style.color="#ffd58a";hb.innerHTML='<b>ADAPTIVE HISTORY</b> · checking pluginStorage write/readback…'}}if($("t1")){ $("t1").value=c.commandFlows&&c.commandFlows.stage1DesiredGS!=null?c.commandFlows.stage1DesiredGS:""; $("t2").value=c.commandFlows&&c.commandFlows.stage2DesiredGS!=null?c.commandFlows.stage2DesiredGS:""; $("t3").value=c.commandFlows&&c.commandFlows.stage3DesiredGS!=null?c.commandFlows.stage3DesiredGS:"";}if(calmode){calmode.innerHTML=(c.calibrationModes||[{id:'low',label:'Low Water'},{id:'full',label:'Full'}]).map(x=>'<button class="b s '+(c.calibrationMode===x.id?'active':'')+'" data-mode="'+esc(x.id)+'">'+esc(x.label)+(x.id==='low'?' · DEFAULT':'')+'</button>').join('');calmode.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-mode',{mode:q.dataset.mode});await loadCal()})}if(waterwarn){const w=c.waterPreflight||{};const wc=w.status==='ok'?'#163b26':w.status==='warn'?'#3b2d16':'#4a2024';const fg=w.status==='ok'?'#9ff0b5':w.status==='warn'?'#ffd58a':'#ffb4b8';waterwarn.style.background=wc;waterwarn.style.color=fg;let tank='Tank level unavailable';if(w.available)tank='Tank: <b>'+esc(w.currentLevelMm)+' mm</b> · refill threshold: <b>'+esc(w.refillLevelMm)+' mm</b> · margin: <b>'+esc(w.marginMm)+' mm</b>';waterwarn.innerHTML='<b>WATER / VESSEL / TANK PREFLIGHT · '+esc(c.calibrationModeLabel)+' · '+esc((w.status||'unknown').toUpperCase())+'</b><br>'+tank+'<br>Prime: '+esc(c.primeFlow)+' ml/s × '+esc(c.primeSeconds)+' s · '+esc(c.calibrationSteps)+' calibration plateaus × '+esc(c.calibrationStepSeconds)+' s · nominal DE1 command water <b>≈'+esc(c.nominalCommandWaterMl)+' ml</b>.<br>Use a <b>'+esc(c.recommendedContainerMl)+' ml or larger</b> catch vessel. Plugin actively stops around <b>'+esc(c.calibrationHardStopG)+' g</b> actual collected water. '+esc(w.message||'');}calstatus.innerHTML='<b class="'+(ok?'good':'bad')+'">'+(ok?'CALIBRATION READY':'CALIBRATION NOT READY')+'</b><br>Mode: <b>'+esc(c.calibrationModeLabel)+'</b> · Profile: <b>'+esc(c.calibrationProfileTitle)+'</b><br>Scope: <b>'+esc(c.scopeLabel)+'</b> · DE1 multiplier: <b>'+esc(c.currentFlowMultiplier)+'</b> · map base: <b>'+esc(c.calibrationBaseMultiplier)+'</b> · suggested: <b>'+esc(c.suggestedFlowMultiplier)+'</b><br>'+esc(c.calibrationStaleReason||'LUT valid')+(c.lastCalibrationValid===false?'<br><b class="bad">LAST CAL RUN INVALID — previous valid LUT retained</b>':c.lastCalibrationValid===true?'<br><b class="good">LAST CAL RUN VALID</b>':'')+'<br>Real→command: S1 '+esc(c.commandFlows&&c.commandFlows.stage1DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage1CommandMlS)+' · S2 '+esc(c.commandFlows&&c.commandFlows.stage2DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage2CommandMlS)+' · S3 '+esc(c.commandFlows&&c.commandFlows.stage3DesiredGS)+'→'+appliedS3Text(c.commandFlows||{})+'<br>Test mode: <b>'+esc((c.commandFlows&&c.commandFlows.manualTestStatus)||'none')+'</b>';renderTestCommands(c.commandFlows||{},latestAdvisorySummary||{});scope.innerHTML=['off','hyperex','global'].map(x=>'<button class="b s '+(c.scope===x?'active':'')+'" data-scope="'+x+'">'+(x==='off'?'OFF':x==='hyperex'?'HYPEREX ONLY':'GLOBAL')+'</button>').join('');scope.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-scope',{scope:q.dataset.scope});await loadCal()});const last=c.lastCalibration||null;const rows=last&&Array.isArray(last.plateauResults)?last.plateauResults:[];const anchors=last&&last.map&&Array.isArray(last.map.targetAnchors)?last.map.targetAnchors:[];const anchorHtml=anchors.length?'<div style="margin:8px 0"><b>TARGET LUT:</b> '+anchors.map(a=>esc(a.blockId)+' '+esc(a.actualFlow)+' g/s → '+esc(a.commandFlow)+' ml/s ('+esc(a.quality)+')').join(' · ')+'</div>':'';map.innerHTML=rows.length?anchorHtml+'<table><tr><th>Frame</th><th>Block / target</th><th>DE1 cmd</th><th>RAW real g/s</th><th>DE1 flow</th><th>R²</th><th>Status</th></tr>'+rows.map(p=>'<tr><td>'+esc(p.frame)+'</td><td>'+esc((p.blockId||'—')+(p.targetReal!=null?' / '+p.targetReal:'') )+'</td><td>'+esc(p.commandFlow)+'</td><td>'+esc(p.actualFlow)+'</td><td>'+esc(p.machineFlow)+'</td><td>'+esc(p.r2)+'</td><td class="'+(p.acceptedInMap?'good':(p.valid?'':'bad'))+'">'+esc(p.acceptedInMap?'ANCHOR SOURCE':(p.reason||'REJECTED'))+'</td></tr>').join('')+'</table><div style="margin-top:8px">'+esc(c.profileSyncStatus||'')+'</div>':'No calibration run yet. Low Water automatically searches the three HyperEx real-flow targets and generates the LUT only when all targets pass. Full remains the wide engineering staircase.';const cur=c.stage1StartupCorrection||1;startupbox.innerHTML='<b>Stable skip topology:</b> scale feedback is advisory only. Optional S3 DECAY COMP may use 5 profile frames, but S3 subframes advance only by their own timers and never add plugin skipStep calls.'+(Number(cur)!==1?(' <br><span class="bad">Legacy S1 startup factor '+esc(cur)+'× is stored but ignored in v0.1.49.</span> <button id=clearstartup class="b s">CLEAR LEGACY</button>'):'');const cl=$("clearstartup");if(cl)cl.onclick=async()=>{try{await post('startup-clear',{});await loadCal()}catch(e){alert('Clear failed: '+e)}};}catch(e){calstatus.textContent='Calibration status error: '+e}}
 function svgPath(points,xmin,xmax,ymin,ymax){const W=800,H=205,pad=18,dx=Math.max(.001,xmax-xmin),dy=Math.max(.001,ymax-ymin);let out='';for(const q of points){if(!Number.isFinite(q[0])||!Number.isFinite(q[1]))continue;const x=pad+(q[0]-xmin)/dx*(W-pad*2),y=H-pad-(q[1]-ymin)/dy*(H-pad*2);out+=(out?' L ':'M ')+x.toFixed(1)+' '+y.toFixed(1)}return out}
 function renderChart(svg,series,ymin,ymax){if(!svg)return;let all=[];series.forEach(s=>all=all.concat(s.points));if(!all.length){svg.innerHTML='';return}const xs=all.map(p=>p[0]).filter(Number.isFinite),ys=all.map(p=>p[1]).filter(Number.isFinite);const xmin=Math.min(...xs),xmax=Math.max(...xs);if(ymin==null)ymin=Math.min(...ys);if(ymax==null)ymax=Math.max(...ys);if(ymax-ymin<.01)ymax=ymin+1;let h='<line x1="18" y1="187" x2="782" y2="187" stroke="#3a3f47"/><line x1="18" y1="18" x2="18" y2="187" stroke="#3a3f47"/>';for(const s of series){const path=svgPath(s.points,xmin,xmax,ymin,ymax);if(path)h+='<path d="'+path+'" fill="none" stroke="'+s.stroke+'" stroke-width="'+(s.width||1.7)+'" opacity="'+(s.opacity||1)+'"/>'}h+='<text x="24" y="16" fill="#aeb6c2" font-size="10">'+Number(ymax).toFixed(1)+'</text><text x="24" y="184" fill="#aeb6c2" font-size="10">'+Number(ymin).toFixed(1)+'</text>';svg.innerHTML=h}
 function renderCharts(run){if(!run)return;const combined=run.samples||[],raw=run.rawScaleSamples||[];const target=combined.map(s=>[Number(s.tMs)/1000,Number(s.targetFlowMlS)]),machine=combined.map(s=>[Number(s.tMs)/1000,Number(s.machineFlowMlS)]),decaid=combined.map(s=>[Number(s.tMs)/1000,Number(s.decaidWeightFlowGS)]);const rawSlope=[];for(let i=0;i<raw.length;i++){let j=i-1;while(j>0&&Number(raw[i].tMs)-Number(raw[j].tMs)<900)j--;if(j>=0){let reset=false;for(let k=j+1;k<=i;k++)if(raw[k].tareReset){reset=true;break}const dt=(Number(raw[i].scaleTimestampSeconds)-Number(raw[j].scaleTimestampSeconds));if(!reset&&Number.isFinite(dt)&&dt>.25){rawSlope.push([Number(raw[i].tMs)/1000,(Number(raw[i].weightG)-Number(raw[j].weightG))/dt])}}}const flowYs=[...target,...machine,...decaid,...rawSlope].map(p=>p[1]).filter(v=>Number.isFinite(v)&&v>-1&&v<20);const fymax=Math.max(6,flowYs.length?Math.min(12,Math.ceil(Math.max(...flowYs)+.5)):8);renderChart($('flowchart'),[{points:target,stroke:'#f0c75e',width:1.4},{points:machine,stroke:'#71a7ff',width:1.8},{points:decaid,stroke:'#c77dff',width:1.5,opacity:.8},{points:rawSlope,stroke:'#63d89b',width:2.1}],0,fymax);const wp=raw.map(r=>[Number(r.tMs)/1000,Number(r.weightG)]);if(wp.length){const wy=wp.map(p=>p[1]).filter(Number.isFinite);renderChart($('weightchart'),[{points:wp,stroke:'#e5e8ed',width:2}],Math.min(...wy),Math.max(...wy))}}
@@ -2236,7 +2304,6 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     clearTimer("armReinforceTimer");
     clearTimer("armReinforceTimer2");
     clearTimer("autoApplyTimer");
-    clearTimer("storageProbeTimer");
   }
 
   function profileObject() {
@@ -2302,7 +2369,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     return {
       title: c.profileTitle,
       author: "ladiosupp / HyperEx",
-      notes: `DE1XL v1.48 HyperEx pulse filtration. User flow settings mean desired cup-scale mass flow (g/s). ${calNote} Stable skip topology: one restart skip to S2 and one 40 g skip to S3. Optional S3 DECAY COMP uses only natural profile-time transitions inside S3; no extra plugin skipStep calls. Final stop is by Idle. Current-shot regression is advisory only.`,
+      notes: `DE1XL v1.49 HyperEx pulse filtration. User flow settings mean desired cup-scale mass flow (g/s). ${calNote} Stable skip topology: one restart skip to S2 and one 40 g skip to S3. Optional S3 DECAY COMP uses only natural profile-time transitions inside S3; no extra plugin skipStep calls. Final stop is by Idle. Current-shot regression is advisory only.`,
       beverage_type: "espresso",
       steps,
       tank_temperature: "0", target_weight: "0", target_volume: "0", target_volume_count_start: "0",
@@ -2322,7 +2389,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     return {
       title: calibrationProfileTitle(normalizedMode),
       author: "ladiosupp / HyperEx",
-      notes: `EMPTY BASKET ONLY. HyperEx v0.1.48 ${wp.modeLabel} real-flow calibration. Prime ${wp.primeFlow.toFixed(2)} ml/s × ${wp.primeSeconds.toFixed(1)} s, then ${wp.steps} ${wp.algorithm === "target-lut" ? "target-search" : "calibration"} plateaus × ${wp.stepSeconds.toFixed(1)} s; nominal DE1 commanded water ≈${wp.nominalCommandWaterMl} ml. Use a ${wp.recommendedContainerMl} ml or larger catch vessel. The plugin actively stops calibration at about ${wp.hardStopG} g actual collected water to preserve margin below 300 ml. Tank level is checked before PREPARE when live DE1 water-level telemetry is available. Tare the scale, start Espresso manually, and leave the vessel in place until Idle.`,
+      notes: `EMPTY BASKET ONLY. HyperEx v0.1.49 ${wp.modeLabel} real-flow calibration. Prime ${wp.primeFlow.toFixed(2)} ml/s × ${wp.primeSeconds.toFixed(1)} s, then ${wp.steps} ${wp.algorithm === "target-lut" ? "target-search" : "calibration"} plateaus × ${wp.stepSeconds.toFixed(1)} s; nominal DE1 commanded water ≈${wp.nominalCommandWaterMl} ml. Use a ${wp.recommendedContainerMl} ml or larger catch vessel. The plugin actively stops calibration at about ${wp.hardStopG} g actual collected water to preserve margin below 300 ml. Tank level is checked before PREPARE when live DE1 water-level telemetry is available. Tare the scale, start Espresso manually, and leave the vessel in place until Idle.`,
       beverage_type: "espresso",
       steps: [
         ...(wp.primeSeconds > 0 ? [{
@@ -2441,6 +2508,9 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     return {
       selectedTitle: state.workflowTitle || "",
       verified: !!state.runtimeProfileVerified,
+      readbackAt: state.profileReadbackAt,
+      machineUploadAcknowledged: !!state.machineProfileAckKey,
+      machineProfileIndependentlyReadBack: false,
       status: state.runtimeProfileStatus || "not verified",
       expected: expected ? profileCommandSummaryFromProfile(expected) : null,
       actual: actual ? profileCommandSummaryFromProfile(actual) : null
@@ -2453,51 +2523,51 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     return body && body.profile && typeof body.profile === 'object' ? body.profile : null;
   }
 
-  async function verifyAndRepairSelectedHyperExProfile(reason) {
-    if (!state.cfg || state.workflowTitle !== state.cfg.profileTitle || state.runtimeProfileRepairBusy) return;
-    state.runtimeProfileRepairBusy = true;
+  function invalidateProfileTruth(reason, clearMachineAck) {
+    state.runtimeProfileVerified = false;
     state.armed = false;
-    try {
-      const expected = profileObject();
-      let actual = state.workflowProfile;
-      if (!actual) {
-        try { actual = await readWorkflowProfile(); } catch (error) { log(`Workflow profile readback failed before verification: ${error.message || error}`); }
-      }
-      state.workflowProfile = actual;
-      if (actual && profileExecutionEquivalent(actual, expected)) {
-        state.runtimeProfileVerified = true;
-        state.runtimeProfileStatus = `verified ${reason || 'workflow'}`;
-        state.armed = !!state.cfg.enabled;
-        state.runtimeProfileMismatchAbortSent = false;
-        emitSkinChanged();
-        return;
-      }
+    state.runtimeProfileStatus = reason || 'verification required';
+    if (clearMachineAck) state.machineProfileAckKey = "";
+  }
 
-      const actualSummary = profileCommandSummaryFromProfile(actual);
-      const expectedSummary = profileCommandSummaryFromProfile(expected);
-      state.runtimeProfileVerified = false;
-      state.runtimeProfileStatus = `mismatch detected; repairing (${reason || 'workflow'})`;
-      log(`HyperEx workflow profile mismatch. Expected commands ${JSON.stringify(expectedSummary)}, actual ${JSON.stringify(actualSummary)}. Re-syncing workflow and machine before arming.`);
-      await syncHyperExProfile(true);
-
-      let readback = null;
-      try { readback = await readWorkflowProfile(); } catch (error) { log(`Workflow profile readback after repair failed: ${error.message || error}`); }
-      state.workflowProfile = readback || expected;
-      if (!readback || !profileExecutionEquivalent(readback, expected)) {
-        state.runtimeProfileVerified = false;
-        state.runtimeProfileStatus = 'repair failed: workflow readback does not match LUT/adaptive profile';
-        state.armed = false;
-        throw new Error(state.runtimeProfileStatus);
-      }
-      state.runtimeProfileVerified = true;
-      state.runtimeProfileStatus = `verified after repair ${new Date().toISOString()}`;
-      state.armed = !!state.cfg.enabled;
-      state.runtimeProfileMismatchAbortSent = false;
-      log(`HyperEx workflow profile repair VERIFIED. Actual workflow commands now ${JSON.stringify(profileCommandSummaryFromProfile(readback))}.`);
-      emitSkinChanged();
-    } finally {
-      state.runtimeProfileRepairBusy = false;
+  function noteMultiplierChange(value) {
+    const previous = finiteOrNull(state.flowMultiplierCurrent);
+    if (previous !== null && Math.abs(previous - value) > 0.0001) {
+      state.adaptiveHistory = [];
+      state.persistentHistoryCompatibleCount = 0;
+      invalidateProfileTruth('flowMultiplier changed; fresh verification required', true);
+      if (state.diagnosticCurrent && state.diagnosticCurrent.kind === 'hyperex') state.diagnosticCurrent.config.profileTruthVerified = false;
     }
+  }
+
+  function profileSyncIsIdle() {
+    return state.phase === 'idle' && !state.calibrationActive && state.lastMachineState !== 'espresso';
+  }
+
+  function checkProfileSelection(revision) {
+    if (!profileSyncIsIdle()) throw new Error('Profile sync blocked while shot or calibration is active');
+    if (state.workflowTitle !== state.cfg.profileTitle || state.workflowSelectionRevision !== revision) throw new Error('Workflow selection changed during verification');
+  }
+
+  function checkProfileSyncContext(profile, revision) {
+    checkProfileSelection(revision);
+    if (!profileExecutionEquivalent(profile, profileObject())) throw new Error('Expected profile changed during verification; retry required');
+  }
+
+  async function verifyAndRepairSelectedHyperExProfile(reason) {
+    if (!state.cfg || state.workflowTitle !== state.cfg.profileTitle) return;
+    return syncHyperExProfile(true, reason || 'workflow verification');
+  }
+
+  function scheduleProfileVerification(reason) {
+    if (!state.cfg || state.workflowTitle !== state.cfg.profileTitle || state.runtimeProfileRepairBusy || state.profileVerificationPending || Date.now() < state.profileVerificationRetryAtMs || !profileSyncIsIdle()) return;
+    state.profileVerificationPending = true;
+    state.profileVerificationRetryAtMs = Date.now() + 3000;
+    verifyAndRepairSelectedHyperExProfile(reason).catch(error => {
+      invalidateProfileTruth(`verification failed: ${error.message || error}`, true);
+      log(state.runtimeProfileStatus);
+      emitSkinChanged();
+    }).finally(() => { state.profileVerificationPending = false; });
   }
 
   async function upsertProfile(profile) {
@@ -2532,15 +2602,8 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
   }
 
   async function ensureProfileInstalled() {
-    try {
-      const rec = await upsertProfile(profileObject());
-      state.hyperExProfileId = rec && rec.id ? rec.id : state.hyperExProfileId;
-      state.profileSyncStatus = `HyperEx profile synced ${new Date().toISOString()}`;
-      log(`Profile '${state.cfg.profileTitle}' installed/updated in Decaid profile library.`);
-    } catch (error) {
-      state.profileSyncStatus = `HyperEx profile sync failed: ${error.message || error}`;
-      log(state.profileSyncStatus);
-    }
+    try { await syncHyperExProfile(false); }
+    catch (error) { state.profileSyncStatus = `HyperEx profile sync failed: ${error.message || error}`; log(state.profileSyncStatus); }
   }
 
   async function hideLegacyCalibrationProfile() {
@@ -2577,31 +2640,91 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     await hideLegacyCalibrationProfile();
   }
 
-  async function syncHyperExProfile(updateCurrentWorkflow) {
-    recomputeCalibrationUsability();
-    const profile = profileObject();
-    const rec = await upsertProfile(profile);
-    state.hyperExProfileId = rec && rec.id ? rec.id : state.hyperExProfileId;
-    if (updateCurrentWorkflow && state.workflowTitle === state.cfg.profileTitle) {
-      const workflowResponse = await api('/workflow', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile })
-      });
-      try {
-        const workflowBody = await workflowResponse.json();
-        if (workflowBody && workflowBody.profile) state.workflowProfile = workflowBody.profile;
-      } catch (_) { state.workflowProfile = profile; }
-      // Upload immediately as well; workflow updates can be queued behind other app work.
-      try {
-        await api('/machine/profile', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(profile)
-        });
-      } catch (error) {
-        log(`Direct machine profile refresh after workflow sync failed: ${error.message || error}`);
+  function syncHyperExProfile(updateCurrentWorkflow, reason) {
+    if (!profileSyncIsIdle()) return Promise.reject(new Error('Profile writes blocked during an active shot'));
+    if (updateCurrentWorkflow && state.workflowTitle === (state.cfg && state.cfg.profileTitle)) invalidateProfileTruth('waiting for fresh workflow readback', false);
+    const task = state.profileSyncQueue.catch(() => {}).then(() => performHyperExProfileSync(updateCurrentWorkflow, reason));
+    state.profileSyncQueue = task.catch(() => {});
+    return task;
+  }
+
+  async function requireIdleMachineForProfileSync() {
+    const machine = extractMachine(await getMachineSnapshot());
+    if (!machine.machineState || machine.machineState === 'espresso') throw new Error('Machine is busy or state is unavailable; profile writes blocked');
+    if (!profileSyncIsIdle()) throw new Error('Shot began during profile verification');
+  }
+
+  async function performHyperExProfileSync(updateCurrentWorkflow, reason) {
+    if (!profileSyncIsIdle()) throw new Error('Profile writes blocked during an active shot');
+    const selected = !!(updateCurrentWorkflow && state.workflowTitle === state.cfg.profileTitle);
+    const revision = state.workflowSelectionRevision;
+    state.runtimeProfileRepairBusy = selected;
+    try {
+      if (selected) {
+        invalidateProfileTruth('checking fresh workflow / multiplier readback', false);
+        await requireIdleMachineForProfileSync();
+        checkProfileSelection(revision);
+        if (!state.calibrationStorageLoaded || !state.overrideStorageLoaded || !state.scopeStorageLoaded || !state.scopedOriginalStorageLoaded) throw new Error('Waiting for stored calibration and overrides / multiplier scope');
+        if (state.scopeMode === 'hyperex') {
+          if (state.scopeChangeBusy) throw new Error('Scoped multiplier change still pending');
+          await enterHyperExScopedMultiplier('profile verification', revision);
+          checkProfileSelection(revision);
+        }
+        const multiplier = await refreshFlowMultiplier(true, true);
+        recomputeCalibrationUsability();
+        if (!state.calibrationMapUsable || !multiplierClose(multiplier, calibrationBaseMultiplier())) throw new Error('Valid LUT and matching actual multiplier required before arming');
       }
-    }
-    state.profileSyncStatus = `HyperEx profile synced ${new Date().toISOString()}`;
-    emitSkinChanged();
-    return rec;
+      recomputeCalibrationUsability();
+      const profile = profileObject();
+      if (selected) checkProfileSyncContext(profile, revision);
+      const rec = await upsertProfile(profile);
+      state.hyperExProfileId = rec && rec.id ? rec.id : state.hyperExProfileId;
+      if (selected) {
+        checkProfileSyncContext(profile, revision);
+        const actual = await readWorkflowProfile();
+        state.workflowProfile = actual;
+        checkProfileSyncContext(profile, revision);
+        if (!actual || actual.title !== state.cfg.profileTitle) throw new Error('GET /workflow no longer selects HyperEx');
+        const changed = !profileExecutionEquivalent(actual, profile);
+        if (changed) {
+          state.machineProfileAckKey = "";
+          await requireIdleMachineForProfileSync();
+          checkProfileSyncContext(profile, revision);
+          await api('/workflow', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({profile}) });
+          checkProfileSyncContext(profile, revision);
+        }
+        const key = JSON.stringify(normalizedProfileExecution(profile));
+        if (changed || state.machineProfileAckKey !== key) {
+          // HTTP success acknowledges upload; this is not independent DE1 memory readback.
+          await requireIdleMachineForProfileSync();
+          checkProfileSyncContext(profile, revision);
+          await api('/machine/profile', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(profile) });
+          checkProfileSyncContext(profile, revision);
+          state.machineProfileAckKey = key;
+        }
+        const readback = await readWorkflowProfile();
+        state.workflowProfile = readback;
+        checkProfileSyncContext(profile, revision);
+        if (!readback || readback.title !== state.cfg.profileTitle || !profileExecutionEquivalent(readback, profile)) throw new Error('Final GET /workflow does not match expected LUT/adaptive profile');
+        const multiplier = await refreshFlowMultiplier(true, true);
+        checkProfileSyncContext(profile, revision);
+        if (!multiplierClose(multiplier, calibrationBaseMultiplier()) || state.machineProfileAckKey !== key) throw new Error('Multiplier or machine upload acknowledgement changed during verification');
+        state.runtimeProfileVerified = true;
+        state.profileReadbackAt = new Date().toISOString();
+        state.runtimeProfileStatus = `GET /workflow verified; machine upload acknowledged (${reason || 'sync'})`;
+        state.runtimeProfileMismatchAbortSent = false;
+        state.armed = !!state.cfg.enabled;
+        restoreAdaptiveHistoryFromPersistentFile();
+      }
+      state.profileSyncStatus = `HyperEx profile synced ${new Date().toISOString()}`;
+      emitSkinChanged();
+      return rec;
+    } catch (error) {
+      if (selected) invalidateProfileTruth(`verification failed: ${error.message || error}`, true);
+      state.profileSyncStatus = `HyperEx sync failed: ${error.message || error}`;
+      emitSkinChanged();
+      throw error;
+    } finally { state.runtimeProfileRepairBusy = false; }
   }
 
   async function prepareCalibrationProfile(options) {
@@ -3207,7 +3330,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     recomputeCalibrationUsability();
     const map = state.calibrationMap;
     return {
-      pluginVersion: '0.1.48',
+      pluginVersion: '0.1.49',
       autoApplyNextShot: !!state.autoApplyNextShot,
       autoApplyLastStatus: state.autoApplyLastStatus,
       calibrationMode: state.calibrationMode,
@@ -3442,6 +3565,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     state.hasScaleSample = false;
     emitSkinChanged();
     if (reason) log(`Sequence reset (${previous} -> idle): ${reason}`);
+    if (reason && state.workflowTitle === (state.cfg && state.cfg.profileTitle)) scheduleProfileVerification('sequence reset');
     if (completedDiagnosticRun && /^completed at /i.test(String(reason || "")) && state.autoApplyNextShot) {
       state.autoApplyTimer = setTimeout(() => { state.autoApplyTimer = null; autoApplyNextShotIfEligible(completedDiagnosticRun); }, 250);
     }
@@ -3878,6 +4002,10 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     state.lastFrame = machine.profileFrame;
     noteMachine(machine);
 
+    if (state.phase === 'idle' && state.runtimeProfileVerified &&
+        (!profileExecutionEquivalent(state.workflowProfile, profileObject()) || !adaptiveHistoryFingerprint())) {
+      invalidateProfileTruth('Profile or calibration context changed before shot start', true);
+    }
     const active = state.cfg && state.cfg.enabled && state.armed && state.runtimeProfileVerified;
 
     // Never allow a HyperEx-labelled workflow to pour while its execution profile
@@ -3911,7 +4039,10 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       log(`Pour confirmed (${machine.substate}); HyperEx control is now live.`);
     }
 
-    if (state.phase === "idle") return;
+    if (state.phase === "idle") {
+      if (machine.machineState === 'idle' && !state.runtimeProfileVerified) scheduleProfileVerification('machine idle');
+      return;
+    }
 
     handlePressureSafety(machine.pressure);
 
@@ -3952,26 +4083,17 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     const previousTitle = state.workflowTitle;
     const previousCalMode = calibrationModeFromTitle(previousTitle);
     const selectedCalMode = calibrationModeFromTitle(title);
+    const eventProfile = payload && payload.profile || null;
+    const unchanged = previousTitle === title && profileExecutionEquivalent(eventProfile, state.workflowProfile) &&
+      (!state.cfg || title !== state.cfg.profileTitle || profileExecutionEquivalent(eventProfile, profileObject()));
+    if (previousTitle !== title) state.workflowSelectionRevision += 1;
     state.workflowTitle = title;
-    state.workflowProfile = payload && payload.profile && typeof payload.profile === "object" ? payload.profile : null;
     state.calibrationArmed = selectedCalMode !== null;
-    state.runtimeProfileMismatchAbortSent = false;
-    if (state.cfg && title === state.cfg.profileTitle) {
-      const expected = profileObject();
-      state.runtimeProfileVerified = !!(state.workflowProfile && profileExecutionEquivalent(state.workflowProfile, expected));
-      state.runtimeProfileStatus = state.runtimeProfileVerified ? "verified from workflowUpdated" : "selected HyperEx profile needs LUT/adaptive verification";
-      state.armed = !!(state.cfg.enabled && state.runtimeProfileVerified);
-      if (!state.runtimeProfileVerified) {
-        setTimeout(() => verifyAndRepairSelectedHyperExProfile('workflowUpdated').catch(error => {
-          state.runtimeProfileVerified = false; state.armed = false;
-          state.runtimeProfileStatus = `repair failed: ${error.message || error}`;
-          log(`HyperEx profile verification/repair failed: ${error.message || error}`); emitSkinChanged();
-        }), 0);
-      }
-    } else {
-      state.runtimeProfileVerified = false;
-      state.runtimeProfileStatus = title ? `not HyperEx (${title})` : "no workflow selected";
-      state.armed = false;
+    if (!unchanged || !state.runtimeProfileVerified) {
+      invalidateProfileTruth(title === (state.cfg && state.cfg.profileTitle) ? 'workflow notification; GET verification required' : 'not HyperEx', !unchanged && !state.runtimeProfileRepairBusy);
+      if (state.diagnosticCurrent && state.diagnosticCurrent.kind === 'hyperex' && !unchanged) state.diagnosticCurrent.config.profileTruthVerified = false;
+      if (previousTitle !== title) { state.workflowProfile = null; state.profileReadbackAt = null; }
+      if (!state.runtimeProfileRepairBusy) scheduleProfileVerification('workflowUpdated');
     }
 
     if (selectedCalMode !== null && state.calibrationMode !== selectedCalMode) {
@@ -3986,7 +4108,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
 
     if (state.scopeMode === 'hyperex') {
       if (inHyperExScope(title)) {
-        enterHyperExScopedMultiplier(selectedCalMode !== null ? `Flow Calibration ${calibrationModeConfig(selectedCalMode).label} selected` : 'HyperEx selected')
+        if (selectedCalMode !== null) enterHyperExScopedMultiplier(selectedCalMode !== null ? `Flow Calibration ${calibrationModeConfig(selectedCalMode).label} selected` : 'HyperEx selected')
           .catch(error => log(`Scoped flowMultiplier apply failed: ${error.message || error}`));
       } else {
         restoreHyperExScopedMultiplier('left HyperEx scope')
@@ -4013,7 +4135,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
 
   return {
     id: ID,
-    version: "0.1.48",
+    version: "0.1.49",
 
     onLoad(settings) {
       state.cfg = loadConfig(settings || {});
@@ -4023,12 +4145,17 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       state.autoApplyLastStatus = null;
       state.armed = false;
       state.workflowProfile = null;
+      state.machineProfileAckKey = "";
+      state.calibrationStorageLoaded = false;
+      state.overrideStorageLoaded = false;
+      state.scopeStorageLoaded = false;
+      state.scopedOriginalStorageLoaded = false;
       state.runtimeProfileVerified = false;
       state.runtimeProfileStatus = "not verified";
       state.runtimeProfileMismatchAbortSent = false;
       state.calibrationArmed = false;
       resetSequence();
-      log(`Loaded v0.1.48. Stable two-skip topology; scale feedback is validation/advisory only; optional S3 decay-compensation subframes advance by profile time and add no skipStep calls. Dual calibration profiles are installed/updated at first load; HyperEx flow settings are desired REAL mass flow: ${state.cfg.stage1Flow}/${state.cfg.stage2Flow}/${state.cfg.stage3Flow} g/s. flowMultiplier scope=${scopeLabel(state.scopeMode)}. Dashboard idle shortcut=${state.cfg.idleDashboardShortcut ? "enabled" : "off (plugin page primary)"}. Brew state machine remains v0.1.16/v0.1.17 baseline.`);
+      log(`Loaded v0.1.49. Stable two-skip topology; scale feedback is validation/advisory only; optional S3 decay-compensation subframes advance by profile time and add no skipStep calls. Dual calibration profiles are installed/updated at first load; HyperEx flow settings are desired REAL mass flow: ${state.cfg.stage1Flow}/${state.cfg.stage2Flow}/${state.cfg.stage3Flow} g/s. flowMultiplier scope=${scopeLabel(state.scopeMode)}. Dashboard idle shortcut=${state.cfg.idleDashboardShortcut ? "enabled" : "off (plugin page primary)"}. Brew state machine remains v0.1.16/v0.1.17 baseline.`);
       connectScaleStream();
       connectWaterLevelStream();
       storageRead(STORAGE_CAL);
@@ -4066,6 +4193,9 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       }
       if (request.endpoint === "calibration-status") {
         await refreshFlowMultiplier(true);
+        if (state.workflowTitle === state.cfg.profileTitle && profileSyncIsIdle()) {
+          try { await verifyAndRepairSelectedHyperExProfile('diagnostics refresh'); } catch (_) {}
+        }
         return pluginHttpJson(request, 200, calibrationStatusPayload());
       }
       if (request.endpoint === "calibration-mode") {
@@ -4137,7 +4267,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
             s3Shape = { enabled:true, earlyCommand:round(earlyCommand,3), earlySeconds:round(earlySeconds,1), midCommand:round(midCommand,3), midSeconds:round(midSeconds,1), lateCommand:round(lateCommand,3) };
           }
           const binding = testOverrideBinding();
-          state.testOverrides = { schema:3, writerVersion:"0.1.48", savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, targets:binding.targets, stages, s3Shape };
+          state.testOverrides = { schema:3, writerVersion:"0.1.49", savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, targets:binding.targets, stages, s3Shape };
           storageWrite(STORAGE_TEST_OVERRIDES, state.testOverrides);
           await syncHyperExProfile(state.workflowTitle === state.cfg.profileTitle);
           log(`Manual test commands updated: ${JSON.stringify(commandFlowSummary())}`);
@@ -4262,7 +4392,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
         return pluginHttpJson(request, 200, calibrationStatusPayload());
       }
       if (request.endpoint === "startup-apply") {
-        return pluginHttpJson(request, 409, { error: "Legacy startup-apply is disabled in v0.1.48. S1 is handled only by the unified shot-to-shot adaptive engine after two matching MEDIUM-confidence startup shots." });
+        return pluginHttpJson(request, 409, { error: "Legacy startup-apply is disabled in v0.1.49. S1 is handled only by the unified shot-to-shot adaptive engine after two matching MEDIUM-confidence startup shots." });
       }
       if (request.endpoint === "startup-clear") {
         state.stage1StartupCorrection = null; storageWrite(STORAGE_S1_STARTUP, '');
@@ -4281,6 +4411,8 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     },
 
     onUnload() {
+      clearTimer("storageProbeTimer");
+      clearTimer("historyWriteTimer");
       if (state.calibrationActive) {
         // Preserve the raw run as diagnostics even if unloading interrupts calibration.
         const run = state.diagnosticCurrent;
@@ -4314,23 +4446,24 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
         const key = payload.key;
         const value = payload.value;
         if (key === STORAGE_CAL) {
+          state.calibrationStorageLoaded = true;
           const parsed = parseStoredJson(value);
           if (parsed && Number(parsed.schema || 0) >= 1) state.calibrationMap = parsed;
           recomputeCalibrationUsability();
           restoreAdaptiveHistoryFromPersistentFile();
           if (state.cfg && state.cfg.calibrationAutoSync && state.calibrationMapUsable) {
             const selected = state.workflowTitle === state.cfg.profileTitle;
-            syncHyperExProfile(selected).then(() => {
-              if (selected) return verifyAndRepairSelectedHyperExProfile('stored calibration loaded');
-            }).catch(error => log(`Stored calibration auto-sync failed: ${error.message || error}`));
+            syncHyperExProfile(selected, 'stored calibration loaded').catch(error => log(`Stored calibration auto-sync failed: ${error.message || error}`));
           }
           emitSkinChanged();
         } else if (key === STORAGE_CAL_MODE && value) {
           state.calibrationMode = normalizeCalibrationMode(value);
           emitSkinChanged();
-        } else if (key === STORAGE_SCOPE && value) {
-          state.scopeMode = normalizeScope(value);
+        } else if (key === STORAGE_SCOPE) {
+          state.scopeStorageLoaded = true;
+          if (value) state.scopeMode = normalizeScope(value);
           recomputeCalibrationUsability();
+          scheduleProfileVerification('stored multiplier scope loaded');
           emitSkinChanged();
         } else if (key === STORAGE_PENDING_MULT) {
           const v = value === '' || value === null || value === undefined ? NaN : Number(value);
@@ -4340,11 +4473,13 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
           const v = value === '' || value === null || value === undefined ? NaN : Number(value);
           state.globalPreviousMultiplier = Number.isFinite(v) ? v : null;
         } else if (key === STORAGE_SCOPED_ORIGINAL) {
+          state.scopedOriginalStorageLoaded = true;
           const v = value === '' || value === null || value === undefined ? NaN : Number(value);
           state.scopedOriginalMultiplier = Number.isFinite(v) ? v : null;
           if (state.scopedOriginalMultiplier !== null && !inHyperExScope(state.workflowTitle)) {
             restoreHyperExScopedMultiplier('recovery from previous interrupted scoped session').catch(() => {});
           }
+          scheduleProfileVerification('stored original multiplier loaded');
         } else if (key === STORAGE_S1_STARTUP) {
           state.stage1StartupCorrection = parseStoredJson(value);
           emitSkinChanged();
@@ -4353,23 +4488,41 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
           emitSkinChanged();
         } else if (key === STORAGE_HISTORY_PROBE) {
           if (String(value || "") === String(state.storageProbeToken || "") && state.storageProbeToken) {
-            state.persistentHistoryAvailable = true;
-            state.persistentHistoryStatus = "pluginStorage write/readback verified";
+            state.storageProbeVerified = true;
+            state.persistentHistoryStatus = "probe verified; checking history file";
             if (state.storageProbeTimer) { clearTimeout(state.storageProbeTimer); state.storageProbeTimer = null; }
             storageWrite(STORAGE_HISTORY_PROBE, "");
-            persistHistoryFile();
+            if (state.persistentHistoryLoaded) persistHistoryFile();
+            else state.storageProbeTimer = setTimeout(() => setPersistentHistoryUnavailable('initial history read timed out'), 3500);
             emitSkinChanged();
           }
         } else if (key === STORAGE_HISTORY_FILE) {
           const parsed = parseStoredJson(value);
-          if (parsed && Number(parsed.schema || 0) >= 2 && Array.isArray(parsed.shots)) {
-            state.persistentHistoryFile = parsed;
-          } else {
-            state.persistentHistoryFile = { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:"0.1.48", createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(), shots:[] };
+          if (!state.persistentHistoryLoaded) {
+            const sessionRows = state.persistentHistoryFile && state.persistentHistoryFile.shots || [];
+            state.persistentHistoryFile = parsed && Number(parsed.schema || 0) >= 2 && Array.isArray(parsed.shots) ? parsed
+              : { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:"0.1.49", shots:[] };
+            for (const row of sessionRows) {
+              state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.filter(x => x && x.runId !== row.runId).concat(row);
+            }
+            state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.slice(-HISTORY_FILE_MAX_SHOTS);
+            state.persistentHistoryLoaded = true;
+            if (state.storageProbeVerified) { clearTimer('storageProbeTimer'); persistHistoryFile(); }
+          } else if (state.pendingHistoryWrite) {
+            if (!parsed || adaptiveHistoryFingerprintKey(parsed) !== adaptiveHistoryFingerprintKey(JSON.parse(state.pendingHistoryWrite))) {
+              setPersistentHistoryUnavailable('history file readback mismatch');
+            } else {
+              clearTimer('historyWriteTimer');
+              state.pendingHistoryWrite = null;
+              state.persistentHistoryAvailable = true;
+              state.persistentHistoryStatus = 'probe and history file write/readback verified';
+              if (state.historyWriteDirty) persistHistoryFile();
+            }
           }
-          state.persistentHistoryLoaded = true;
           restoreAdaptiveHistoryFromPersistentFile();
           emitSkinChanged();
+
+
         } else if (key === STORAGE_ADAPTIVE_HISTORY) {
           const parsed = parseStoredJson(value);
           if (Array.isArray(parsed)) {
@@ -4378,20 +4531,21 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
           }
           emitSkinChanged();
         } else if (key === STORAGE_TEST_OVERRIDES) {
+          state.overrideStorageLoaded = true;
           state.testOverrides = parseStoredJson(value);
           const os = testOverrideStatus();
           if (state.testOverrides && !os.valid && os.reason !== "none") log(`Stored manual test override ignored: ${os.reason}`);
           // Storage returns asynchronously after the initial profile install;
           // resync once so a valid persisted MANUAL TEST command is visible.
-          if (state.cfg && os.valid && os.activeStages.length) {
+          if (state.cfg && state.calibrationStorageLoaded) {
             const selected = state.workflowTitle === state.cfg.profileTitle;
-            syncHyperExProfile(selected).then(() => {
-              if (selected) return verifyAndRepairSelectedHyperExProfile('stored override loaded');
-            }).catch(error => log(`Stored manual test override sync failed: ${error.message || error}`));
+            syncHyperExProfile(selected, 'stored override loaded').catch(error => log(`Stored manual test override sync failed: ${error.message || error}`));
           }
           emitSkinChanged();
         }
       } else if (event.name === "shutdown") {
+        clearTimer("storageProbeTimer");
+        clearTimer("historyWriteTimer");
         if (finiteOrNull(state.scopedOriginalMultiplier) !== null) restoreHyperExScopedMultiplier('shutdown').catch(() => {});
         clearAllTimers();
       }

@@ -1,4 +1,33 @@
-# HyperEx Pulse Filter v0.1.48
+# HyperEx Pulse Filter v0.1.49
+
+## v0.1.49 — profile truth and persistent history hardening
+
+This build is based on the original `HyperExPulseFilter_v0148_fresh.zip`. Valid calibration LUTs and Settings are retained. S1/S2/S3 settings always mean real cup mass flow in g/s; DE1 flow is an actuator command.
+
+- Selecting HyperEx requires fresh `GET /workflow` reads before and after synchronization. A matching `workflowUpdated` notification alone cannot arm the controller. Mismatches are repaired with LUT/adaptive commands, machine upload must succeed, and final workflow/multiplier reads must match before arming.
+- Diagnostics reports **WORKFLOW READBACK VERIFIED** and **machine upload acknowledged** separately. HTTP upload success is NOT independent readback of DE1 internal profile memory. Machine telemetry and real-scale measurements still require hardware validation.
+- Profile synchronizations are serialized. An unchanged workflow skips its PUT; a previously acknowledged unchanged machine upload is skipped. A changed workflow or failed verification invalidates the upload acknowledgement. Writes are blocked during a shot, and selection changes / changed expected commands invalidate an in-flight verification. An idle retry is throttled to once per 3 seconds after failure.
+- HyperEx-only multiplier setup completes before arming. Automatic verification never writes a GLOBAL multiplier. Leaving scope during an in-flight multiplier update restores the saved original; a failed restore retains that saved value for retry.
+- Each shot freezes its LUT points, actual multiplier, real-flow targets, phase weights, temperature, pressure settings, and truth-schema fingerprint at start. Only completed, verified, compatible shots can contribute numeric adaptive evidence. Older truth-schema evidence remains diagnostic-only; 1.49 begins a new trusted consensus sequence. Existing valid LUTs do not need recalibration solely because of this upgrade.
+- History startup reads complete before any history-file write. The probe AND the complete history file must pass write/readback verification before PERSISTENT is displayed. Writes are serialized; late initial reads merge session records. A failed readback disables cross-reload evidence while preserving current-session adaptation. Storage timeouts survive brew timer cleanup.
+- Compact history fields now use the actual diagnostic property names and store confirmed next-shot applications separately from the source shot evidence.
+- S1 startup gating, S2 HIT/HOLD, S3 command provenance and LEVEL/SHAPE limits remain in place. No running-shot scale closed loop or additional skipStep calls are added. The old static main HyperEx profile remains absent.
+
+### Upgrade / hardware acceptance
+
+1. Install this ZIP and confirm `CAL READY`; retain a valid existing LUT.
+2. Select HyperEx, open Diagnostics, and wait for `WORKFLOW READBACK VERIFIED`. Check actual workflow commands against the LUT/adaptive commands; do not expect literal machine flows of 2/5/1.5.
+3. Check `ADAPTIVE HISTORY · PERSISTENT`. If it says SESSION ONLY, capture the stated error; same-session adaptation is still available.
+4. Run two shots with unchanged settings and no APPLY TEST COMMANDS. Compare the actual workflow commands, shot snapshot, machine telemetry, RAW regressions and next-shot decision. The first trusted shot establishes evidence; the second can establish consensus.
+5. Dashboard DIAG → CLOSE/HOME remains a known hardware/UI integration issue. This release does not claim to fix it or introduce an external URL fallback.
+
+### Reproducible local checks
+
+From this plugin directory, run `node --check plugin.js` and `node tests/verify_v0149.cjs` (Node.js, no dependencies). The bundled runner injects test-only hooks into an in-memory copy; the runtime plugin has no test exports. **56 simulated checks pass**, covering failure gating, races, deduplication, fingerprint isolation, persistence and representative S1/S2/S3 behavior. Simulated results do not establish Decaid/DE1 hardware compatibility.
+
+### Historical release notes
+
+
 
 
 
@@ -464,4 +493,4 @@ HyperEx desired S1/S2/S3 values are always cup-scale real mass-flow targets (g/s
 
 ## v0.1.48 persistent adaptive history
 
-Each completed HyperEx shot appends a compact record to pluginStorage key `adaptiveHistoryFileV2` (up to 30 shots). Records carry a calibration/LUT fingerprint, actual shot commands, RAW regression summaries, S1 startup metrics, S3 stability/stall data, the adaptive decision, and the compact evidence used by the controller. On load the plugin restores only rows whose fingerprint matches the current calibration map, flowMultiplier binding, and S1/S2/S3 real-flow targets; incompatible history remains stored for diagnostics but cannot drive numeric adaptation. A write/readback probe verifies pluginStorage availability. If the probe fails, Diagnostics explicitly reports SESSION ONLY: same-session adaptation remains active, while cross-reload/version history is disabled. Legacy `adaptiveHistoryV1` evidence is migrated when possible.
+Each completed HyperEx shot appends a compact record to pluginStorage key `adaptiveHistoryFileV2` (up to 30 shots). Records carry a calibration/LUT fingerprint, actual shot commands, RAW regression summaries, S1 startup metrics, S3 stability/stall data, the adaptive decision, and the compact evidence used by the controller. On load the plugin restores only rows whose fingerprint matches the current calibration map, flowMultiplier binding, and S1/S2/S3 real-flow targets; incompatible history remains stored for diagnostics but cannot drive numeric adaptation. A write/readback probe verifies pluginStorage availability. If the probe fails, Diagnostics explicitly reports SESSION ONLY: same-session adaptation remains active, while cross-reload/version history is disabled. Legacy evidence is kept out of current numeric consensus; v0.1.49 additionally requires truth schema 2 and a matching frozen fingerprint.

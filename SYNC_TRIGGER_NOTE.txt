@@ -1,1 +1,0 @@
-This temporary marker is safe to delete after v0.1.48 synchronization.

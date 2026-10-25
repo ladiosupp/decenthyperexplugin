@@ -58,6 +58,10 @@ function createPlugin(host) {
   const STORAGE_S1_STARTUP = "stage1StartupCorrection";
   const STORAGE_TEST_OVERRIDES = "manualTestOverrides";
   const STORAGE_AUTO_APPLY = "autoApplyNextShot";
+  const STORAGE_ADAPTIVE_HISTORY = "adaptiveHistoryV1"; // legacy migration source
+  const STORAGE_HISTORY_FILE = "adaptiveHistoryFileV2";
+  const STORAGE_HISTORY_PROBE = "adaptiveHistoryStorageProbeV1";
+  const HISTORY_FILE_MAX_SHOTS = 30;
 
   function normalizeCalibrationMode(value) {
     const v = String(value || "").trim().toLowerCase();
@@ -155,6 +159,11 @@ function createPlugin(host) {
   const state = {
     cfg: null,
     workflowTitle: "",
+    workflowProfile: null,
+    runtimeProfileVerified: false,
+    runtimeProfileStatus: "not verified",
+    runtimeProfileRepairBusy: false,
+    runtimeProfileMismatchAbortSent: false,
     armed: false,
     phase: "idle", // idle|stage1|dumping|soak|restart_wait|stage2|stage3|finishing|aborted
     lastMachineState: null,
@@ -245,6 +254,14 @@ function createPlugin(host) {
     stage1StartupCorrection: null,
     testOverrides: null,
     adaptiveHistory: [],
+    legacyAdaptiveHistory: [],
+    persistentHistoryFile: null,
+    persistentHistoryLoaded: false,
+    persistentHistoryAvailable: null,
+    persistentHistoryStatus: "checking persistent history storage",
+    persistentHistoryCompatibleCount: 0,
+    storageProbeToken: "",
+    storageProbeTimer: null,
     autoApplyNextShot: true,
     autoApplyLastStatus: null,
     autoApplyTimer: null
@@ -386,16 +403,18 @@ function createPlugin(host) {
   }
 
   function storageRead(key) {
-    try { host.storage({ type: "read", key, namespace: ID }); }
-    catch (error) { log(`Storage read '${key}' failed: ${error.message || error}`); }
+    try { host.storage({ type: "read", key, namespace: ID }); return true; }
+    catch (error) { log(`Storage read '${key}' failed: ${error.message || error}`); return false; }
   }
 
   function storageWrite(key, value) {
     try {
       const data = typeof value === "string" ? value : JSON.stringify(value);
       host.storage({ type: "write", key, namespace: ID, data });
+      return true;
     } catch (error) {
       log(`Storage write '${key}' failed: ${error.message || error}`);
+      return false;
     }
   }
 
@@ -549,7 +568,14 @@ function createPlugin(host) {
     const sq = schema >= 2 && x.s3Shape && typeof x.s3Shape === "object" ? x.s3Shape : null;
     const s3ShapeActive = !!(sq && sq.enabled === true);
     if (s3ShapeActive) activeStages.push("stage3-shape");
-    return { valid: true, reason: activeStages.length ? "manual test active" : "all stages AUTO / LUT", activeStages, s3ShapeActive };
+    const adaptiveSource = x.adaptiveSource && typeof x.adaptiveSource === "object" ? x.adaptiveSource : null;
+    let reason = "all stages AUTO / LUT";
+    if (activeStages.length) {
+      if (adaptiveSource && String(adaptiveSource.mode || "").toLowerCase() === "auto") reason = "adaptive auto applied";
+      else if (adaptiveSource) reason = "adaptive manual applied";
+      else reason = "manual test active";
+    }
+    return { valid: true, reason, activeStages, s3ShapeActive, adaptiveSource };
   }
 
   function s3ShapeStatus() {
@@ -617,13 +643,30 @@ function createPlugin(host) {
     }
     const os = testOverrideStatus();
     const shape = s3ShapeStatus();
+    const adaptiveSource = os.valid && state.testOverrides && state.testOverrides.adaptiveSource && typeof state.testOverrides.adaptiveSource === "object"
+      ? {
+          runId: String(state.testOverrides.adaptiveSource.runId || ""),
+          appliedAt: String(state.testOverrides.adaptiveSource.appliedAt || ""),
+          mode: String(state.testOverrides.adaptiveSource.mode || "")
+        }
+      : null;
+    const appliedProfile = {
+      stage1: { desiredGS: rows.stage1.desired, lutCommandMlS: rows.stage1.lut, commandMlS: rows.stage1.effective, mode: rows.stage1.mode },
+      stage2: { desiredGS: rows.stage2.desired, lutCommandMlS: rows.stage2.lut, commandMlS: rows.stage2.effective, mode: rows.stage2.mode },
+      stage3: shape.enabled
+        ? { desiredGS: rows.stage3.desired, lutCommandMlS: rows.stage3.lut, mode: "shape", flatCommandMlS: rows.stage3.effective, shape: { ...shape } }
+        : { desiredGS: rows.stage3.desired, lutCommandMlS: rows.stage3.lut, mode: rows.stage3.mode, flatCommandMlS: rows.stage3.effective, shape: { enabled:false, reason:shape.reason } }
+    };
     return {
       stage1DesiredGS: rows.stage1.desired, stage1LutCommandMlS: rows.stage1.lut, stage1CommandMlS: rows.stage1.effective, stage1Mode: rows.stage1.mode,
       stage2DesiredGS: rows.stage2.desired, stage2LutCommandMlS: rows.stage2.lut, stage2CommandMlS: rows.stage2.effective, stage2Mode: rows.stage2.mode,
       stage3DesiredGS: rows.stage3.desired, stage3LutCommandMlS: rows.stage3.lut,
+      stage3FlatCommandMlS: rows.stage3.effective,
       stage3CommandMlS: shape.enabled ? shape.midCommand : rows.stage3.effective,
       stage3Mode: shape.enabled ? "shape" : rows.stage3.mode,
       s3Shape: shape,
+      appliedProfile,
+      adaptiveSource,
       manualTestActiveStages: os.activeStages || [], manualTestStatus: os.reason || "none"
     };
   }
@@ -726,7 +769,7 @@ function createPlugin(host) {
     state.diagnosticCurrent = {
       schema: 3,
       kind: String(kind || "hyperex"),
-      pluginVersion: "0.1.41",
+      pluginVersion: "0.1.48",
       runId: `${now}-${state.diagnosticRunSeq}`,
       profileTitle: state.workflowTitle || (state.cfg ? state.cfg.profileTitle : ""),
       startedAt: new Date(now).toISOString(),
@@ -753,6 +796,8 @@ function createPlugin(host) {
         finalWeight: state.cfg.finalWeight,
         sampleIntervalMs: state.cfg.diagnosticSampleIntervalMs,
         flowMultiplier: state.flowMultiplierCurrent,
+        profileTruthVerified: !!state.runtimeProfileVerified,
+        workflowProfileCommands: profileCommandSummaryFromProfile(state.workflowProfile),
         calibrationMode: state.calibrationMode,
         calibrationCommands: calibrationCommands(),
         calibrationProgram: calibrationProgram(),
@@ -1199,221 +1244,406 @@ function createPlugin(host) {
   }
 
 
+  function stage1AdaptiveEvidence(run) {
+    if (!run || (run.kind || "hyperex") !== "hyperex") return null;
+    const m = stage1StartupMetrics(run);
+    const cfg = run.config || {};
+    const target = Number(desiredRealForRunPhase(run, "stage1"));
+    const command = Number(cfg.stage1CommandMlS);
+    if (!m || m.confidence !== "MEDIUM" || !Number.isFinite(target) || target <= 0 || !Number.isFinite(command)) return null;
+    const measured = Number(m.midFlowGS), r2 = Number(m.midR2), transit = Number(m.transit20to80S), activeSeconds = Number(m.activeSeconds);
+    if (!Number.isFinite(measured) || measured <= 0 || !Number.isFinite(r2) || r2 < 0.90 || !Number.isFinite(transit) || transit < 0.90 || !Number.isFinite(activeSeconds) || activeSeconds < 1.25) return null;
+    return {
+      runId: run.runId, targetGS: round(target,3), command: round(command,3), measured: round(measured,3),
+      errorPct: round((measured-target)/target*100,1), confidence:"MEDIUM", r2:round(r2,5),
+      transitS:round(transit,2), activeSeconds:round(activeSeconds,2), firstRiseDelayS:m.firstRiseDelayS
+    };
+  }
+
+  function stage2AdaptiveEvidence(run) {
+    if (!run || (run.kind || "hyperex") !== "hyperex") return null;
+    const p = diagnosticPhaseSummary(run, "stage2");
+    const cfg = run.config || {};
+    const target = Number(desiredRealForRunPhase(run, "stage2"));
+    const command = Number(cfg.stage2CommandMlS);
+    if (!p || !Number.isFinite(target) || target <= 0 || !Number.isFinite(command)) return null;
+    const measured = Number(p.rawRegressionGS), r2 = Number(p.rawRegressionR2), seconds = Number(p.rawRegressionSeconds);
+    if (!Number.isFinite(measured) || measured <= 0 || !Number.isFinite(r2) || r2 < 0.97 || !Number.isFinite(seconds) || seconds < 4.0) return null;
+    return {
+      runId:run.runId, targetGS:round(target,3), command:round(command,3), measured:round(measured,3),
+      errorPct:round((measured-target)/target*100,1), confidence:"HIGH", r2:round(r2,5), seconds:round(seconds,2)
+    };
+  }
+
   function stage3AdaptiveEvidence(run) {
     if (!run || (run.kind || "hyperex") !== "hyperex") return null;
     const st = stage3StabilityDiagnostics(run);
+    const phase = diagnosticPhaseSummary(run, "stage3");
     const target3 = Number(desiredRealForRunPhase(run, "stage3"));
-    if (!st || !Number.isFinite(target3) || target3 <= 0) return null;
+    if (!st || !phase || !Number.isFinite(target3) || target3 <= 0) return null;
     const cfg = run.config || {};
     const baseCurrent = Number(cfg.stage3CommandMlS);
+    const runShape = cfg.stage3Shape && cfg.stage3Shape.enabled === true ? cfg.stage3Shape : null;
+    const commandTriplet = runShape
+      ? [Number(runShape.earlyCommand), Number(runShape.midCommand), Number(runShape.lateCommand)]
+      : [baseCurrent, baseCurrent, baseCurrent];
+    if (!commandTriplet.every(Number.isFinite)) return null;
+
+    const overallGS = Number(phase.rawRegressionGS), overallR2 = Number(phase.rawRegressionR2), overallSeconds = Number(phase.rawRegressionSeconds);
+    if (!Number.isFinite(overallGS) || overallGS <= 0 || !Number.isFinite(overallR2) || overallR2 < 0.93 || !Number.isFinite(overallSeconds) || overallSeconds < 5.0) return null;
+
     let source = null;
+    let measurementBasis = null;
+    let stallQualitative = false;
     if (Array.isArray(st.shapeFrames) && st.shapeFrames.length === 3 && st.shapeFrames.every(x =>
-      Number.isFinite(Number(x.commandMlS)) &&
-      Number.isFinite(Number(x.slope)) && Number(x.slope) > 0 &&
-      Number.isFinite(Number(x.r2)) && Number(x.r2) >= 0.90 &&
+      Number.isFinite(Number(x.commandMlS)) && Number.isFinite(Number(x.slope)) && Number(x.slope) > 0 &&
+      Number.isFinite(Number(x.r2)) && Number(x.r2) >= 0.90 && Number.isFinite(Number(x.seconds)) && Number(x.seconds) >= 3.0)) {
+      source = st.shapeFrames.map((x,i) => ({ name:x.name, command:Number(commandTriplet[i]), measured:Number(x.slope), r2:Number(x.r2), seconds:Number(x.seconds), quality:"clean" }));
+      measurementBasis = "profile-frame regression";
+    } else if ([st.early,st.mid,st.late].every(x =>
+      x && Number.isFinite(Number(x.slope)) && Number(x.slope) > 0 && Number.isFinite(Number(x.r2)) && Number(x.r2) >= 0.90 &&
       Number.isFinite(Number(x.seconds)) && Number(x.seconds) >= 3.0)) {
-      source = st.shapeFrames.map(x => ({
-        name:x.name, command:Number(x.commandMlS), measured:Number(x.slope),
-        r2:Number(x.r2), seconds:Number(x.seconds)
-      }));
-    } else if (Number.isFinite(baseCurrent) && [st.early,st.mid,st.late].every(x =>
-      x && Number.isFinite(Number(x.slope)) && Number(x.slope) > 0 &&
-      Number.isFinite(Number(x.r2)) && Number(x.r2) >= 0.90 &&
-      Number.isFinite(Number(x.seconds)) && Number(x.seconds) >= 3.0)) {
+      // Measurement windows may fall back to EARLY/MID/LATE 25/50/25 stability segments,
+      // but command provenance must always remain the commands that this shot actually ran.
       source = [
-        { name:"S3 EARLY", command:baseCurrent, measured:Number(st.early.slope), r2:Number(st.early.r2), seconds:Number(st.early.seconds) },
-        { name:"S3 MID", command:baseCurrent, measured:Number(st.mid.slope), r2:Number(st.mid.r2), seconds:Number(st.mid.seconds) },
-        { name:"S3 LATE", command:baseCurrent, measured:Number(st.late.slope), r2:Number(st.late.r2), seconds:Number(st.late.seconds) }
+        { name:"S3 EARLY", command:commandTriplet[0], measured:Number(st.early.slope), r2:Number(st.early.r2), seconds:Number(st.early.seconds), quality:"clean" },
+        { name:"S3 MID", command:commandTriplet[1], measured:Number(st.mid.slope), r2:Number(st.mid.r2), seconds:Number(st.mid.seconds), quality:"clean" },
+        { name:"S3 LATE", command:commandTriplet[2], measured:Number(st.late.slope), r2:Number(st.late.r2), seconds:Number(st.late.seconds), quality:"clean" }
       ];
+      measurementBasis = "stability 25/50/25 fallback";
+    } else if (st.stall && st.stall.suspected) {
+      // A confirmed stall is itself useful physical evidence even when the LATE segment's
+      // linear fit is poor: DE1 flow stayed active while cup-weight slope collapsed for a
+      // dedicated 6 s window. Require clean EARLY and MID measurements; preserve LATE as
+      // qualitative stall evidence rather than throwing the whole S3 shot away.
+      const clean = x => x && Number.isFinite(Number(x.slope)) && Number(x.slope) > 0 &&
+        Number.isFinite(Number(x.r2)) && Number(x.r2) >= 0.90 && Number.isFinite(Number(x.seconds)) && Number(x.seconds) >= 3.0;
+      const lateSlope = st.late && Number.isFinite(Number(st.late.slope)) && Number(st.late.slope) >= 0
+        ? Number(st.late.slope)
+        : Number(st.stall.rawSlopeGS);
+      if (clean(st.early) && clean(st.mid) && Number.isFinite(lateSlope) && lateSlope >= 0 &&
+          Number.isFinite(Number(st.late && st.late.seconds)) && Number(st.late.seconds) >= 3.0) {
+        source = [
+          { name:"S3 EARLY", command:commandTriplet[0], measured:Number(st.early.slope), r2:Number(st.early.r2), seconds:Number(st.early.seconds), quality:"clean" },
+          { name:"S3 MID", command:commandTriplet[1], measured:Number(st.mid.slope), r2:Number(st.mid.r2), seconds:Number(st.mid.seconds), quality:"clean" },
+          { name:"S3 LATE", command:commandTriplet[2], measured:lateSlope, r2:Number.isFinite(Number(st.late && st.late.r2)) ? Number(st.late.r2) : Number(st.stall.rawR2), seconds:Number(st.late.seconds), quality:"stall-qualitative" }
+        ];
+        measurementBasis = "STALL RECOVERY: clean EARLY/MID + confirmed late stall";
+        stallQualitative = true;
+      }
     }
     if (!source) return null;
+
     const shapeCfg = cfg.stage3Shape && cfg.stage3Shape.enabled ? cfg.stage3Shape : null;
     const earlySeconds = Number.isFinite(Number(shapeCfg && shapeCfg.earlySeconds)) ? Number(shapeCfg.earlySeconds) : 8;
     const midSeconds = Number.isFinite(Number(shapeCfg && shapeCfg.midSeconds)) ? Number(shapeCfg.midSeconds) : 14;
     return {
-      runId: run.runId,
-      targetGS: target3,
-      status: st.status,
+      runId: run.runId, targetGS: target3, status: st.status, stall:!!(st.stall&&st.stall.suspected), stallQualitative,
+      stallRawSlopeGS: st.stall&&st.stall.suspected ? round(st.stall.rawSlopeGS,3) : null,
+      stallMachineFlowMlS: st.stall&&st.stall.suspected ? round(st.stall.machineFlowMlS,3) : null,
       lateToEarlyRatio: st.lateToEarlyRatio,
-      earlySeconds: round(earlySeconds,1),
-      midSeconds: round(midSeconds,1),
-      source: source.map(x => ({
-        name:x.name, command:round(x.command,3), measured:round(x.measured,3),
-        r2:round(x.r2,5), seconds:round(x.seconds,2)
-      }))
+      overallGS:round(overallGS,3), overallR2:round(overallR2,5), overallSeconds:round(overallSeconds,2),
+      earlySeconds: round(earlySeconds,1), midSeconds: round(midSeconds,1), measurementBasis,
+      source: source.map(x => ({ name:x.name, command:round(x.command,3), measured:round(x.measured,3), r2:Number.isFinite(Number(x.r2))?round(x.r2,5):null, seconds:round(x.seconds,2), quality:x.quality||"clean" }))
     };
+  }
+
+  function sameScalarAdaptiveEvidence(a,b) {
+    return !!(a && b && Math.abs(Number(a.command)-Number(b.command)) <= 0.005 && Math.abs(Number(a.targetGS)-Number(b.targetGS)) <= 0.01);
   }
 
   function sameStage3Shape(a, b) {
     if (!a || !b || !Array.isArray(a.source) || !Array.isArray(b.source) || a.source.length !== 3 || b.source.length !== 3) return false;
-    if (Math.abs(Number(a.earlySeconds) - Number(b.earlySeconds)) > 0.25) return false;
-    if (Math.abs(Number(a.midSeconds) - Number(b.midSeconds)) > 0.25) return false;
-    for (let i = 0; i < 3; i++) {
-      if (Math.abs(Number(a.source[i].command) - Number(b.source[i].command)) > 0.005) return false;
-    }
+    if (Math.abs(Number(a.earlySeconds) - Number(b.earlySeconds)) > 0.25 || Math.abs(Number(a.midSeconds) - Number(b.midSeconds)) > 0.25) return false;
+    if (Math.abs(Number(a.targetGS)-Number(b.targetGS)) > 0.01) return false;
+    for (let i = 0; i < 3; i++) if (Math.abs(Number(a.source[i].command) - Number(b.source[i].command)) > 0.005) return false;
     return true;
   }
 
+  function adaptiveHistoryFingerprint() {
+    if (!state.cfg || !state.calibrationMap || state.calibrationMap.valid !== true) return null;
+    return {
+      schema: 1,
+      mapCreatedAt: String(state.calibrationMap.createdAt || ""),
+      baseFlowMultiplier: round(calibrationBaseMultiplier(), 4),
+      targets: {
+        stage1: round(state.cfg.stage1Flow, 4),
+        stage2: round(state.cfg.stage2Flow, 4),
+        stage3: round(state.cfg.stage3Flow, 4)
+      },
+      model: "hyperex-realflow-lut-nextshot-v1"
+    };
+  }
+
+  function adaptiveHistoryFingerprintKey(fp) {
+    if (!fp || typeof fp !== "object") return "";
+    try { return JSON.stringify(canonicalProfileValue(fp)); } catch (_) { return ""; }
+  }
+
+  function historyStatusPayload() {
+    const shots = state.persistentHistoryFile && Array.isArray(state.persistentHistoryFile.shots) ? state.persistentHistoryFile.shots.length : 0;
+    return {
+      available: state.persistentHistoryAvailable,
+      status: state.persistentHistoryStatus || "unknown",
+      savedShots: shots,
+      compatibleShots: Number(state.persistentHistoryCompatibleCount || 0),
+      maxShots: HISTORY_FILE_MAX_SHOTS,
+      storageKey: STORAGE_HISTORY_FILE
+    };
+  }
+
+  function setPersistentHistoryUnavailable(reason) {
+    state.persistentHistoryAvailable = false;
+    state.persistentHistoryStatus = `SESSION ONLY: ${reason || 'pluginStorage unavailable'}`;
+    if (state.storageProbeTimer) { clearTimeout(state.storageProbeTimer); state.storageProbeTimer = null; }
+    log(`Persistent adaptive history unavailable. Shot-to-shot adaptation remains active for this plugin session, but cross-reload/version history is disabled. ${reason || ''}`);
+    emitSkinChanged();
+  }
+
+  function startPersistentHistoryProbe() {
+    if (state.storageProbeTimer) clearTimeout(state.storageProbeTimer);
+    state.storageProbeToken = `${Date.now()}-${Math.random().toString(36).slice(2,10)}`;
+    state.persistentHistoryAvailable = null;
+    state.persistentHistoryStatus = "checking pluginStorage write/readback";
+    if (!storageWrite(STORAGE_HISTORY_PROBE, state.storageProbeToken)) {
+      setPersistentHistoryUnavailable("probe write failed");
+      return;
+    }
+    if (!storageRead(STORAGE_HISTORY_PROBE)) {
+      setPersistentHistoryUnavailable("probe read request failed");
+      return;
+    }
+    state.storageProbeTimer = setTimeout(() => {
+      if (state.persistentHistoryAvailable !== true) setPersistentHistoryUnavailable("write/readback probe timed out");
+    }, 3500);
+  }
+
+  function compactPersistentShotRecord(run, evidence) {
+    if (!run || !run.runId) return null;
+    const summary = run.summary || diagnosticSummary(run) || {};
+    const compactPhase = phase => {
+      const q = summary[phase] || {};
+      return {
+        targetGS: q.desiredRealFlowGS, rawRegressionGS: q.rawRegressionGS, rawRegressionR2: q.rawRegressionR2,
+        windowS: q.rawRegressionSeconds, de1Flow: q.machineFlowMedian, decaidWeightFlow: q.scaleFlowMedian, status: q.status, errorPct: q.errorPct
+      };
+    };
+    const st = summary.stage3Stability || null;
+    return {
+      runId: String(run.runId),
+      pluginVersion: "0.1.48",
+      startedAt: run.startedAt || null, endedAt: run.endedAt || null, result: run.result || null,
+      fingerprint: adaptiveHistoryFingerprint(),
+      profileTruthVerified: !!(run.config && run.config.profileTruthVerified),
+      workflowProfileCommands: run.config && run.config.workflowProfileCommands ? run.config.workflowProfileCommands : null,
+      commands: diagnosticRunCommandSnapshot(run),
+      flowMultiplier: run.config ? round(run.config.flowMultiplier,4) : null,
+      s1: compactPhase("stage1"), s2: compactPhase("stage2"), s3: compactPhase("stage3"),
+      s1Startup: summary.stage1Startup ? { confidence:summary.stage1Startup.confidence, firstRiseDelayS:summary.stage1Startup.firstRiseDelayS, midFlowGS:summary.stage1Startup.midFlowGS, midR2:summary.stage1Startup.midR2, activeFlowGS:summary.stage1Startup.activeFlowGS } : null,
+      s3Stability: st ? { status:st.status, lateToEarlyRatio:st.lateToEarlyRatio, early:st.early, mid:st.mid, late:st.late, stall:st.stall } : null,
+      adaptiveDecision: summary.nextShotAdaptive || null,
+      evidence: evidence || null
+    };
+  }
+
+  function persistHistoryFile() {
+    if (!state.persistentHistoryFile || typeof state.persistentHistoryFile !== "object") return false;
+    state.persistentHistoryFile.writerVersion = "0.1.48";
+    state.persistentHistoryFile.updatedAt = new Date().toISOString();
+    if (state.persistentHistoryAvailable === false) return false;
+    const ok = storageWrite(STORAGE_HISTORY_FILE, state.persistentHistoryFile);
+    if (!ok) setPersistentHistoryUnavailable("history write failed");
+    return ok;
+  }
+
+  function appendPersistentHistoryShot(run, evidence) {
+    const record = compactPersistentShotRecord(run, evidence);
+    if (!record) return;
+    if (!state.persistentHistoryFile || typeof state.persistentHistoryFile !== "object") {
+      state.persistentHistoryFile = { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:"0.1.48", createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(), shots:[] };
+    }
+    if (!Array.isArray(state.persistentHistoryFile.shots)) state.persistentHistoryFile.shots = [];
+    state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.filter(x => x && x.runId !== record.runId);
+    state.persistentHistoryFile.shots.push(record);
+    if (state.persistentHistoryFile.shots.length > HISTORY_FILE_MAX_SHOTS) state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.slice(-HISTORY_FILE_MAX_SHOTS);
+    persistHistoryFile();
+  }
+
+  function restoreAdaptiveHistoryFromPersistentFile() {
+    const fpKey = adaptiveHistoryFingerprintKey(adaptiveHistoryFingerprint());
+    if (!fpKey || !state.persistentHistoryFile || !Array.isArray(state.persistentHistoryFile.shots)) return false;
+    const compatible = state.persistentHistoryFile.shots.filter(row => row && row.evidence && row.profileTruthVerified === true && adaptiveHistoryFingerprintKey(row.fingerprint) === fpKey);
+    state.persistentHistoryCompatibleCount = compatible.length;
+    if (compatible.length) {
+      state.adaptiveHistory = compatible.map(row => row.evidence).filter(ev => ev && ev.runId).slice(-20);
+      log(`Restored ${state.adaptiveHistory.length} compatible adaptive evidence row(s) from persistent history file.`);
+      emitSkinChanged();
+      return true;
+    }
+    // Legacy v1 evidence predates workflow-profile truth verification. Keep it out of
+    // numeric adaptation so an old 2/5/1.5 machine profile can never contaminate the
+    // new real-flow regression history. v0.1.48 intentionally starts trusted evidence
+    // from the first shot whose workflow execution profile was read back and verified.
+    if (Array.isArray(state.legacyAdaptiveHistory) && state.legacyAdaptiveHistory.length) {
+      log(`Ignored ${state.legacyAdaptiveHistory.length} legacy adaptive evidence row(s): they predate workflow-profile truth verification.`);
+    }
+    state.adaptiveHistory = [];
+    emitSkinChanged();
+    return false;
+  }
+
   function rememberAdaptiveEvidence(run) {
-    const ev = stage3AdaptiveEvidence(run);
-    if (!ev) return;
+    const truthVerified = !!(run && run.kind === "hyperex" && run.config && run.config.profileTruthVerified === true);
+    const ev = truthVerified ? { runId:run && run.runId, s1:stage1AdaptiveEvidence(run), s2:stage2AdaptiveEvidence(run), s3:stage3AdaptiveEvidence(run) } : null;
+    if (!truthVerified) {
+      appendPersistentHistoryShot(run, null);
+      if (run && run.kind === "hyperex") log(`Adaptive evidence excluded: workflow profile truth was not verified at shot start (${run.runId || 'unknown run'}).`);
+      return;
+    }
+    if (!ev.runId || (!ev.s1 && !ev.s2 && !ev.s3)) {
+      appendPersistentHistoryShot(run, ev && ev.runId ? ev : null);
+      return;
+    }
     if (!Array.isArray(state.adaptiveHistory)) state.adaptiveHistory = [];
     state.adaptiveHistory = state.adaptiveHistory.filter(x => x && x.runId !== ev.runId);
     state.adaptiveHistory.push(ev);
-    if (state.adaptiveHistory.length > 6) state.adaptiveHistory = state.adaptiveHistory.slice(-6);
+    if (state.adaptiveHistory.length > 20) state.adaptiveHistory = state.adaptiveHistory.slice(-20);
+    storageWrite(STORAGE_ADAPTIVE_HISTORY, JSON.stringify(state.adaptiveHistory.slice(-8)));
+    appendPersistentHistoryShot(run, ev);
   }
 
-  function previousMatchingStage3Evidence(current) {
+  function previousMatchingAdaptiveEvidence(current, key) {
     if (!current || !Array.isArray(state.adaptiveHistory)) return null;
-    for (let i = state.adaptiveHistory.length - 1; i >= 0; i--) {
-      const ev = state.adaptiveHistory[i];
-      if (!ev || ev.runId === current.runId) continue;
-      if (sameStage3Shape(current, ev)) return ev;
+    for (let i=state.adaptiveHistory.length-1;i>=0;i--) {
+      const row=state.adaptiveHistory[i];
+      if (!row || row.runId === current.runId) continue;
+      const ev=row[key] || (key === "s3" && row.source ? row : null);
+      if (!ev) return null;
+      return (key === "s3" ? sameStage3Shape(current,ev) : sameScalarAdaptiveEvidence(current,ev)) ? ev : null;
     }
     return null;
   }
 
+  function scalarConsensusSuggestion(label,current,previous,opt) {
+    if (!current) return { usable:false, action:"REPEAT", confidence:"INSUFFICIENT", reason:`${label} data is not clean enough for numeric adaptation.` };
+    const base = { targetGS:round(Number(current.targetGS),3), currentCommandMlS:round(Number(current.command),3), measuredGS:round(Number(current.measured),3) };
+    if (!previous) return { ...base, usable:false, action:"REPEAT SAME COMMAND", confidence:"PENDING", repeatCount:1, reason:`One clean ${label} shot is not enough. Repeat the same command once more.` , maxStepRule:opt.rule };
+    const mean=(Number(current.measured)+Number(previous.measured))/2;
+    const variability=mean>0?Math.abs(Number(current.measured)-Number(previous.measured))/mean:Infinity;
+    const e1=(Number(previous.measured)-Number(current.targetGS))/Number(current.targetGS)*100;
+    const e2=(Number(current.measured)-Number(current.targetGS))/Number(current.targetGS)*100;
+    const meanErr=(mean-Number(current.targetGS))/Number(current.targetGS)*100;
+    const common={...base, measuredGS:round(mean,3), previousGS:round(Number(previous.measured),3), currentGS:round(Number(current.measured),3), variabilityPct:round(variability*100,1), repeatCount:2, maxStepRule:opt.rule};
+    if (!Number.isFinite(variability) || variability>opt.maxVariability) return {...common,usable:false,action:"VARIABLE / REPEAT",confidence:"LOW",reason:`Repeated ${label} response differs by ${round(variability*100,1)}%; keep the same command rather than chasing shot variability.`};
+    if (Math.abs(e1)<=opt.deadbandPct && Math.abs(e2)<=opt.deadbandPct) return {...common,usable:true,action:"HOLD",confidence:"HIGH",suggestedCommandMlS:round(Number(current.command),3),reason:`Both matching shots are inside the ${opt.deadbandPct}% deadband.`};
+    if (Math.sign(e1)!==Math.sign(e2) || Math.abs(e1)<=opt.deadbandPct || Math.abs(e2)<=opt.deadbandPct) return {...common,usable:false,action:"MIXED / REPEAT",confidence:"MEDIUM",reason:`The two matching shots do not show the same out-of-band direction; keep the command and collect another shot.`};
+    const ratio=Number(current.targetGS)/mean;
+    let factor=1+(ratio-1)*opt.gain;
+    factor=Math.max(1-opt.maxFraction,Math.min(1+opt.maxFraction,factor));
+    let out=Number(current.command)*factor;
+    out=Math.max(Number(current.command)-opt.maxAbs,Math.min(Number(current.command)+opt.maxAbs,out));
+    out=clampCommandFlow(out);
+    const delta=Math.abs(out-Number(current.command));
+    return {...common,usable:true,action:delta<0.005?"HOLD":"ADJUST",confidence:"HIGH",suggestedCommandMlS:round(out,3),errorPct:round(meanErr,1),reason:delta<0.005?`Consensus error is too small to justify a command change.`:`Two matching ${label} shots agree on the same error direction; apply one bounded damped step to the next shot.`};
+  }
+
   function nextShotAdaptiveSuggestion(run) {
     if (!run || (run.kind || "hyperex") !== "hyperex") return null;
-    const target1 = Number(desiredRealForRunPhase(run, "stage1"));
-    const target3 = Number(desiredRealForRunPhase(run, "stage3"));
-    const s1m = stage1StartupMetrics(run);
-    const s1a = stage1StartupAdvisory(run);
-    let s1 = { usable: false, action: "REPEAT", reason: "S1 startup data is insufficient." };
-    if (s1m && s1a && s1a.confidence !== "INSUFFICIENT" && Number.isFinite(Number(s1a.currentCommandMlS))) {
-      const current = Number(s1a.currentCommandMlS);
-      let suggested = Number(s1a.referenceCommandMlS);
-      if (!Number.isFinite(suggested)) suggested = current;
-      const lo = Math.max(LIMITS.commandFlowMin, current * 0.92, current - 0.06);
-      const hi = Math.min(LIMITS.commandFlowMax, current * 1.08, current + 0.06);
-      suggested = Math.max(lo, Math.min(hi, suggested));
-      s1 = {
-        usable: true,
-        action: Math.abs(suggested - current) < 0.005 ? "HOLD" : "ADJUST",
-        confidence: s1a.confidence,
-        targetGS: Number.isFinite(target1) ? round(target1,3) : null,
-        measuredGS: round(Number(s1m.midFlowGS),3),
-        measuredR2: s1m.midR2,
-        firstRiseDelayS: s1m.firstRiseDelayS,
-        currentCommandMlS: round(current,3),
-        suggestedCommandMlS: round(suggested,3),
-        maxStepRule: "±8% and ±0.06 ml/s per shot",
-        reason: Math.abs(suggested - current) < 0.005 ? "20–80% active cup flow is close enough to target; keep the current command." : "Partial correction from the 20–80% active cup-flow trajectory; first-rise delay is not treated as flow error."
-      };
-    }
+    const s1ev=stage1AdaptiveEvidence(run), s2ev=stage2AdaptiveEvidence(run), s3ev=stage3AdaptiveEvidence(run);
+    const s1=scalarConsensusSuggestion("S1 startup",s1ev,previousMatchingAdaptiveEvidence(s1ev,"s1"),{
+      deadbandPct:12,maxVariability:0.18,gain:0.18,maxFraction:0.04,maxAbs:0.04,rule:"2 matching MEDIUM-confidence startup shots; ±12% deadband; max ±4% and ±0.04 ml/s per next shot"
+    });
+    const s2=scalarConsensusSuggestion("S2",s2ev,previousMatchingAdaptiveEvidence(s2ev,"s2"),{
+      deadbandPct:12,maxVariability:0.15,gain:0.25,maxFraction:0.05,maxAbs:0.10,rule:"2 matching high-quality shots; ±12% HIT deadband; max ±5% and ±0.10 ml/s per next shot"
+    });
 
-    const st = stage3StabilityDiagnostics(run);
-    let s3 = { usable: false, action: "REPEAT", reason: "S3 segment data is insufficient." };
-    const currentEvidence = stage3AdaptiveEvidence(run);
-    if (currentEvidence) {
-      const previousEvidence = previousMatchingStage3Evidence(currentEvidence);
-      if (!previousEvidence) {
-        s3 = {
-          usable: false,
-          action: "REPEAT SAME SHAPE",
-          confidence: "PENDING",
-          targetGS: round(Number(currentEvidence.targetGS),3),
-          status: currentEvidence.status,
-          lateToEarlyRatio: currentEvidence.lateToEarlyRatio,
-          sourceFrames: currentEvidence.source.map(x => ({ name:x.name, commandMlS:x.command, measuredGS:x.measured, r2:x.r2, windowS:x.seconds })),
-          repeatCount: 1,
-          maxStepRule: "requires 2 matching shots before numeric shape adaptation",
-          reason: "One clean shot is not enough. Repeat the same S3 shape once more; no numeric NEXT SHOT shape is offered until the repeated response is consistent."
-        };
-      } else {
-        const pairs = currentEvidence.source.map((x, i) => {
-          const p = previousEvidence.source[i];
-          const mean = (Number(x.measured) + Number(p.measured)) / 2;
-          const spread = mean > 0 ? Math.abs(Number(x.measured) - Number(p.measured)) / mean : Infinity;
-          return {
-            name:x.name,
-            command:Number(x.command),
-            measuredMean:mean,
-            variability:spread,
-            r2:Math.min(Number(x.r2), Number(p.r2)),
-            seconds:Math.min(Number(x.seconds), Number(p.seconds)),
-            currentMeasured:Number(x.measured),
-            previousMeasured:Number(p.measured)
-          };
-        });
-        const maxVar = Math.max(...pairs.map(x => x.variability));
-        const minR2 = Math.min(...pairs.map(x => x.r2));
-        if (!Number.isFinite(maxVar) || maxVar > 0.20) {
-          s3 = {
-            usable: false,
-            action: "VARIABLE / REPEAT",
-            confidence: "LOW",
-            targetGS: round(Number(currentEvidence.targetGS),3),
-            status: currentEvidence.status,
-            lateToEarlyRatio: currentEvidence.lateToEarlyRatio,
-            repeatCount: 2,
-            variabilityPct: round(maxVar * 100,1),
-            sourceFrames: pairs.map(x => ({
-              name:x.name, commandMlS:round(x.command,3),
-              measuredGS:round(x.measuredMean,3), variabilityPct:round(x.variability*100,1),
-              previousGS:round(x.previousMeasured,3), currentGS:round(x.currentMeasured,3),
-              r2:round(x.r2,5), windowS:round(x.seconds,2)
-            })),
-            maxStepRule: "no numeric adjustment when any repeated segment differs by >20%",
-            reason: "The repeated response is too variable for a safe numeric trim. Keep the same shape and repeat rather than chasing the latest shot."
-          };
+    let s3={usable:false,action:"REPEAT",confidence:"INSUFFICIENT",reason:"S3 segment/overall data is insufficient."};
+    if (s3ev) {
+      const prev=previousMatchingAdaptiveEvidence(s3ev,"s3");
+      if (!prev) {
+        s3={usable:false,action:"REPEAT SAME SHAPE",confidence:"PENDING",targetGS:round(Number(s3ev.targetGS),3),overallGS:s3ev.overallGS,status:s3ev.status,lateToEarlyRatio:s3ev.lateToEarlyRatio,sourceFrames:s3ev.source.map(x=>({name:x.name,commandMlS:x.command,measuredGS:x.measured,r2:x.r2,windowS:x.seconds})),repeatCount:1,maxStepRule:"2 matching shots; LEVEL and SHAPE are solved separately",reason:"One clean S3 shot is not enough. Repeat the same shape once more before numeric next-shot adaptation."};
+      } else if (s3ev.stall || prev.stall) {
+        const target=Number(s3ev.targetGS);
+        const currentRatio=Number(s3ev.lateToEarlyRatio), previousRatio=Number(prev.lateToEarlyRatio);
+        const currentLateWeak=!!(s3ev.stall || s3ev.status==="LATE DECAY" || (Number.isFinite(currentRatio)&&currentRatio<0.75));
+        const previousLateWeak=!!(prev.stall || prev.status==="LATE DECAY" || (Number.isFinite(previousRatio)&&previousRatio<0.75));
+        const bothLateWeak=currentLateWeak&&previousLateWeak;
+        const overallMean=(Number(s3ev.overallGS)+Number(prev.overallGS))/2;
+        const currentErr=(Number(s3ev.overallGS)-target)/target*100;
+        const previousErr=(Number(prev.overallGS)-target)/target*100;
+        if (!bothLateWeak || !Number.isFinite(overallMean) || overallMean<=0) {
+          s3={usable:false,action:"STALL / REPEAT",confidence:"LOW",targetGS:round(target,3),overallGS:Number.isFinite(overallMean)?round(overallMean,3):null,status:s3ev.status,lateToEarlyRatio:s3ev.lateToEarlyRatio,repeatCount:2,maxStepRule:"stall recovery requires 2 same-shape shots that both show late weakness",reason:"A confirmed stall exists, but the matching shot does not confirm the same late-weakness pattern. Keep the current profile and repeat rather than chase one stall."};
         } else {
-          const confidence = minR2 >= 0.97 && maxVar <= 0.15 ? "HIGH" : "MEDIUM";
-          const gain = confidence === "HIGH" ? 0.10 : 0.07;
-          const target = Number(currentEvidence.targetGS);
-          const propose = (x, idx) => {
-            const ratio = target / x.measuredMean;
-            let factor = 1 + (ratio - 1) * gain;
-            factor = Math.max(0.97, Math.min(1.03, factor));
-            let out = x.command * factor;
-            out = Math.max(x.command - 0.03, Math.min(x.command + 0.03, out));
-            if (idx === 0) out = Math.max(0.68, out);
-            return clampCommandFlow(out);
-          };
-          let early = propose(pairs[0],0), mid = propose(pairs[1],1), late = propose(pairs[2],2);
-          early = Math.max(0.68, early);
-          mid = Math.max(mid, early);
-          late = Math.max(late, mid);
-          const boundRise = (a,b) => Math.min(b, Math.max(a, Math.min(a + 0.25, a * 1.35)));
-          mid = boundRise(early, mid);
-          late = boundRise(mid, late);
-          s3 = {
-            usable: true,
-            action: "CONSENSUS SHAPE",
-            confidence,
-            targetGS: round(target,3),
-            status: currentEvidence.status,
-            lateToEarlyRatio: currentEvidence.lateToEarlyRatio,
-            repeatCount: 2,
-            variabilityPct: round(maxVar*100,1),
-            maxStepRule: "2 matching shots required; gain 7–10%; each segment ±0.03 ml/s; EARLY ≥0.68 ml/s; monotonic non-decreasing",
-            sourceFrames: pairs.map(x => ({
-              name:x.name, commandMlS:round(x.command,3),
-              measuredGS:round(x.measuredMean,3), variabilityPct:round(x.variability*100,1),
-              previousGS:round(x.previousMeasured,3), currentGS:round(x.currentMeasured,3),
-              r2:round(x.r2,5), windowS:round(x.seconds,2)
-            })),
-            suggestedShape: {
-              earlyCommand: round(early,3), earlySeconds: currentEvidence.earlySeconds,
-              midCommand: round(mid,3), midSeconds: currentEvidence.midSeconds,
-              lateCommand: round(late,3)
-            },
-            reason: "Consensus trim from two matching S3-shape shots. The mean segment response drives a small next-shot correction; single-shot excursions are not chased."
-          };
+          // STALL RECOVERY: the dedicated stall detector is qualitative evidence, so use a
+          // smaller bounded step than the normal clean LEVEL+SHAPE controller. LEVEL is
+          // allowed to rise only when BOTH matching shots are >10% below target. SHAPE is
+          // normalized so late compensation does not silently create a large level jump.
+          let levelFactor=1;
+          if (currentErr < -10 && previousErr < -10) {
+            const ratio=target/overallMean;
+            levelFactor=1+(ratio-1)*0.14;
+            levelFactor=Math.max(1.0,Math.min(1.04,levelFactor));
+          }
+          const ratios=[currentRatio,previousRatio].filter(Number.isFinite);
+          const meanLateRatio=ratios.length?ratios.reduce((a,b)=>a+b,0)/ratios.length:0.5;
+          const severity=Math.max(0,Math.min(1,(0.80-meanLateRatio)/0.80));
+          const weights=s3ev.source.map(x=>Math.max(1,Number(x.seconds)||1));
+          const wsum=weights.reduce((a,b)=>a+b,0);
+          let shapeFactors=[1-0.025*severity,1+0.005*severity,1+0.060*severity];
+          const norm=shapeFactors.reduce((a,f,i)=>a+f*weights[i],0)/wsum;
+          shapeFactors=shapeFactors.map(f=>f/Math.max(0.001,norm));
+          const bounded=(cmd,f)=>{let out=cmd*f;out=Math.max(cmd*0.93,cmd-0.05,out);out=Math.min(cmd*1.07,cmd+0.05,out);return clampCommandFlow(out)};
+          const commands=s3ev.source.map(x=>Number(x.command));
+          let early=bounded(commands[0],levelFactor*shapeFactors[0]);
+          let mid=bounded(commands[1],levelFactor*shapeFactors[1]);
+          let late=bounded(commands[2],levelFactor*shapeFactors[2]);
+          mid=Math.max(mid,early); late=Math.max(late,mid);
+          const boundRise=(a,b)=>Math.min(b,Math.max(a,Math.min(a+0.25,a*1.35)));
+          mid=boundRise(early,mid);late=boundRise(mid,late);
+          const changed=[early,mid,late].some((v,i)=>Math.abs(v-commands[i])>=0.005);
+          s3={usable:changed,action:changed?"STALL RECOVERY":"STALL / HOLD",confidence:"MEDIUM",targetGS:round(target,3),overallGS:round(overallMean,3),levelErrorPct:round((overallMean-target)/target*100,1),levelFactor:round(levelFactor,4),shapeFactors:shapeFactors.map(x=>round(x,4)),status:s3ev.status,lateToEarlyRatio:s3ev.lateToEarlyRatio,meanLateToEarlyRatio:round(meanLateRatio,3),recoverySeverity:round(severity,3),repeatCount:2,maxStepRule:"STALL RECOVERY requires 2 same-shape late-weak shots with ≥1 confirmed stall; LEVEL max +4%; each frame max ±7% and ±0.05 ml/s",sourceFrames:s3ev.source.map((x,i)=>({name:x.name,commandMlS:round(x.command,3),currentGS:round(x.measured,3),previousGS:round(prev.source[i]&&prev.source[i].measured,3),quality:x.quality||"clean",r2:x.r2,windowS:x.seconds})),suggestedShape:changed?{earlyCommand:round(early,3),earlySeconds:s3ev.earlySeconds,midCommand:round(mid,3),midSeconds:s3ev.midSeconds,lateCommand:round(late,3)}:null,reason:changed?"Two matching S3 shots confirm late weakness and at least one has a dedicated low-flow stall. Apply one conservative next-shot recovery step: LEVEL rises only if both overall flows are low, while normalized SHAPE shifts command toward LATE.":"Repeated stall evidence was confirmed but the bounded recovery step is too small to justify a profile rewrite."};
+        }
+      } else {
+        const pairs=s3ev.source.map((x,i)=>{const p=prev.source[i],mean=(Number(x.measured)+Number(p.measured))/2;return {name:x.name,command:Number(x.command),measuredMean:mean,variability:mean>0?Math.abs(Number(x.measured)-Number(p.measured))/mean:Infinity,r2:Math.min(Number(x.r2),Number(p.r2)),seconds:Math.max(1,Math.min(Number(x.seconds),Number(p.seconds))),currentMeasured:Number(x.measured),previousMeasured:Number(p.measured)}});
+        const overallMean=(Number(s3ev.overallGS)+Number(prev.overallGS))/2;
+        const overallVar=overallMean>0?Math.abs(Number(s3ev.overallGS)-Number(prev.overallGS))/overallMean:Infinity;
+        const maxVar=Math.max(overallVar,...pairs.map(x=>x.variability));
+        const minR2=Math.min(Number(s3ev.overallR2),Number(prev.overallR2),...pairs.map(x=>x.r2));
+        if (!Number.isFinite(maxVar)||maxVar>0.20) {
+          s3={usable:false,action:"VARIABLE / REPEAT",confidence:"LOW",targetGS:round(Number(s3ev.targetGS),3),overallGS:round(overallMean,3),status:s3ev.status,lateToEarlyRatio:s3ev.lateToEarlyRatio,repeatCount:2,variabilityPct:round(maxVar*100,1),sourceFrames:pairs.map(x=>({name:x.name,commandMlS:round(x.command,3),measuredGS:round(x.measuredMean,3),variabilityPct:round(x.variability*100,1),previousGS:round(x.previousMeasured,3),currentGS:round(x.currentMeasured,3),r2:round(x.r2,5),windowS:round(x.seconds,2)})),maxStepRule:"no numeric adjustment when any repeated S3 measure differs by >20%",reason:"The repeated S3 response is too variable. Keep the same shape and repeat instead of chasing the latest shot."};
+        } else {
+          const confidence=minR2>=0.97&&maxVar<=0.15?"HIGH":"MEDIUM";
+          const target=Number(s3ev.targetGS);
+          const levelErr=(overallMean-target)/target*100;
+          const levelGain=confidence==="HIGH"?0.22:0.16;
+          let levelFactor=1;
+          if (Math.abs(levelErr)>10) levelFactor=1+(target/overallMean-1)*levelGain;
+          levelFactor=Math.max(0.95,Math.min(1.05,levelFactor));
+          const weights=pairs.map(x=>Math.max(1,x.seconds));
+          const wsum=weights.reduce((a,b)=>a+b,0);
+          const frameMean=pairs.reduce((a,x,i)=>a+x.measuredMean*weights[i],0)/wsum;
+          const shapeGain=confidence==="HIGH"?0.12:0.08;
+          let shapeFactors=pairs.map(x=>{
+            const rel=frameMean/Math.max(0.05,x.measuredMean);
+            let f=1+(rel-1)*shapeGain;
+            return Math.max(0.97,Math.min(1.03,f));
+          });
+          const norm=shapeFactors.reduce((a,f,i)=>a+f*weights[i],0)/wsum;
+          shapeFactors=shapeFactors.map(f=>f/Math.max(0.001,norm));
+          const bounded=(cmd,f)=>{let out=cmd*f;out=Math.max(cmd*0.93,cmd-0.05,out);out=Math.min(cmd*1.07,cmd+0.05,out);return clampCommandFlow(out)};
+          let early=bounded(pairs[0].command,levelFactor*shapeFactors[0]);
+          let mid=bounded(pairs[1].command,levelFactor*shapeFactors[1]);
+          let late=bounded(pairs[2].command,levelFactor*shapeFactors[2]);
+          mid=Math.max(mid,early); late=Math.max(late,mid);
+          const boundRise=(a,b)=>Math.min(b,Math.max(a,Math.min(a+0.25,a*1.35)));
+          mid=boundRise(early,mid);late=boundRise(mid,late);
+          const changed=[early,mid,late].some((v,i)=>Math.abs(v-pairs[i].command)>=0.005);
+          s3={usable:true,action:changed?"LEVEL + SHAPE":"HOLD",confidence,targetGS:round(target,3),overallGS:round(overallMean,3),levelErrorPct:round(levelErr,1),levelFactor:round(levelFactor,4),shapeFactors:shapeFactors.map(x=>round(x,4)),status:s3ev.status,lateToEarlyRatio:s3ev.lateToEarlyRatio,repeatCount:2,variabilityPct:round(maxVar*100,1),maxStepRule:"2 matching shots; LEVEL uses overall S3; SHAPE is normalized to ~zero weighted level change; each frame max ±7% and ±0.05 ml/s",sourceFrames:pairs.map(x=>({name:x.name,commandMlS:round(x.command,3),measuredGS:round(x.measuredMean,3),variabilityPct:round(x.variability*100,1),previousGS:round(x.previousMeasured,3),currentGS:round(x.currentMeasured,3),r2:round(x.r2,5),windowS:round(x.seconds,2)})),suggestedShape:changed?{earlyCommand:round(early,3),earlySeconds:s3ev.earlySeconds,midCommand:round(mid,3),midSeconds:s3ev.midSeconds,lateCommand:round(late,3)}:null,reason:changed?"S3 overall LEVEL and EARLY/MID/LATE SHAPE were solved separately, then combined into one bounded next-shot profile.":"S3 consensus is inside the overall deadband and shape imbalance is too small to justify a change."};
         }
       }
     }
-    const usable = !!(s1.usable || s3.usable);
-    const actionable = !!((s1 && s1.usable && s1.action === "ADJUST" && Number.isFinite(Number(s1.suggestedCommandMlS))) || (s3 && s3.usable && s3.suggestedShape));
-    return {
-      usable,
-      actionable,
-      runId: run.runId,
-      mode: "SHOT-TO-SHOT ONLY",
-      s1,
-      s3,
-      note: "No running-shot feedback control. APPLY NEXT SHOT writes bounded manual-test/profile-time values only; calibration LUT remains unchanged."
-    };
+    const actionable=!!((s1.usable&&s1.action==="ADJUST"&&Number.isFinite(Number(s1.suggestedCommandMlS)))||(s2.usable&&s2.action==="ADJUST"&&Number.isFinite(Number(s2.suggestedCommandMlS)))||(s3.usable&&s3.suggestedShape));
+    return {usable:!!(s1.usable||s2.usable||s3.usable),actionable,runId:run.runId,mode:"SHOT-TO-SHOT ONLY",s1,s2,s3,note:"All three stages use completed-shot evidence only. No running-shot scale control, no extra skipStep calls, and the calibration LUT is never rewritten."};
   }
 
 
@@ -1449,6 +1679,9 @@ function createPlugin(host) {
     if (suggestion.s1 && suggestion.s1.usable && suggestion.s1.action === "ADJUST" && Number.isFinite(Number(suggestion.s1.suggestedCommandMlS))) {
       stages.stage1 = { mode:"manual", command:round(clampCommandFlow(Number(suggestion.s1.suggestedCommandMlS)),3) };
     }
+    if (suggestion.s2 && suggestion.s2.usable && suggestion.s2.action === "ADJUST" && Number.isFinite(Number(suggestion.s2.suggestedCommandMlS))) {
+      stages.stage2 = { mode:"manual", command:round(clampCommandFlow(Number(suggestion.s2.suggestedCommandMlS)),3) };
+    }
 
     const sourceShape = sourceCfg.stage3Shape && typeof sourceCfg.stage3Shape === "object" ? sourceCfg.stage3Shape : null;
     let s3Shape = sourceShape && sourceShape.enabled === true
@@ -1460,7 +1693,7 @@ function createPlugin(host) {
     }
     const previousOverrides = state.testOverrides ? JSON.parse(JSON.stringify(state.testOverrides)) : null;
     try {
-      state.testOverrides = { schema:3, writerVersion:"0.1.41", savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, targets:binding.targets, stages, s3Shape, adaptiveSource:{ runId:suggestion.runId, appliedAt:new Date().toISOString(), mode:String(source || "manual") } };
+      state.testOverrides = { schema:3, writerVersion:"0.1.48", savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, targets:binding.targets, stages, s3Shape, adaptiveSource:{ runId:suggestion.runId, appliedAt:new Date().toISOString(), mode:String(source || "manual") } };
       storageWrite(STORAGE_TEST_OVERRIDES, state.testOverrides);
 
       const verifyStatus = testOverrideStatus();
@@ -1470,6 +1703,13 @@ function createPlugin(host) {
         const actualS1 = manualTestCommand("stage1");
         if (!Number.isFinite(actualS1) || Math.abs(Number(actualS1) - expectedS1) > 0.001) {
           throw new Error(`S1 adaptive readback mismatch: expected ${expectedS1}, got ${actualS1}`);
+        }
+      }
+      if (suggestion.s2 && suggestion.s2.usable && suggestion.s2.action === "ADJUST") {
+        const expectedS2 = round(clampCommandFlow(Number(suggestion.s2.suggestedCommandMlS)),3);
+        const actualS2 = manualTestCommand("stage2");
+        if (!Number.isFinite(actualS2) || Math.abs(Number(actualS2) - expectedS2) > 0.001) {
+          throw new Error(`S2 adaptive readback mismatch: expected ${expectedS2}, got ${actualS2}`);
         }
       }
       if (suggestion.s3 && suggestion.s3.usable && suggestion.s3.suggestedShape) {
@@ -1505,7 +1745,7 @@ function createPlugin(host) {
     if (!suggestion || !suggestion.actionable) {
       state.autoApplyLastStatus = {
         runId: run.runId, status: "waiting", at: new Date().toISOString(),
-        message: suggestion && suggestion.s3 && suggestion.s3.action ? String(suggestion.s3.action) : "No actionable suggestion; current settings retained"
+        message: suggestion ? `S1 ${suggestion.s1&&suggestion.s1.action||"—"} · S2 ${suggestion.s2&&suggestion.s2.action||"—"} · S3 ${suggestion.s3&&suggestion.s3.action||"—"}` : "No actionable suggestion; current settings retained"
       };
       emitSkinChanged();
       log(`AUTO APPLY waiting after ${run.runId}: ${state.autoApplyLastStatus.message}.`);
@@ -1530,6 +1770,26 @@ function createPlugin(host) {
     }
   }
 
+  function diagnosticRunCommandSnapshot(run) {
+    const c = run && run.config && typeof run.config === "object" ? run.config : null;
+    if (!c) return null;
+    const shape = c.stage3Shape && c.stage3Shape.enabled === true ? c.stage3Shape : null;
+    return {
+      stage1: { desiredGS: round(c.stage1Flow,3), lutCommandMlS: round(c.stage1LutCommandMlS,3), commandMlS: round(c.stage1CommandMlS,3), mode: String(c.stage1CommandMode || "auto") },
+      stage2: { desiredGS: round(c.stage2Flow,3), lutCommandMlS: round(c.stage2LutCommandMlS,3), commandMlS: round(c.stage2CommandMlS,3), mode: String(c.stage2CommandMode || "auto") },
+      stage3: shape ? {
+        desiredGS: round(c.stage3Flow,3), lutCommandMlS: round(c.stage3LutCommandMlS,3), mode:"shape",
+        shape: {
+          enabled:true, earlyCommand:round(shape.earlyCommand,3), earlySeconds:round(shape.earlySeconds,1),
+          midCommand:round(shape.midCommand,3), midSeconds:round(shape.midSeconds,1), lateCommand:round(shape.lateCommand,3)
+        }
+      } : {
+        desiredGS: round(c.stage3Flow,3), lutCommandMlS: round(c.stage3LutCommandMlS,3), mode:String(c.stage3CommandMode || "auto"),
+        flatCommandMlS: round(c.stage3CommandMlS,3), shape:{ enabled:false }
+      }
+    };
+  }
+
   function diagnosticSummary(run) {
     if (!run) return null;
     return {
@@ -1539,6 +1799,7 @@ function createPlugin(host) {
       startedAt: run.startedAt,
       endedAt: run.endedAt,
       result: run.result,
+      shotCommands: diagnosticRunCommandSnapshot(run),
       sampleCount: Array.isArray(run.samples) ? run.samples.length : 0,
       rawScaleSampleCount: Array.isArray(run.rawScaleSamples) ? run.rawScaleSamples.length : 0,
       eventCount: Array.isArray(run.events) ? run.events.length : 0,
@@ -1779,14 +2040,14 @@ function createPlugin(host) {
     } else if (state.calibrationActive) {
       surfaces.push({
         id: "hyperex-cal-header", kind: "header-button", label: "FLOW CAL", text: "EMPTY BASKET · RUNNING",
-        action: { type: "open", view: "diag", presentation: "overlay", fit: true, closeOnShot: false }
+        action: { type: "open", view: "diag-dashboard", presentation: "page" }
       });
     } else if (state.phase === "idle" && state.cfg && state.cfg.diagnosticEnabled && state.cfg.idleDashboardShortcut) {
       const ds = diagnosticSummary(state.diagnosticLast);
       const r2 = ds && ds.kind === "hyperex" && ds.stage2 && ds.stage2.rawRegressionGS !== null ? `S2 ${ds.stage2.rawRegressionGS}g/s` : (state.calibrationMapUsable ? "CAL READY" : "FLOW CAL / DIAG");
       surfaces.push({
         id: "hyperex-diag-header", kind: "header-button", label: "DIAG / CAL", text: r2,
-        action: { type: "open", view: "diag", presentation: "overlay", fit: true, closeOnShot: false }
+        action: { type: "open", view: "diag-dashboard", presentation: "page" }
       });
     }
     return { version: 1, surfaces, live };
@@ -1796,20 +2057,31 @@ function createPlugin(host) {
     const endpointBase = `/api/v1/plugins/${ID}`;
     return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-html,body{margin:0;width:100%;min-height:100%;background:transparent;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;color:#f7f7f8;overflow-x:hidden}.card{width:860px;max-width:96vw;box-sizing:border-box;padding:22px;border-radius:20px;background:#17191d;box-shadow:0 18px 60px rgba(0,0,0,.45)}html.diagview,body.diagview{background:#17191d;min-width:100%;min-height:100vh}body.diagview .card{width:100vw;max-width:none;min-height:100vh;border-radius:0;box-shadow:none;padding:24px 30px}body.diagview .chart{height:250px}body.diagview textarea{height:190px}.k{font-size:13px;letter-spacing:.12em;opacity:.65}.t{font-size:27px;font-weight:800;margin:7px 0}.d{font-size:15px;line-height:1.45}.row{display:flex;gap:9px;margin-top:14px;flex-wrap:wrap}.b{border:0;border-radius:12px;padding:12px 14px;font-size:14px;font-weight:800;cursor:pointer}.p{background:#ff4fa3;color:#fff}.s{background:#343840;color:#fff}.warn{background:#8a4b18;color:#fff}.danger{background:#8a2530;color:#fff}.primaryAction{background:#f27a22;color:#fff;padding:14px 20px;font-size:15px;box-shadow:0 5px 18px rgba(0,0,0,.28)}.secondaryAction{background:#2b2f36;color:#e7e9ec;border:1px solid #555b65;padding:10px 13px;font-size:13px}.tertiaryAction{background:transparent;color:#c9cdd3;border:1px solid #3d424a;padding:10px 13px;font-size:13px}.actionBadge{display:inline-block;margin-left:8px;padding:3px 7px;border-radius:999px;background:#4a321d;color:#ffd4ac;font-size:9px;font-weight:800;letter-spacing:.08em;vertical-align:middle}.manualPanel{margin-top:10px;padding:12px;border-radius:10px;background:#1c1f24;border:1px solid #30343b}.active{outline:2px solid #fff}.m{margin-top:12px;font:12px ui-monospace,monospace;opacity:.78}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}.stat{background:#23262c;border-radius:11px;padding:10px}.stat b{display:block;font-size:17px;margin-top:4px}.small{font-size:11px;opacity:.68}.section{margin-top:14px;padding-top:13px;border-top:1px solid #343840}.section h3{margin:0 0 8px;font-size:16px}.good{color:#77d98b}.bad{color:#ff8c92}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}textarea{width:100%;height:150px;box-sizing:border-box;background:#0f1114;color:#dfe6ef;border:1px solid #343840;border-radius:10px;padding:9px;font:10px ui-monospace,monospace;resize:vertical}table{width:100%;border-collapse:collapse;font-size:11px}th,td{text-align:right;padding:5px 6px;border-bottom:1px solid #292d33}th:first-child,td:first-child{text-align:left}.chart{width:100%;height:205px;background:#101216;border:1px solid #2f333a;border-radius:10px;margin-top:8px}.legend{font-size:11px;opacity:.8;line-height:1.5}
-</style></head><body><div class="card"><div class="k">HYPEREX v0.1.41</div><div id="title" class="t">Checking…</div><div id="detail" class="d"></div>
+html,body{margin:0;width:100%;min-height:100%;background:transparent;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;color:#f7f7f8;overflow-x:hidden}.card{width:860px;max-width:96vw;box-sizing:border-box;padding:22px;border-radius:20px;background:#17191d;box-shadow:0 18px 60px rgba(0,0,0,.45)}html.diagview,body.diagview{background:#17191d;min-width:100%;min-height:100vh}body.diagview .card{width:100vw;max-width:none;min-height:100vh;border-radius:0;box-shadow:none;padding:24px 30px}body.diagview .chart{height:250px}body.diagview textarea{height:190px}.k{font-size:13px;letter-spacing:.12em;opacity:.65}.t{font-size:27px;font-weight:800;margin:7px 0}.d{font-size:15px;line-height:1.45}.row{display:flex;gap:9px;margin-top:14px;flex-wrap:wrap}.b{border:0;border-radius:12px;padding:12px 14px;font-size:14px;font-weight:800;cursor:pointer}.p{background:#ff4fa3;color:#fff}.s{background:#343840;color:#fff}.warn{background:#8a4b18;color:#fff}.danger{background:#8a2530;color:#fff}.primaryAction{background:#f27a22;color:#fff;padding:14px 20px;font-size:15px;box-shadow:0 5px 18px rgba(0,0,0,.28)}.secondaryAction{background:#2b2f36;color:#e7e9ec;border:1px solid #555b65;padding:10px 13px;font-size:13px}.tertiaryAction{background:transparent;color:#c9cdd3;border:1px solid #3d424a;padding:10px 13px;font-size:13px}.actionBadge{display:inline-block;margin-left:8px;padding:3px 7px;border-radius:999px;background:#4a321d;color:#ffd4ac;font-size:9px;font-weight:800;letter-spacing:.08em;vertical-align:middle}.manualPanel{margin-top:10px;padding:12px;border-radius:10px;background:#1c1f24;border:1px solid #30343b}.active{outline:2px solid #fff}.m{margin-top:12px;font:12px ui-monospace,monospace;opacity:.78}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}.stat{background:#23262c;border-radius:11px;padding:10px}.stat b{display:block;font-size:17px;margin-top:4px}.small{font-size:11px;opacity:.68}.section{margin-top:14px;padding-top:13px;border-top:1px solid #343840}.section h3{margin:0 0 8px;font-size:16px}.good{color:#77d98b}.bad{color:#ff8c92}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}textarea{width:100%;height:150px;box-sizing:border-box;background:#0f1114;color:#dfe6ef;border:1px solid #343840;border-radius:10px;padding:9px;font:10px ui-monospace,monospace;resize:vertical}table{width:100%;border-collapse:collapse;font-size:11px}th,td{text-align:right;padding:5px 6px;border-bottom:1px solid #292d33}th:first-child,td:first-child{text-align:left}.chart{width:100%;height:205px;background:#101216;border:1px solid #2f333a;border-radius:10px;margin-top:8px}.legend{font-size:11px;opacity:.8;line-height:1.5}.stepHead{margin-top:18px;padding:14px 16px;border-radius:14px;background:#20242a;border:1px solid #3a4049}.stepHead b{font-size:19px}.stepBadge{float:right;padding:4px 9px;border-radius:999px;background:#343840;font-size:10px;letter-spacing:.06em}.stepBadge.good{background:#173b25}.stepBadge.bad{background:#4a2024}.stepHint{margin-top:5px;font-size:12px;opacity:.72;line-height:1.45}
+</style></head><body><div class="card"><div class="k">HYPEREX v0.1.48</div><div id="title" class="t">Checking…</div><div id="detail" class="d"></div>
 <div id="diag" style="display:none">
-  <div class="d" style="margin:2px 0 12px;padding:10px 12px;border-radius:10px;background:#23262c"><b>ENTRY</b> · Dashboard <b>DIAG / CAL</b> is enabled by default. If another plugin occupies the reserved header slot and this shortcut is not visible, open <b>Plugins → HyperEx Pulse Filter</b>. HyperEx does not run an active reclaim/retry loop for the slot.</div>
-  <div class="section" style="margin-top:0;padding-top:0;border-top:0"><h3>CURRENT HYPEREX VALIDATION</h3><div class="small">This section is only the latest HyperEx shot. RAW real flow is a multi-second linear regression of unmodified scale weight vs scale timestamp; instantaneous RAW dW/dt is not used as the acceptance reference.</div><div id="validation" class="grid"></div><div id="validationtable" class="m"></div></div>
-  <div class="section"><h3>S1 STARTUP / S3 STABILITY</h3><div class="small">S1 separates first-rise delay from active cup flow. Sub-second 20–80% transits are diagnostic only and never drive a numeric trim. S3 is split into EARLY 25% / MID 50% / LATE 25%; a 6 s window can flag LOW-FLOW STALL when DE1 flow remains active but RAW cup-weight slope collapses.</div><div id="stability" class="m"></div></div>
-  <div class="section"><h3>NEXT SHOT ADAPTIVE <span class="actionBadge">RECOMMENDED PATH</span></h3><div id="autoapplybox" class="m"></div><div class="small">Default workflow is automatic after user installation: only a verified actionable suggestion is applied, and only after the completed shot. Turn AUTO APPLY off to restore the v0.1.39 manual-confirmation workflow. Full engineering and curve parameters are again available in Plugins → HyperEx Pulse Filter settings. Nothing changes during a running shot and the calibration LUT is never rewritten by this feature.</div><div id="adaptive" class="m"></div></div>
-  <div class="section"><h3>REFERENCE ADVISORY · NO AUTOMATIC CONTROL</h3><div class="small">HyperEx v0.1.41 never changes a running flow command from scale feedback and never adds extra skipStep calls. Advice below is derived from the latest shot only. A Reference Range is a conservative manual-test range, not a new LUT.</div><div id="advisory" class="m"></div></div>
-  <div class="section"><h3>ADVANCED / MANUAL TEST COMMANDS</h3><div class="manualPanel"><div class="small"><b>Secondary manual workflow.</b> Use this only when deliberately overriding the recommended NEXT SHOT values. <b>AUTO / LUT</b> uses the saved calibration LUT. <b>MANUAL TEST</b> applies a bounded static DE1 command without changing the LUT. S3 <b>DECAY COMP TEST</b> advances by profile time only and adds no plugin skipStep calls. New calibration or changed real-flow targets invalidate old overrides.</div><div id="testcommands" class="m"></div><div id="s3shape" class="m" style="margin-top:10px"></div><div class="row"><button id="applytest" class="b secondaryAction">APPLY TEST COMMANDS</button><button id="returnlut" class="b tertiaryAction">RETURN ALL TO LUT</button></div></div></div>
+  <div class="d" style="margin:2px 0 12px;padding:10px 12px;border-radius:10px;background:#23262c"><b>ENTRY</b> · Dashboard <b>DIAG / CAL</b> is enabled by default. If another plugin occupies the reserved header slot, open <b>Plugins → HyperEx Pulse Filter</b>.</div>
+
+  <div class="stepHead"><span id="step1badge" class="stepBadge">CHECKING</span><b>STEP 1 · FLOW CALIBRATION</b><div class="stepHint">First-time setup. Use an <b>EMPTY BASKET</b> and a large catch vessel. A valid RAW-scale calibration creates the real-flow LUT used by HyperEx. Invalid calibration never overwrites the previous valid LUT.</div></div>
+  <div class="section"><h3>CALIBRATION LUT</h3><div id="calstatus" class="d"></div><div id="calmode" class="row"></div><div id="waterwarn" class="d" style="margin-top:10px;padding:10px;border-radius:10px;background:#3b2d16;color:#ffd58a"><b>WATER / VESSEL / TANK PREFLIGHT</b><br>Waiting for live DE1 tank level…</div><div id="scope" class="row"></div><div class="row"><button id="prepare" class="b p">PREPARE FLOW CAL</button><button id="sync" class="b s">SYNC HYPEREX</button><button id="suggested" class="b s">USE SUGGESTED FOR NEXT CAL</button></div><div class="row"><button id="global" class="b danger">APPLY SUGGESTED GLOBALLY</button><button id="restore" class="b warn">RESTORE PREVIOUS GLOBAL</button><button id="clearcal" class="b s">CLEAR CAL MAP</button></div><div id="map" class="m"></div></div>
+
+  <div class="stepHead"><span id="step2badge" class="stepBadge">WAITING</span><b>STEP 2 · SHOT-TO-SHOT AUTO ADAPTIVE</b><div class="stepHint">Normal daily workflow after calibration. Every completed HyperEx shot is measured with RAW scale weight + timestamp regression. S1, S2 and S3 are evaluated separately; verified changes apply only to the <b>next shot</b>. No running-shot scale closed loop and no extra skipStep calls.</div></div>
+  <div id="historystatus" class="d" style="margin-top:10px;padding:10px 12px;border-radius:10px;background:#23262c"><b>ADAPTIVE HISTORY</b> · checking persistent storage…</div>
+  <div class="section"><h3>NEXT SHOT · APPLIED PROFILE</h3><div class="small">Authoritative current command state generated from the saved LUT plus any valid adaptive/manual override. If S3 shape is active, all EARLY / MID / LATE commands are shown.</div><div id="appliedcommands" class="m"></div></div>
+  <div class="section"><h3>LATEST SHOT · COMMAND SNAPSHOT</h3><div class="small">Historical command snapshot captured at shot start. It may differ from NEXT SHOT after adaptation.</div><div id="runcommands" class="m"></div></div>
+  <div class="section"><h3>LATEST SHOT · VALIDATION</h3><div class="small">RAW real flow is a multi-second linear regression of unmodified scale weight vs scale timestamp. Instantaneous RAW dW/dt is not the acceptance reference.</div><div id="validation" class="grid"></div><div id="validationtable" class="m"></div></div>
+  <div class="section"><h3>S1 STARTUP / S3 STABILITY</h3><div class="small">S1 separates first-rise delay from active cup flow. S3 tracks EARLY / MID / LATE stability and stall/decay behavior.</div><div id="stability" class="m"></div></div>
+  <div class="section"><h3>NEXT SHOT ADAPTIVE <span class="actionBadge">AUTOMATIC PATH</span></h3><div id="autoapplybox" class="m"></div><div class="small">S1 startup, S2 level and S3 LEVEL + SHAPE use repeated completed-shot evidence and bounded corrections. Calibration LUT is never rewritten by adaptive history.</div><div id="adaptive" class="m"></div></div>
   <div class="section"><h3>LIVE / END-OF-RUN TELEMETRY</h3><div id="stats" class="grid"></div></div>
   <div class="section"><h3>REAL SCALE CURVES</h3><div class="legend">Flow: target / DE1 machine Flow / Decaid weightFlow / RAW-scale 1 s slope. Weight chart is the unmodified scale weight stream.</div><svg id="flowchart" class="chart" viewBox="0 0 800 205" preserveAspectRatio="none"></svg><svg id="weightchart" class="chart" viewBox="0 0 800 205" preserveAspectRatio="none"></svg></div>
-  <div class="section"><details id="advancedsettings" class="manualPanel"><summary style="cursor:pointer;font-weight:800;font-size:16px">ADVANCED SETTINGS · QUICK EDIT</summary><div class="small" style="margin-top:8px">These are the same values shown in <b>Plugins → HyperEx Pulse Filter</b>. Saving here writes the core plugin Settings directly and reloads HyperEx once; there is no separate Advanced Settings storage.</div><div id="advancedmeta" class="m"></div><div class="m"><b>REAL-FLOW TARGETS</b></div><table><tr><th>Parameter</th><th>Value</th><th>Parameter</th><th>Value</th></tr><tr><td>S1 target (g/s)</td><td><input id="adv_stage1Flow" type="number" step="0.1" min="0.3" max="6.5"></td><td>S2 target (g/s)</td><td><input id="adv_stage2Flow" type="number" step="0.1" min="0.3" max="6.5"></td></tr><tr><td>S3 target (g/s)</td><td><input id="adv_stage3Flow" type="number" step="0.1" min="0.3" max="6.5"></td><td></td><td></td></tr></table><div class="m"><b>TEMPERATURE / PRESSURE SAFETY</b></div><table><tr><td>Temperature (°C)</td><td><input id="adv_temperature" type="number" step="0.5" min="70" max="100"></td><td>Emergency pressure (bar)</td><td><input id="adv_hardPressureLimit" type="number" step="0.1" min="1" max="12"></td></tr><tr><td>S1 pressure limiter (bar)</td><td><input id="adv_stage1PressureLimit" type="number" step="0.1" min="0.5" max="12"></td><td>S2 pressure limiter (bar)</td><td><input id="adv_stage2PressureLimit" type="number" step="0.1" min="0.5" max="12"></td></tr><tr><td>S3 pressure limiter (bar)</td><td><input id="adv_stage3PressureLimit" type="number" step="0.1" min="0.5" max="12"></td><td></td><td></td></tr></table><div class="m"><b>RELEASE / SCALE / RETRY / DIAGNOSTICS</b></div><table><tr><td>Release flow threshold (ml/s)</td><td><input id="adv_dumpFlowThreshold" type="number" step="0.05" min="0" max="2"></td><td>Low-flow stable samples</td><td><input id="adv_dumpFlowStableSamples" type="number" step="1" min="1" max="20"></td></tr><tr><td>Release fallback (s)</td><td><input id="adv_dumpFallbackSeconds" type="number" step="0.1" min="0.2" max="15"></td><td>Release timeout (s)</td><td><input id="adv_dumpTimeoutSeconds" type="number" step="0.1" min="1" max="30"></td></tr><tr><td>Scale tare threshold (g)</td><td><input id="adv_scaleResetThreshold" type="number" step="0.1" min="0.5" max="20"></td><td>No-scale timeout (s)</td><td><input id="adv_noScaleTimeoutSeconds" type="number" step="0.5" min="1" max="30"></td></tr><tr><td>Auto-arm retry 1 (s)</td><td><input id="adv_autoArmRetry1Seconds" type="number" step="0.5" min="0" max="30"></td><td>Auto-arm retry 2 (s)</td><td><input id="adv_autoArmRetry2Seconds" type="number" step="0.5" min="0" max="60"></td></tr><tr><td>Diagnostic sample (ms)</td><td><input id="adv_diagnosticSampleIntervalMs" type="number" step="10" min="50" max="1000"></td><td>Maximum sequence (s)</td><td><input id="adv_maxRunSeconds" type="number" step="10" min="30" max="600"></td></tr></table><div class="row"><button id="saveadvanced" class="b secondaryAction">SAVE TO PLUGIN SETTINGS</button></div><div id="startupbox" class="d" style="margin-top:10px"></div></details></div>
-  <div class="section"><h3>CALIBRATION LUT</h3><div id="calstatus" class="d"></div><div id="calmode" class="row"></div><div id="waterwarn" class="d" style="margin-top:10px;padding:10px;border-radius:10px;background:#3b2d16;color:#ffd58a"><b>WATER / VESSEL / TANK PREFLIGHT</b><br>Waiting for live DE1 tank level…</div><div id="scope" class="row"></div><div class="row"><button id="prepare" class="b p">PREPARE FLOW CAL</button><button id="sync" class="b s">SYNC HYPEREX</button><button id="suggested" class="b s">USE SUGGESTED FOR NEXT CAL</button></div><div class="row"><button id="global" class="b danger">APPLY SUGGESTED GLOBALLY</button><button id="restore" class="b warn">RESTORE PREVIOUS GLOBAL</button><button id="clearcal" class="b s">CLEAR CAL MAP</button></div><div id="map" class="m"></div></div>
-  <div class="section"><h3>LAST RUN CSV</h3><div class="small">CSV contains combined DE1/Decaid samples plus RAW scale weight/timestamp/dW-dt and profile-frame markers.</div><textarea id="csv" readonly></textarea></div>
+
+  <div class="stepHead"><span class="stepBadge">OPTIONAL</span><b>STEP 3 · MANUAL / ENGINEERING</b><div class="stepHint">Only for diagnosis, experiments or manual override. Normal users should leave AUTO APPLY on and let STEP 2 manage future shots.</div></div>
+  <div class="section"><h3>REFERENCE ADVISORY · NO RUNNING-SHOT CONTROL</h3><div class="small">Manual reference ranges derived from the latest shot. These are not LUT rewrites.</div><div id="advisory" class="m"></div></div>
+  <div class="section"><h3>ADVANCED / TEST OVERRIDE EDITOR</h3><div class="manualPanel"><div class="small"><b>EDITOR ONLY.</b> AUTO / LUT uses the saved calibration LUT. MANUAL TEST changes only future HyperEx profile commands. S3 shape advances by profile time only.</div><div id="testcommands" class="m"></div><div id="s3shape" class="m" style="margin-top:10px"></div><div class="row"><button id="applytest" class="b secondaryAction">APPLY TEST COMMANDS</button><button id="returnlut" class="b tertiaryAction">RETURN ALL TO LUT</button></div></div></div>
+  <div class="section"><details id="advancedsettings" class="manualPanel"><summary style="cursor:pointer;font-weight:800;font-size:16px">ADVANCED SETTINGS · QUICK EDIT</summary><div class="small" style="margin-top:8px">Same source of truth as <b>Plugins → HyperEx Pulse Filter</b>. Saving here writes normal plugin Settings; there is no second settings store.</div><div id="advancedmeta" class="m"></div><div class="m"><b>REAL-FLOW TARGETS</b></div><table><tr><th>Parameter</th><th>Value</th><th>Parameter</th><th>Value</th></tr><tr><td>S1 target (g/s)</td><td><input id="adv_stage1Flow" type="number" step="0.1" min="0.3" max="6.5"></td><td>S2 target (g/s)</td><td><input id="adv_stage2Flow" type="number" step="0.1" min="0.3" max="6.5"></td></tr><tr><td>S3 target (g/s)</td><td><input id="adv_stage3Flow" type="number" step="0.1" min="0.3" max="6.5"></td><td></td><td></td></tr></table><div class="m"><b>TEMPERATURE / PRESSURE SAFETY</b></div><table><tr><td>Temperature (°C)</td><td><input id="adv_temperature" type="number" step="0.5" min="70" max="100"></td><td>Emergency pressure (bar)</td><td><input id="adv_hardPressureLimit" type="number" step="0.1" min="1" max="12"></td></tr><tr><td>S1 pressure limiter (bar)</td><td><input id="adv_stage1PressureLimit" type="number" step="0.1" min="0.5" max="12"></td><td>S2 pressure limiter (bar)</td><td><input id="adv_stage2PressureLimit" type="number" step="0.1" min="0.5" max="12"></td></tr><tr><td>S3 pressure limiter (bar)</td><td><input id="adv_stage3PressureLimit" type="number" step="0.1" min="0.5" max="12"></td><td></td><td></td></tr></table><div class="m"><b>RELEASE / SCALE / RETRY / DIAGNOSTICS</b></div><table><tr><td>Release flow threshold (ml/s)</td><td><input id="adv_dumpFlowThreshold" type="number" step="0.05" min="0" max="2"></td><td>Low-flow stable samples</td><td><input id="adv_dumpFlowStableSamples" type="number" step="1" min="1" max="20"></td></tr><tr><td>Release fallback (s)</td><td><input id="adv_dumpFallbackSeconds" type="number" step="0.1" min="0.2" max="15"></td><td>Release timeout (s)</td><td><input id="adv_dumpTimeoutSeconds" type="number" step="0.1" min="1" max="30"></td></tr><tr><td>Scale tare threshold (g)</td><td><input id="adv_scaleResetThreshold" type="number" step="0.1" min="0.5" max="20"></td><td>No-scale timeout (s)</td><td><input id="adv_noScaleTimeoutSeconds" type="number" step="0.5" min="1" max="30"></td></tr><tr><td>Auto-arm retry 1 (s)</td><td><input id="adv_autoArmRetry1Seconds" type="number" step="0.5" min="0" max="30"></td><td>Auto-arm retry 2 (s)</td><td><input id="adv_autoArmRetry2Seconds" type="number" step="0.5" min="0" max="60"></td></tr><tr><td>Diagnostic sample (ms)</td><td><input id="adv_diagnosticSampleIntervalMs" type="number" step="10" min="50" max="1000"></td><td>Maximum sequence (s)</td><td><input id="adv_maxRunSeconds" type="number" step="10" min="30" max="600"></td></tr></table><div class="row"><button id="saveadvanced" class="b secondaryAction">SAVE TO PLUGIN SETTINGS</button></div><div id="startupbox" class="d" style="margin-top:10px"></div></details></div>
+
+  <div class="stepHead"><span class="stepBadge">EXPORT</span><b>STEP 4 · COPY CSV</b><div class="stepHint">Raw engineering export for offline analysis or bug reports. This is intentionally last because it is not needed for normal brewing.</div></div>
+  <div class="section"><h3>LAST RUN CSV</h3><div class="small">Combined DE1/Decaid samples plus RAW scale weight/timestamp/dW-dt and profile-frame markers.</div><textarea id="csv" readonly></textarea></div>
 </div>
 <div class="row"><button id="rearm" class="b p">RE-ARM</button><button id="copy" class="b p" style="display:none">COPY CSV</button><button id="close" class="b s">CLOSE</button></div><div id="meta" class="m"></div></div>
 <script>
@@ -1818,7 +2090,6 @@ html,body{margin:0;width:100%;min-height:100%;background:transparent;font-family
     try{if(window.top&&window.top!==window&&window.top.history&&window.top.history.length>1){window.top.history.back();return}}catch(_){}
     if(window.history&&window.history.length>2){window.history.go(-2);return}
     if(window.history&&window.history.length>1){window.history.back();return}
-    try{if(window.top&&window.top!==window)window.top.location.href='/';else window.location.href='/'}catch(_){try{window.location.href='/'}catch(__){}}
   }
   function emergencyClose(){
     try{if(window.parent&&window.parent!==window)window.parent.postMessage({type:'streamline:close'},'*')}catch(_){}
@@ -1834,18 +2105,23 @@ html,body{margin:0;width:100%;min-height:100%;background:transparent;font-family
 })();
 </script>
 <script>
-const base=${JSON.stringify(endpointBase)};const coreSettings='/api/v1/plugins/'+${JSON.stringify(ID)}+'/settings';const requestedView=new URLSearchParams(location.search).get('view');const view=requestedView||${JSON.stringify(state.phase === 'idle' ? 'diag' : 'ghc')};if(view==='diag'){document.documentElement.classList.add('diagview');document.body.classList.add('diagview')}window.parent.postMessage({type:'streamline:ready'},'*');const sw=Math.max(1000,Math.min(1800,Number((window.screen&&window.screen.width)||window.innerWidth||1200)));const sh=Math.max(780,Math.min(1400,Number((window.screen&&window.screen.height)||window.innerHeight||900)));window.parent.postMessage({type:'streamline:size',width:view==='diag'?sw:520,height:view==='diag'?sh:300},'*');
-let latestAdvisorySummary=null;let latestStage3Stability=null;let latestNextShotAdaptive=null;let latestAdaptiveSummary=null;let latestAutoApplyEnabled=true;let latestAutoApplyStatus=null;const $=id=>document.getElementById(id),t=$('title'),d=$('detail'),m=$('meta'),b=$('rearm'),copy=$('copy'),diag=$('diag'),stats=$('stats'),validation=$('validation'),validationtable=$('validationtable'),stability=$('stability'),adaptive=$('adaptive'),advisory=$('advisory'),testcommands=$('testcommands'),s3shape=$('s3shape'),csv=$('csv'),calstatus=$('calstatus'),waterwarn=$('waterwarn'),scope=$('scope'),calmode=$('calmode'),map=$('map'),startupbox=$('startupbox');
+const base=${JSON.stringify(endpointBase)};const coreSettings='/api/v1/plugins/'+${JSON.stringify(ID)}+'/settings';const requestedView=new URLSearchParams(location.search).get('view');const view=requestedView||${JSON.stringify(state.phase === 'idle' ? 'diag' : 'ghc')};const dashboardEntry=view==='diag-dashboard';const diagView=view==='diag'||dashboardEntry;if(diagView){document.documentElement.classList.add('diagview');document.body.classList.add('diagview')}window.parent.postMessage({type:'streamline:ready'},'*');const sw=Math.max(1000,Math.min(1800,Number((window.screen&&window.screen.width)||window.innerWidth||1200)));const sh=Math.max(780,Math.min(1400,Number((window.screen&&window.screen.height)||window.innerHeight||900)));window.parent.postMessage({type:'streamline:size',width:diagView?sw:520,height:diagView?sh:300},'*');
+let latestAdvisorySummary=null;let latestStage3Stability=null;let latestNextShotAdaptive=null;let latestAdaptiveSummary=null;let latestAutoApplyEnabled=true;let latestAutoApplyStatus=null;const $=id=>document.getElementById(id),t=$('title'),d=$('detail'),m=$('meta'),b=$('rearm'),copy=$('copy'),diag=$('diag'),stats=$('stats'),appliedcommands=$('appliedcommands'),runcommands=$('runcommands'),validation=$('validation'),validationtable=$('validationtable'),stability=$('stability'),adaptive=$('adaptive'),advisory=$('advisory'),testcommands=$('testcommands'),s3shape=$('s3shape'),csv=$('csv'),calstatus=$('calstatus'),waterwarn=$('waterwarn'),scope=$('scope'),calmode=$('calmode'),map=$('map'),startupbox=$('startupbox');
 function paint(x){if(x.phase==='soak'){t.textContent='SOAK '+x.soakSecondsRemaining+'s';d.textContent='Active release is complete. Wait until the soak reaches 0. The plugin will arm the second stage only after the full soak.';b.disabled=true;}else if(x.phase==='restart_wait'){t.textContent='CHECK PINK LIGHT · '+x.ghcSecondsRemaining+'s';d.textContent='Pink ON → press the physical GHC Espresso button. Pink OFF → tap RE-ARM, then press GHC when the light turns pink.';b.disabled=false;}else if(x.calibrationActive){t.textContent='FLOW CAL RUNNING';d.textContent='EMPTY BASKET. Leave the staircase running until Idle. Do not remove the catch vessel; the plugin will stop at the selected-mode actual-water safety cap before 300 ml.';b.disabled=true;}else{t.textContent='HYPEREX IDLE';d.textContent='No GHC action is required.';b.disabled=true;}m.textContent='Cumulative '+Number(x.cumulativeWeight||0).toFixed(1)+'g · arm requests '+(x.armRequestCount||0);}
 async function post(ep,body){const r=await fetch(base+'/'+ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});let j={};try{j=await r.json()}catch(_){j={error:await r.text()}}if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j;}
 async function doRearm(auto){b.disabled=true;b.textContent='RE-ARMING…';try{const x=await post('rearm',{retry:1});paint(x);t.textContent='RE-ARM REQUEST SENT';d.textContent='Wait for the pink GHC Espresso light, then press the physical GHC Espresso button.';if(auto)setTimeout(closeUi,1300)}catch(e){t.textContent='RE-ARM FAILED';d.textContent=String(e)}finally{b.textContent='RE-ARM';setTimeout(()=>b.disabled=false,800)}}
 function stat(label,v){return '<div class="stat"><span class="small">'+label+'</span><b>'+v+'</b></div>'}
 function esc(v){return String(v==null?'—':v).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function commandModeLabel(v){v=String(v||'auto').toLowerCase();return v==='shape'?'SHAPE':v==='manual'?'MANUAL TEST':'AUTO / LUT'}
+function shapeCommandText(sh){if(!sh||sh.enabled!==true)return null;return esc(sh.earlyCommand)+' × '+esc(sh.earlySeconds)+'s → '+esc(sh.midCommand)+' × '+esc(sh.midSeconds)+'s → '+esc(sh.lateCommand)+' ml/s'}
+function appliedS3Text(c){const sh=c&&c.s3Shape;const shaped=shapeCommandText(sh);if(shaped)return shaped;const flat=c&&c.stage3FlatCommandMlS!=null?c.stage3FlatCommandMlS:(c&&c.stage3CommandMlS);return esc(flat)+' ml/s FLAT'}
+function renderAppliedCommands(c,truth){if(!appliedcommands)return;if(!c||!c.appliedProfile){appliedcommands.innerHTML='<span class="bad">Current profile command state unavailable.</span>';return}const p=c.appliedProfile,src=c.adaptiveSource||null;const expectedS3=p.stage3||{};const t=truth||{};const a=t.actual||null;let ap1=p.stage1&&p.stage1.commandMlS,ap2=p.stage2&&p.stage2.commandMlS,mode=expectedS3.mode,ap3=expectedS3.mode==='shape'?shapeCommandText(expectedS3.shape):(esc(expectedS3.flatCommandMlS)+' ml/s');if(a){ap1=a.stage1CommandMlS;ap2=a.stage2CommandMlS;mode=a.stage3Mode==='shape'?'shape':'actual';ap3=a.stage3Mode==='shape'?shapeCommandText(a.s3Shape):(esc(a.stage3CommandMlS)+' ml/s')}let source='<b>Source:</b> '+esc(c.manualTestStatus||'AUTO / LUT');if(src&&src.runId)source='<b>Source:</b> NEXT SHOT ADAPTIVE '+esc(String(src.mode||'').toUpperCase())+' · run '+esc(src.runId)+(src.appliedAt?' · '+esc(src.appliedAt):'');const truthLine=t.verified?'<span class="good"><b>WORKFLOW READBACK VERIFIED</b></span> · '+esc(t.status||''):'<span class="bad"><b>WORKFLOW NOT VERIFIED</b></span> · '+esc(t.status||'')+' · expected commands are shown only as a reference until repair succeeds.';appliedcommands.innerHTML='<table><tr><th>Stage</th><th>Target REAL g/s</th><th>LUT cmd</th><th>Mode</th><th>ACTUAL WORKFLOW COMMAND</th></tr><tr><td>S1</td><td>'+esc(p.stage1&&p.stage1.desiredGS)+' g/s</td><td>'+esc(p.stage1&&p.stage1.lutCommandMlS)+'</td><td>'+commandModeLabel(p.stage1&&p.stage1.mode)+'</td><td><b>'+esc(ap1)+' ml/s</b></td></tr><tr><td>S2</td><td>'+esc(p.stage2&&p.stage2.desiredGS)+' g/s</td><td>'+esc(p.stage2&&p.stage2.lutCommandMlS)+'</td><td>'+commandModeLabel(p.stage2&&p.stage2.mode)+'</td><td><b>'+esc(ap2)+' ml/s</b></td></tr><tr><td>S3</td><td>'+esc(expectedS3.desiredGS)+' g/s</td><td>'+esc(expectedS3.lutCommandMlS)+'</td><td>'+commandModeLabel(mode)+'</td><td><b>'+ap3+'</b></td></tr></table><div class="small" style="margin-top:7px">'+truthLine+'<br>'+source+'</div>'}
+function renderRunCommands(s){if(!runcommands)return;const p=s&&s.shotCommands;if(!p){runcommands.innerHTML='<span class="small">No completed HyperEx shot command snapshot is available.</span>';return}const s3=p.stage3||{};const s3txt=s3.mode==='shape'?shapeCommandText(s3.shape):(esc(s3.flatCommandMlS)+' ml/s');runcommands.innerHTML='<table><tr><th>Stage</th><th>Target</th><th>LUT cmd</th><th>Mode AT SHOT START</th><th>COMMANDS USED BY THIS SHOT</th></tr><tr><td>S1</td><td>'+esc(p.stage1&&p.stage1.desiredGS)+' g/s</td><td>'+esc(p.stage1&&p.stage1.lutCommandMlS)+'</td><td>'+commandModeLabel(p.stage1&&p.stage1.mode)+'</td><td><b>'+esc(p.stage1&&p.stage1.commandMlS)+' ml/s</b></td></tr><tr><td>S2</td><td>'+esc(p.stage2&&p.stage2.desiredGS)+' g/s</td><td>'+esc(p.stage2&&p.stage2.lutCommandMlS)+'</td><td>'+commandModeLabel(p.stage2&&p.stage2.mode)+'</td><td><b>'+esc(p.stage2&&p.stage2.commandMlS)+' ml/s</b></td></tr><tr><td>S3</td><td>'+esc(s3.desiredGS)+' g/s</td><td>'+esc(s3.lutCommandMlS)+'</td><td>'+commandModeLabel(s3.mode)+'</td><td><b>'+s3txt+'</b></td></tr></table><div class="small" style="margin-top:7px">Historical snapshot only. It does not change when NEXT SHOT ADAPTIVE writes a new profile after this shot.</div>'}
 const ADV_SETTING_KEYS={temperature:'Temperature',stage1Flow:'Stage1Flow',stage1PressureLimit:'Stage1PressureLimit',dumpFlowThreshold:'DumpFlowThreshold',dumpFlowStableSamples:'DumpFlowStableSamples',dumpFallbackSeconds:'DumpFallbackSeconds',dumpTimeoutSeconds:'DumpTimeoutSeconds',stage2Flow:'Stage2Flow',stage2PressureLimit:'Stage2PressureLimit',stage3Flow:'Stage3Flow',stage3PressureLimit:'Stage3PressureLimit',hardPressureLimit:'HardPressureLimit',scaleResetThreshold:'ScaleResetThreshold',noScaleTimeoutSeconds:'NoScaleTimeoutSeconds',autoArmRetry1Seconds:'AutoArmRetry1Seconds',autoArmRetry2Seconds:'AutoArmRetry2Seconds',diagnosticSampleIntervalMs:'DiagnosticSampleIntervalMs',maxRunSeconds:'MaxRunSeconds'};
 const ADV_FIELDS=Object.keys(ADV_SETTING_KEYS);
 async function loadAdvancedSettings(){try{const r=await fetch(base+'/advanced-settings');if(!r.ok)return;const j=await r.json(),a=j.settings||{};for(const k of ADV_FIELDS){const q=$('adv_'+k);if(q&&a[k]!=null)q.value=a[k]}const meta=$('advancedmeta');if(meta){const bt=j.basicCurve||{};meta.innerHTML='Single settings source · core curve: S1 <b>'+esc(bt.stage1WeightG)+'g</b> → settle <b>'+esc(bt.releaseSettleSeconds)+'s</b> → soak <b>'+esc(bt.soakSeconds)+'s</b> → S2→S3 <b>'+esc(bt.stage2WeightG)+'g</b> → final <b>'+esc(bt.finalWeightG)+'g</b> · GHC timeout <b>'+esc(bt.ghcConfirmTimeoutSeconds)+'s</b>.'}}catch(e){const meta=$('advancedmeta');if(meta)meta.textContent='Settings load error: '+e}}
 async function saveAdvancedSettings(){const payload={};for(const k of ADV_FIELDS){const q=$('adv_'+k);if(!q)continue;const v=Number(q.value);if(!Number.isFinite(v)){alert('Invalid setting: '+k);return}payload[ADV_SETTING_KEYS[k]]=v}if(!confirm('Save these values to the normal HyperEx plugin Settings?\\n\\nThis uses the same settings source shown on the Plugins page and reloads HyperEx once.'))return;const r=await fetch(coreSettings,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});if(!r.ok){alert('Save failed: '+await r.text());return}alert('Settings saved. HyperEx is reloading; reopen DIAG / CAL if this page closes.');setTimeout(()=>location.reload(),1200)}
-async function loadCal(){try{const r=await fetch(base+'/calibration-status');const c=await r.json();latestAutoApplyEnabled=c.autoApplyNextShot!==false;latestAutoApplyStatus=c.autoApplyLastStatus||null;renderAutoApplyBox();renderAdaptive(latestAdaptiveSummary);const ok=c.calibrationUsable;if($("t1")){ $("t1").value=c.commandFlows&&c.commandFlows.stage1DesiredGS!=null?c.commandFlows.stage1DesiredGS:""; $("t2").value=c.commandFlows&&c.commandFlows.stage2DesiredGS!=null?c.commandFlows.stage2DesiredGS:""; $("t3").value=c.commandFlows&&c.commandFlows.stage3DesiredGS!=null?c.commandFlows.stage3DesiredGS:"";}if(calmode){calmode.innerHTML=(c.calibrationModes||[{id:'low',label:'Low Water'},{id:'full',label:'Full'}]).map(x=>'<button class="b s '+(c.calibrationMode===x.id?'active':'')+'" data-mode="'+esc(x.id)+'">'+esc(x.label)+(x.id==='low'?' · DEFAULT':'')+'</button>').join('');calmode.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-mode',{mode:q.dataset.mode});await loadCal()})}if(waterwarn){const w=c.waterPreflight||{};const wc=w.status==='ok'?'#163b26':w.status==='warn'?'#3b2d16':'#4a2024';const fg=w.status==='ok'?'#9ff0b5':w.status==='warn'?'#ffd58a':'#ffb4b8';waterwarn.style.background=wc;waterwarn.style.color=fg;let tank='Tank level unavailable';if(w.available)tank='Tank: <b>'+esc(w.currentLevelMm)+' mm</b> · refill threshold: <b>'+esc(w.refillLevelMm)+' mm</b> · margin: <b>'+esc(w.marginMm)+' mm</b>';waterwarn.innerHTML='<b>WATER / VESSEL / TANK PREFLIGHT · '+esc(c.calibrationModeLabel)+' · '+esc((w.status||'unknown').toUpperCase())+'</b><br>'+tank+'<br>Prime: '+esc(c.primeFlow)+' ml/s × '+esc(c.primeSeconds)+' s · '+esc(c.calibrationSteps)+' calibration plateaus × '+esc(c.calibrationStepSeconds)+' s · nominal DE1 command water <b>≈'+esc(c.nominalCommandWaterMl)+' ml</b>.<br>Use a <b>'+esc(c.recommendedContainerMl)+' ml or larger</b> catch vessel. Plugin actively stops around <b>'+esc(c.calibrationHardStopG)+' g</b> actual collected water. '+esc(w.message||'');}calstatus.innerHTML='<b class="'+(ok?'good':'bad')+'">'+(ok?'CALIBRATION READY':'CALIBRATION NOT READY')+'</b><br>Mode: <b>'+esc(c.calibrationModeLabel)+'</b> · Profile: <b>'+esc(c.calibrationProfileTitle)+'</b><br>Scope: <b>'+esc(c.scopeLabel)+'</b> · DE1 multiplier: <b>'+esc(c.currentFlowMultiplier)+'</b> · map base: <b>'+esc(c.calibrationBaseMultiplier)+'</b> · suggested: <b>'+esc(c.suggestedFlowMultiplier)+'</b><br>'+esc(c.calibrationStaleReason||'LUT valid')+(c.lastCalibrationValid===false?'<br><b class="bad">LAST CAL RUN INVALID — previous valid LUT retained</b>':c.lastCalibrationValid===true?'<br><b class="good">LAST CAL RUN VALID</b>':'')+'<br>Real→command: S1 '+esc(c.commandFlows&&c.commandFlows.stage1DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage1CommandMlS)+' · S2 '+esc(c.commandFlows&&c.commandFlows.stage2DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage2CommandMlS)+' · S3 '+esc(c.commandFlows&&c.commandFlows.stage3DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage3CommandMlS)+'<br>Test mode: <b>'+esc((c.commandFlows&&c.commandFlows.manualTestStatus)||'none')+'</b>';renderTestCommands(c.commandFlows||{},latestAdvisorySummary||{});scope.innerHTML=['off','hyperex','global'].map(x=>'<button class="b s '+(c.scope===x?'active':'')+'" data-scope="'+x+'">'+(x==='off'?'OFF':x==='hyperex'?'HYPEREX ONLY':'GLOBAL')+'</button>').join('');scope.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-scope',{scope:q.dataset.scope});await loadCal()});const last=c.lastCalibration||null;const rows=last&&Array.isArray(last.plateauResults)?last.plateauResults:[];const anchors=last&&last.map&&Array.isArray(last.map.targetAnchors)?last.map.targetAnchors:[];const anchorHtml=anchors.length?'<div style="margin:8px 0"><b>TARGET LUT:</b> '+anchors.map(a=>esc(a.blockId)+' '+esc(a.actualFlow)+' g/s → '+esc(a.commandFlow)+' ml/s ('+esc(a.quality)+')').join(' · ')+'</div>':'';map.innerHTML=rows.length?anchorHtml+'<table><tr><th>Frame</th><th>Block / target</th><th>DE1 cmd</th><th>RAW real g/s</th><th>DE1 flow</th><th>R²</th><th>Status</th></tr>'+rows.map(p=>'<tr><td>'+esc(p.frame)+'</td><td>'+esc((p.blockId||'—')+(p.targetReal!=null?' / '+p.targetReal:'') )+'</td><td>'+esc(p.commandFlow)+'</td><td>'+esc(p.actualFlow)+'</td><td>'+esc(p.machineFlow)+'</td><td>'+esc(p.r2)+'</td><td class="'+(p.acceptedInMap?'good':(p.valid?'':'bad'))+'">'+esc(p.acceptedInMap?'ANCHOR SOURCE':(p.reason||'REJECTED'))+'</td></tr>').join('')+'</table><div style="margin-top:8px">'+esc(c.profileSyncStatus||'')+'</div>':'No calibration run yet. Low Water automatically searches the three HyperEx real-flow targets and generates the LUT only when all targets pass. Full remains the wide engineering staircase.';const cur=c.stage1StartupCorrection||1;startupbox.innerHTML='<b>Stable skip topology:</b> scale feedback is advisory only. Optional S3 DECAY COMP may use 5 profile frames, but S3 subframes advance only by their own timers and never add plugin skipStep calls.'+(Number(cur)!==1?(' <br><span class="bad">Legacy S1 startup factor '+esc(cur)+'× is stored but ignored in v0.1.41.</span> <button id=clearstartup class="b s">CLEAR LEGACY</button>'):'');const cl=$("clearstartup");if(cl)cl.onclick=async()=>{try{await post('startup-clear',{});await loadCal()}catch(e){alert('Clear failed: '+e)}};}catch(e){calstatus.textContent='Calibration status error: '+e}}
+async function loadCal(){try{const r=await fetch(base+'/calibration-status');const c=await r.json();renderAppliedCommands(c.commandFlows||{},c.profileTruth||{});latestAutoApplyEnabled=c.autoApplyNextShot!==false;latestAutoApplyStatus=c.autoApplyLastStatus||null;renderAutoApplyBox();renderAdaptive(latestAdaptiveSummary);const ok=c.calibrationUsable;const b1=$("step1badge"),b2=$("step2badge");if(b1){b1.textContent=ok?"CAL READY":"REQUIRED FIRST";b1.className="stepBadge "+(ok?"good":"bad")}if(b2){b2.textContent=ok?"ACTIVE · AUTO NEXT SHOT":"WAITING FOR VALID LUT";b2.className="stepBadge "+(ok?"good":"bad")}const hs=c.persistentHistory||{},hb=$("historystatus");if(hb){if(hs.available===true){hb.style.background="#173b25";hb.style.color="#9ff0b5";hb.innerHTML='<b>ADAPTIVE HISTORY · PERSISTENT</b> · '+esc(hs.savedShots)+' saved shot(s), '+esc(hs.compatibleShots)+' compatible with the current calibration/LUT. Cross-reload/version regression is enabled.'}else if(hs.available===false){hb.style.background="#4a2024";hb.style.color="#ffb4b8";hb.innerHTML='<b>ADAPTIVE HISTORY · SESSION ONLY</b> · '+esc(hs.status)+'<br>Shot-to-shot adaptation still works in this session, but cross-reload/version regression is disabled.'}else{hb.style.background="#3b2d16";hb.style.color="#ffd58a";hb.innerHTML='<b>ADAPTIVE HISTORY</b> · checking pluginStorage write/readback…'}}if($("t1")){ $("t1").value=c.commandFlows&&c.commandFlows.stage1DesiredGS!=null?c.commandFlows.stage1DesiredGS:""; $("t2").value=c.commandFlows&&c.commandFlows.stage2DesiredGS!=null?c.commandFlows.stage2DesiredGS:""; $("t3").value=c.commandFlows&&c.commandFlows.stage3DesiredGS!=null?c.commandFlows.stage3DesiredGS:"";}if(calmode){calmode.innerHTML=(c.calibrationModes||[{id:'low',label:'Low Water'},{id:'full',label:'Full'}]).map(x=>'<button class="b s '+(c.calibrationMode===x.id?'active':'')+'" data-mode="'+esc(x.id)+'">'+esc(x.label)+(x.id==='low'?' · DEFAULT':'')+'</button>').join('');calmode.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-mode',{mode:q.dataset.mode});await loadCal()})}if(waterwarn){const w=c.waterPreflight||{};const wc=w.status==='ok'?'#163b26':w.status==='warn'?'#3b2d16':'#4a2024';const fg=w.status==='ok'?'#9ff0b5':w.status==='warn'?'#ffd58a':'#ffb4b8';waterwarn.style.background=wc;waterwarn.style.color=fg;let tank='Tank level unavailable';if(w.available)tank='Tank: <b>'+esc(w.currentLevelMm)+' mm</b> · refill threshold: <b>'+esc(w.refillLevelMm)+' mm</b> · margin: <b>'+esc(w.marginMm)+' mm</b>';waterwarn.innerHTML='<b>WATER / VESSEL / TANK PREFLIGHT · '+esc(c.calibrationModeLabel)+' · '+esc((w.status||'unknown').toUpperCase())+'</b><br>'+tank+'<br>Prime: '+esc(c.primeFlow)+' ml/s × '+esc(c.primeSeconds)+' s · '+esc(c.calibrationSteps)+' calibration plateaus × '+esc(c.calibrationStepSeconds)+' s · nominal DE1 command water <b>≈'+esc(c.nominalCommandWaterMl)+' ml</b>.<br>Use a <b>'+esc(c.recommendedContainerMl)+' ml or larger</b> catch vessel. Plugin actively stops around <b>'+esc(c.calibrationHardStopG)+' g</b> actual collected water. '+esc(w.message||'');}calstatus.innerHTML='<b class="'+(ok?'good':'bad')+'">'+(ok?'CALIBRATION READY':'CALIBRATION NOT READY')+'</b><br>Mode: <b>'+esc(c.calibrationModeLabel)+'</b> · Profile: <b>'+esc(c.calibrationProfileTitle)+'</b><br>Scope: <b>'+esc(c.scopeLabel)+'</b> · DE1 multiplier: <b>'+esc(c.currentFlowMultiplier)+'</b> · map base: <b>'+esc(c.calibrationBaseMultiplier)+'</b> · suggested: <b>'+esc(c.suggestedFlowMultiplier)+'</b><br>'+esc(c.calibrationStaleReason||'LUT valid')+(c.lastCalibrationValid===false?'<br><b class="bad">LAST CAL RUN INVALID — previous valid LUT retained</b>':c.lastCalibrationValid===true?'<br><b class="good">LAST CAL RUN VALID</b>':'')+'<br>Real→command: S1 '+esc(c.commandFlows&&c.commandFlows.stage1DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage1CommandMlS)+' · S2 '+esc(c.commandFlows&&c.commandFlows.stage2DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage2CommandMlS)+' · S3 '+esc(c.commandFlows&&c.commandFlows.stage3DesiredGS)+'→'+appliedS3Text(c.commandFlows||{})+'<br>Test mode: <b>'+esc((c.commandFlows&&c.commandFlows.manualTestStatus)||'none')+'</b>';renderTestCommands(c.commandFlows||{},latestAdvisorySummary||{});scope.innerHTML=['off','hyperex','global'].map(x=>'<button class="b s '+(c.scope===x?'active':'')+'" data-scope="'+x+'">'+(x==='off'?'OFF':x==='hyperex'?'HYPEREX ONLY':'GLOBAL')+'</button>').join('');scope.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-scope',{scope:q.dataset.scope});await loadCal()});const last=c.lastCalibration||null;const rows=last&&Array.isArray(last.plateauResults)?last.plateauResults:[];const anchors=last&&last.map&&Array.isArray(last.map.targetAnchors)?last.map.targetAnchors:[];const anchorHtml=anchors.length?'<div style="margin:8px 0"><b>TARGET LUT:</b> '+anchors.map(a=>esc(a.blockId)+' '+esc(a.actualFlow)+' g/s → '+esc(a.commandFlow)+' ml/s ('+esc(a.quality)+')').join(' · ')+'</div>':'';map.innerHTML=rows.length?anchorHtml+'<table><tr><th>Frame</th><th>Block / target</th><th>DE1 cmd</th><th>RAW real g/s</th><th>DE1 flow</th><th>R²</th><th>Status</th></tr>'+rows.map(p=>'<tr><td>'+esc(p.frame)+'</td><td>'+esc((p.blockId||'—')+(p.targetReal!=null?' / '+p.targetReal:'') )+'</td><td>'+esc(p.commandFlow)+'</td><td>'+esc(p.actualFlow)+'</td><td>'+esc(p.machineFlow)+'</td><td>'+esc(p.r2)+'</td><td class="'+(p.acceptedInMap?'good':(p.valid?'':'bad'))+'">'+esc(p.acceptedInMap?'ANCHOR SOURCE':(p.reason||'REJECTED'))+'</td></tr>').join('')+'</table><div style="margin-top:8px">'+esc(c.profileSyncStatus||'')+'</div>':'No calibration run yet. Low Water automatically searches the three HyperEx real-flow targets and generates the LUT only when all targets pass. Full remains the wide engineering staircase.';const cur=c.stage1StartupCorrection||1;startupbox.innerHTML='<b>Stable skip topology:</b> scale feedback is advisory only. Optional S3 DECAY COMP may use 5 profile frames, but S3 subframes advance only by their own timers and never add plugin skipStep calls.'+(Number(cur)!==1?(' <br><span class="bad">Legacy S1 startup factor '+esc(cur)+'× is stored but ignored in v0.1.48.</span> <button id=clearstartup class="b s">CLEAR LEGACY</button>'):'');const cl=$("clearstartup");if(cl)cl.onclick=async()=>{try{await post('startup-clear',{});await loadCal()}catch(e){alert('Clear failed: '+e)}};}catch(e){calstatus.textContent='Calibration status error: '+e}}
 function svgPath(points,xmin,xmax,ymin,ymax){const W=800,H=205,pad=18,dx=Math.max(.001,xmax-xmin),dy=Math.max(.001,ymax-ymin);let out='';for(const q of points){if(!Number.isFinite(q[0])||!Number.isFinite(q[1]))continue;const x=pad+(q[0]-xmin)/dx*(W-pad*2),y=H-pad-(q[1]-ymin)/dy*(H-pad*2);out+=(out?' L ':'M ')+x.toFixed(1)+' '+y.toFixed(1)}return out}
 function renderChart(svg,series,ymin,ymax){if(!svg)return;let all=[];series.forEach(s=>all=all.concat(s.points));if(!all.length){svg.innerHTML='';return}const xs=all.map(p=>p[0]).filter(Number.isFinite),ys=all.map(p=>p[1]).filter(Number.isFinite);const xmin=Math.min(...xs),xmax=Math.max(...xs);if(ymin==null)ymin=Math.min(...ys);if(ymax==null)ymax=Math.max(...ys);if(ymax-ymin<.01)ymax=ymin+1;let h='<line x1="18" y1="187" x2="782" y2="187" stroke="#3a3f47"/><line x1="18" y1="18" x2="18" y2="187" stroke="#3a3f47"/>';for(const s of series){const path=svgPath(s.points,xmin,xmax,ymin,ymax);if(path)h+='<path d="'+path+'" fill="none" stroke="'+s.stroke+'" stroke-width="'+(s.width||1.7)+'" opacity="'+(s.opacity||1)+'"/>'}h+='<text x="24" y="16" fill="#aeb6c2" font-size="10">'+Number(ymax).toFixed(1)+'</text><text x="24" y="184" fill="#aeb6c2" font-size="10">'+Number(ymin).toFixed(1)+'</text>';svg.innerHTML=h}
 function renderCharts(run){if(!run)return;const combined=run.samples||[],raw=run.rawScaleSamples||[];const target=combined.map(s=>[Number(s.tMs)/1000,Number(s.targetFlowMlS)]),machine=combined.map(s=>[Number(s.tMs)/1000,Number(s.machineFlowMlS)]),decaid=combined.map(s=>[Number(s.tMs)/1000,Number(s.decaidWeightFlowGS)]);const rawSlope=[];for(let i=0;i<raw.length;i++){let j=i-1;while(j>0&&Number(raw[i].tMs)-Number(raw[j].tMs)<900)j--;if(j>=0){let reset=false;for(let k=j+1;k<=i;k++)if(raw[k].tareReset){reset=true;break}const dt=(Number(raw[i].scaleTimestampSeconds)-Number(raw[j].scaleTimestampSeconds));if(!reset&&Number.isFinite(dt)&&dt>.25){rawSlope.push([Number(raw[i].tMs)/1000,(Number(raw[i].weightG)-Number(raw[j].weightG))/dt])}}}const flowYs=[...target,...machine,...decaid,...rawSlope].map(p=>p[1]).filter(v=>Number.isFinite(v)&&v>-1&&v<20);const fymax=Math.max(6,flowYs.length?Math.min(12,Math.ceil(Math.max(...flowYs)+.5)):8);renderChart($('flowchart'),[{points:target,stroke:'#f0c75e',width:1.4},{points:machine,stroke:'#71a7ff',width:1.8},{points:decaid,stroke:'#c77dff',width:1.5,opacity:.8},{points:rawSlope,stroke:'#63d89b',width:2.1}],0,fymax);const wp=raw.map(r=>[Number(r.tMs)/1000,Number(r.weightG)]);if(wp.length){const wy=wp.map(p=>p[1]).filter(Number.isFinite);renderChart($('weightchart'),[{points:wp,stroke:'#e5e8ed',width:2}],Math.min(...wy),Math.max(...wy))}}
@@ -1854,18 +2130,48 @@ function validationRow(label,p){if(!p)return '<tr><td>'+label+'</td><td colspan=
 function advisoryClass(a){return !a?'':a.action==='HOLD'?'good':a.confidence==='INSUFFICIENT'?'bad':''}
 function advisoryRow(label,a){if(!a)return '<tr><td>'+label+'</td><td colspan=6>—</td></tr>';const ref=a.referenceCommandMlS==null?'—':a.referenceCommandMlS;const range=a.referenceRangeMlS&&a.referenceRangeMlS.length===2?(a.referenceRangeMlS[0]+'–'+a.referenceRangeMlS[1]):'—';return '<tr><td>'+label+'</td><td>'+esc(a.confidence)+'</td><td>'+esc(a.action)+'</td><td>'+esc(a.currentCommandMlS)+'</td><td>'+esc(ref)+'</td><td><b>'+esc(range)+'</b></td><td class="'+advisoryClass(a)+'">'+esc(a.message)+'</td></tr>'}
 function segCell(x){if(!x||x.slope==null)return '—';return '<b>'+esc(x.slope)+'</b> g/s · R² '+esc(x.r2)+' · '+esc(x.seconds)+'s'}
-function renderStability(s){if(!stability)return;const m=s&&s.stage1Startup,st=s&&s.stage3Stability;if(!m&&!st){stability.innerHTML='<span class="small">No S1/S3 stability diagnostics available yet.</span>';return}let h='';if(m){const cls=m.confidence==='INSUFFICIENT'?'bad':m.confidence==='MEDIUM'?'good':'';h+='<div style="margin-bottom:10px"><b>S1 STARTUP</b> · confidence <span class="'+cls+'">'+esc(m.confidence)+'</span><br>First cup rise: <b>'+esc(m.firstRiseDelayS)+' s</b> · 20–80% flow: <b>'+esc(m.midFlowGS)+' g/s</b> · R² '+esc(m.midR2)+' · transit '+esc(m.transit20to80S)+' s · active avg '+esc(m.activeFlowGS)+' g/s · collected '+esc(m.gainG)+' g</div>'}if(st){const sc=st.status==='STABLE'?'good':'bad';h+='<div><b>S3 STABILITY</b> · <span class="'+sc+'">'+esc(st.status)+'</span> · late/early '+esc(st.lateToEarlyRatio)+'<table><tr><th>EARLY 25%</th><th>MID 50%</th><th>LATE 25%</th><th>Stall window</th></tr><tr><td>'+segCell(st.early)+'</td><td>'+segCell(st.mid)+'</td><td>'+segCell(st.late)+'</td><td>'+(st.stall&&st.stall.suspected?'<span class="bad"><b>YES</b> '+esc(st.stall.startS)+'–'+esc(st.stall.endS)+'s · RAW '+esc(st.stall.rawSlopeGS)+' g/s while DE1 '+esc(st.stall.machineFlowMlS)+' ml/s</span>':'<span class="good">none</span>')+'</td></tr></table>'+(Array.isArray(st.shapeFrames)?'<div style="margin-top:8px"><b>S3 SHAPE FRAME RESULTS</b><table><tr><th>Frame</th><th>Command</th><th>RAW regression</th><th>R²</th><th>Window</th></tr>'+st.shapeFrames.map(x=>'<tr><td>'+esc(x.name)+'</td><td>'+esc(x.commandMlS)+' ml/s</td><td>'+esc(x.slope)+' g/s</td><td>'+esc(x.r2)+'</td><td>'+esc(x.seconds)+' s</td></tr>').join('')+'</table></div>':'')+'</div>'}stability.innerHTML=h}
+function renderStability(s){if(!stability)return;const m=s&&s.stage1Startup,st=s&&s.stage3Stability;if(!m&&!st){stability.innerHTML='<span class="small">No S1/S3 stability diagnostics available yet.</span>';return}let h='';if(m){const cls=m.confidence==='INSUFFICIENT'?'bad':m.confidence==='MEDIUM'?'good':'';h+='<div style="margin-bottom:10px"><b>S1 STARTUP</b> · confidence <span class="'+cls+'">'+esc(m.confidence)+'</span><br>First cup rise: <b>'+esc(m.firstRiseDelayS)+' s</b> · 20–80% flow: <b>'+esc(m.midFlowGS)+' g/s</b> · R² '+esc(m.midR2)+' · transit '+esc(m.transit20to80S)+' s · active avg '+esc(m.activeFlowGS)+' g/s · collected '+esc(m.gainG)+' g</div>'}if(st){const sc=st.status==='STABLE'?'good':'bad';h+='<div><b>S3 STABILITY</b> · <span class="'+sc+'">'+esc(st.status)+'</span> · late/early '+esc(st.lateToEarlyRatio)+'<table><tr><th>EARLY 25%</th><th>MID 50%</th><th>LATE 25%</th><th>Stall window</th></tr><tr><td>'+segCell(st.early)+'</td><td>'+segCell(st.mid)+'</td><td>'+segCell(st.late)+'</td><td>'+(st.stall&&st.stall.suspected?'<span class="bad"><b>YES</b> '+esc(st.stall.startS)+'–'+esc(st.stall.endS)+'s · RAW '+esc(st.stall.rawSlopeGS)+' g/s while DE1 '+esc(st.stall.machineFlowMlS)+' ml/s</span>':'<span class="good">none</span>')+'</td></tr></table>'+(Array.isArray(st.shapeFrames)?'<div style="margin-top:8px"><b>LATEST SHOT · S3 FRAME MEASUREMENTS</b><div class="small">The Command column is the command captured for this completed shot, not the current NEXT SHOT profile.</div><table><tr><th>Frame</th><th>SHOT command</th><th>MEASURED RAW regression</th><th>R²</th><th>Window</th></tr>'+st.shapeFrames.map(x=>'<tr><td>'+esc(x.name)+'</td><td>'+esc(x.commandMlS)+' ml/s</td><td>'+esc(x.slope)+' g/s</td><td>'+esc(x.r2)+'</td><td>'+esc(x.seconds)+' s</td></tr>').join('')+'</table></div>':'')+'</div>'}stability.innerHTML=h}
 function renderAdvisory(s){if(!advisory)return;const a=s&&s.advisory;if(!a){advisory.innerHTML='<span class="small">No advisory available yet. Run a complete HyperEx shot.</span>';return}advisory.innerHTML='<table><tr><th>Stage</th><th>Confidence</th><th>Action</th><th>Current cmd</th><th>Mid ref</th><th>Reference Range</th><th>Advice</th></tr>'+advisoryRow('S1',a.stage1)+advisoryRow('S2',a.stage2)+advisoryRow('S3',a.stage3)+'</table><div class="small" style="margin-top:8px">Range is deliberately only a partial step toward the theoretical correction. LOW confidence may still show a broad manual-test range; INSUFFICIENT never shows a numeric range.</div>'}
-function stageTestRow(label,key,c,a){const mode=(c&&c[key+'Mode'])||'auto';const lut=c&&c[key+'LutCommandMlS']!=null?c[key+'LutCommandMlS']:'—';const eff=c&&c[key+'CommandMlS']!=null?c[key+'CommandMlS']:lut;const adv=a&&a[key];const rr=adv&&adv.referenceRangeMlS&&adv.referenceRangeMlS.length===2?(adv.referenceRangeMlS[0]+'–'+adv.referenceRangeMlS[1]):'—';const shapeOpt=(key==='stage3'&&mode==='shape')?'<option value="shape" selected disabled>SHAPE ACTIVE ↓</option>':'';return '<tr><td>'+label+'</td><td>'+esc(c&&c[key+'DesiredGS'])+'</td><td>'+esc(lut)+'</td><td>'+esc(rr)+'</td><td><select id="mode_'+key+'">'+shapeOpt+'<option value="auto" '+(mode==='auto'?'selected':'')+'>AUTO / LUT</option><option value="manual" '+(mode==='manual'?'selected':'')+'>MANUAL TEST</option></select></td><td><input id="cmd_'+key+'" type="number" min="0.10" max="8.00" step="0.01" value="'+esc(eff)+'" style="width:85px"></td><td><b>'+esc(eff)+'</b></td></tr>'}
-function shapeSuggestion(c,st){const a=latestNextShotAdaptive&&latestNextShotAdaptive.s3;if(a&&a.usable&&a.suggestedShape){const q=a.suggestedShape;return {early:Number(q.earlyCommand),earlySeconds:Number(q.earlySeconds),mid:Number(q.midCommand),midSeconds:Number(q.midSeconds),late:Number(q.lateCommand),source:'NEXT SHOT ADAPTIVE'}}if(a&&a.action&&(a.action==='REPEAT SAME SHAPE'||a.action==='VARIABLE / REPEAT'))return null;const cur=Number(c&&c.stage3CommandMlS);if(!Number.isFinite(cur))return null;let early=cur,mid=cur,late=cur;if(st&&(st.status==='LATE DECAY'||(st.stall&&st.stall.suspected))){early=Math.max(.10,cur*.97);late=Math.min(8,cur*(st.stall&&st.stall.suspected?1.15:1.08));}return {early:Number(early.toFixed(3)),earlySeconds:8,mid:Number(mid.toFixed(3)),midSeconds:14,late:Number(late.toFixed(3)),source:'FALLBACK'}}
-function renderAdaptive(s){latestAdaptiveSummary=s||null;if(!adaptive)return;const a=s&&s.nextShotAdaptive;if(!a){adaptive.innerHTML='<span class="small"><b>NEW INSTALL / NO PREVIOUS SHOT</b><br>Run a complete HyperEx validation shot. AUTO APPLY remains armed but will not change anything until an actionable verified suggestion exists.</span>';return}const s1=a.s1||{},s3=a.s3||{},ready=!!a.actionable;if(!a.usable){let h='<div class="small">Source run: <b>'+esc(a.runId)+'</b> · <b>'+esc(a.mode)+'</b></div><table><tr><th>Stage</th><th>Measured basis</th><th>Current</th><th>Next action</th><th>Confidence</th></tr>';h+='<tr><td>S1</td><td>—</td><td>'+esc(s1.currentCommandMlS)+' ml/s</td><td>repeat</td><td>'+esc(s1.confidence||'—')+'</td></tr>';if(s3.action){h+='<tr><td>S3 shape</td><td>'+esc(s3.action)+(s3.variabilityPct!=null?' · max variability '+esc(s3.variabilityPct)+'%':'')+'</td><td>'+((s3.sourceFrames||[]).map(x=>esc(x.commandMlS)).join(' → ')||'—')+'</td><td><b>REPEAT SAME SHAPE</b></td><td>'+esc(s3.confidence||'—')+'</td></tr>'}h+='</table><div class="small" style="margin-top:7px">'+esc(s3.reason||'No numeric S3 adjustment until repeated evidence is available.')+'<br>S3 rule: '+esc(s3.maxStepRule||'—')+'</div>';adaptive.innerHTML=h;return}let h='<div class="small">Source run: <b>'+esc(a.runId)+'</b> · <b>'+esc(a.mode)+'</b></div><table><tr><th>Stage</th><th>Measured basis</th><th>Current</th><th>Suggested next shot</th><th>Confidence</th></tr>';h+='<tr><td>S1</td><td>'+(s1.usable?esc(s1.measuredGS)+' g/s (20–80%)':'—')+'</td><td>'+esc(s1.currentCommandMlS)+' ml/s</td><td>'+(s1.usable?'<b>'+esc(s1.suggestedCommandMlS)+' ml/s</b>':'repeat')+'</td><td>'+esc(s1.confidence||'—')+'</td></tr>';if(s3.usable&&s3.suggestedShape){const q=s3.suggestedShape;h+='<tr><td>S3 shape</td><td>2-shot consensus · max variability '+esc(s3.variabilityPct)+'%<br>late/early '+esc(s3.lateToEarlyRatio)+' · '+esc(s3.status)+'</td><td>'+((s3.sourceFrames||[]).map(x=>esc(x.commandMlS)).join(' → ')||'—')+'</td><td><b>'+esc(q.earlyCommand)+' × '+esc(q.earlySeconds)+'s → '+esc(q.midCommand)+' × '+esc(q.midSeconds)+'s → '+esc(q.lateCommand)+'</b></td><td>'+esc(s3.confidence||'—')+'</td></tr>'}else if(s3.action){h+='<tr><td>S3 shape</td><td>'+esc(s3.action)+(s3.variabilityPct!=null?' · max variability '+esc(s3.variabilityPct)+'%':'')+'</td><td>'+((s3.sourceFrames||[]).map(x=>esc(x.commandMlS)).join(' → ')||'—')+'</td><td><b>repeat same shape</b></td><td>'+esc(s3.confidence||'—')+'</td></tr>'}h+='</table><div class="small" style="margin-top:7px">'+esc(a.note||'')+'<br>S1 rule: '+esc(s1.maxStepRule||'—')+'<br>S3 rule: '+esc(s3.maxStepRule||'—')+'</div>'+(ready?(latestAutoApplyEnabled?'<div class="row"><span class="good"><b>AUTO APPLY ON</b></span><span class="small" style="align-self:center">This actionable verified suggestion is auto-applied after the completed shot; no button press is required.</span></div>':'<div class="row"><button id="applynext" class="b primaryAction">APPLY NEXT SHOT</button><span class="small" style="align-self:center">AUTO APPLY is OFF · v0.1.39 manual confirmation flow.</span></div>'):'<div class="small" style="margin-top:8px"><b>NO ACTIONABLE CHANGE</b> · keep the current effective settings and collect the required repeat evidence.</div>');adaptive.innerHTML=h;const q=$('applynext');if(q)q.onclick=async()=>{if(!confirm('Apply the bounded NEXT SHOT adaptive suggestion?\\n\\nThis changes only manual-test/profile-time commands for the next HyperEx shot. It does NOT modify the calibration LUT and does NOT change a running shot.'))return;try{const r=await post('adaptive-next-apply',{});const cf=r&&r.commandFlows||{};const sh=cf.s3Shape||{};if(r&&r.verified!==true)throw new Error('server did not verify the applied override');let msg='Next-shot suggestion VERIFIED and applied.';if(sh.enabled)msg+='\\n\\nS3 SHAPE ACTIVE: '+sh.earlyCommand+' × '+sh.earlySeconds+'s → '+sh.midCommand+' × '+sh.midSeconds+'s → '+sh.lateCommand;msg+='\\n\\nRun another EMPTY-BASKET HyperEx validation before treating the result as settled.';alert(msg);await loadDiag()}catch(e){alert('Apply next shot failed: '+e)}}}
+function stageTestRow(label,key,c,a){const mode=(c&&c[key+'Mode'])||'auto';const lut=c&&c[key+'LutCommandMlS']!=null?c[key+'LutCommandMlS']:'—';const eff=c&&c[key+'CommandMlS']!=null?c[key+'CommandMlS']:lut;const editor=(key==='stage3'&&c&&c.stage3FlatCommandMlS!=null)?c.stage3FlatCommandMlS:eff;const applied=(key==='stage3'&&mode==='shape')?appliedS3Text(c):esc(eff)+' ml/s';const adv=a&&a[key];const rr=adv&&adv.referenceRangeMlS&&adv.referenceRangeMlS.length===2?(adv.referenceRangeMlS[0]+'–'+adv.referenceRangeMlS[1]):'—';const shapeOpt=(key==='stage3'&&mode==='shape')?'<option value="shape" selected disabled>SHAPE ACTIVE ↓</option>':'';return '<tr><td>'+label+'</td><td>'+esc(c&&c[key+'DesiredGS'])+'</td><td>'+esc(lut)+'</td><td>'+esc(rr)+'</td><td><select id="mode_'+key+'">'+shapeOpt+'<option value="auto" '+(mode==='auto'?'selected':'')+'>AUTO / LUT</option><option value="manual" '+(mode==='manual'?'selected':'')+'>MANUAL TEST</option></select></td><td><input id="cmd_'+key+'" type="number" min="0.10" max="8.00" step="0.01" value="'+esc(editor)+'" style="width:85px"></td><td><b>'+applied+'</b></td></tr>'}
+function shapeSuggestion(c,st){const a=latestNextShotAdaptive&&latestNextShotAdaptive.s3;if(a&&a.usable&&a.suggestedShape){const q=a.suggestedShape;return {early:Number(q.earlyCommand),earlySeconds:Number(q.earlySeconds),mid:Number(q.midCommand),midSeconds:Number(q.midSeconds),late:Number(q.lateCommand),source:'NEXT SHOT ADAPTIVE'}}if(a&&a.action&&String(a.action).includes('REPEAT'))return null;const cur=Number(c&&c.stage3CommandMlS);if(!Number.isFinite(cur))return null;let early=cur,mid=cur,late=cur;if(st&&(st.status==='LATE DECAY'||(st.stall&&st.stall.suspected))){early=Math.max(.10,cur*.97);late=Math.min(8,cur*(st.stall&&st.stall.suspected?1.15:1.08));}return {early:Number(early.toFixed(3)),earlySeconds:8,mid:Number(mid.toFixed(3)),midSeconds:14,late:Number(late.toFixed(3)),source:'FALLBACK'}}
+function renderAdaptive(s){
+  latestAdaptiveSummary=s||null;
+  if(!adaptive)return;
+  const a=s&&s.nextShotAdaptive;
+  if(!a){adaptive.innerHTML='<span class="small"><b>WAITING FOR SHOT EVIDENCE</b><br>After STEP 1 calibration is valid, run HyperEx normally. The plugin will collect completed-shot evidence and adjust only the next shot when its safety gates pass.</span>';return}
+  const s1=a.s1||{},s2=a.s2||{},s3=a.s3||{},ready=!!a.actionable,st=latestAutoApplyStatus||{};
+  const appliedForRun=String(st.runId||'')===String(a.runId||'')&&(st.status==='applied'||st.status==='manual-applied');
+  const failedForRun=String(st.runId||'')===String(a.runId||'')&&st.status==='error';
+  const scalarRow=(label,x,basis)=>{let measured=x.measuredGS==null?'—':esc(x.measuredGS)+' g/s';if(x.previousGS!=null&&x.currentGS!=null)measured=esc(x.previousGS)+' → '+esc(x.currentGS)+' g/s · mean '+esc(x.measuredGS);let proposed='repeat';if(x.action==='HOLD')proposed='<span class="good"><b>HOLD '+esc(x.currentCommandMlS)+' ml/s</b></span>';else if(x.action==='ADJUST')proposed='<b>'+esc(x.suggestedCommandMlS)+' ml/s</b>';else if(x.action)proposed='<b>'+esc(x.action)+'</b>';return '<tr><td>'+label+'</td><td>'+basis+'<br>'+measured+(x.variabilityPct!=null?' · var '+esc(x.variabilityPct)+'%':'')+'</td><td>'+esc(x.currentCommandMlS)+' ml/s</td><td>'+proposed+'</td><td>'+esc(x.confidence||'—')+'</td></tr>'};
+  let h='<div class="small">Source run: <b>'+esc(a.runId)+'</b> · <b>'+esc(a.mode)+'</b> · all numeric changes below apply to the <b>NEXT SHOT ONLY</b>.</div><table><tr><th>Stage</th><th>Evidence</th><th>SHOT command</th><th>NEXT action / command</th><th>Confidence</th></tr>';
+  h+=scalarRow('S1',s1,'startup 20–80%');
+  h+=scalarRow('S2',s2,'RAW multi-second regression');
+  let s3meas=s3.overallGS==null?'—':('overall '+esc(s3.overallGS)+' g/s');
+  if(s3.levelErrorPct!=null)s3meas+=' · LEVEL error '+esc(s3.levelErrorPct)+'%';
+  if(s3.variabilityPct!=null)s3meas+=' · max var '+esc(s3.variabilityPct)+'%';
+  let s3shot=(s3.sourceFrames||[]).map(x=>esc(x.commandMlS)).join(' → ')||'—';
+  let s3next='<b>'+esc(s3.action||'REPEAT')+'</b>';
+  if(s3.suggestedShape){const q=s3.suggestedShape;s3next='<b>'+esc(q.earlyCommand)+' × '+esc(q.earlySeconds)+'s → '+esc(q.midCommand)+' × '+esc(q.midSeconds)+'s → '+esc(q.lateCommand)+'</b>';if(s3.levelFactor!=null)s3next+='<br><span class="small">LEVEL ×'+esc(s3.levelFactor)+' · normalized SHAPE '+(s3.shapeFactors||[]).map(x=>'×'+esc(x)).join(' / ')+'</span>'}
+  h+='<tr><td>S3</td><td>'+s3meas+'<br>late/early '+esc(s3.lateToEarlyRatio)+' · '+esc(s3.status||'—')+'</td><td>'+s3shot+'</td><td>'+s3next+'</td><td>'+esc(s3.confidence||'—')+'</td></tr>';
+  h+='</table><div class="small" style="margin-top:7px">'+esc(a.note||'')+'<br>S1: '+esc(s1.maxStepRule||s1.reason||'—')+'<br>S2: '+esc(s2.maxStepRule||s2.reason||'—')+'<br>S3: '+esc(s3.maxStepRule||s3.reason||'—')+'</div>';
+  if(ready){
+    if(latestAutoApplyEnabled){
+      if(appliedForRun)h+='<div class="row"><span class="good"><b>APPLIED ✓ TO NEXT SHOT</b></span><span class="small" style="align-self:center">Readback and profile sync completed. The NEXT SHOT · APPLIED PROFILE block above is authoritative.</span></div>';
+      else if(failedForRun)h+='<div class="row"><span class="bad"><b>NOT APPLIED</b></span><span class="small" style="align-self:center">AUTO APPLY failed safely: '+esc(st.message||'unknown error')+'. Previous profile retained.</span></div>';
+      else h+='<div class="row"><span><b>AUTO APPLY ARMED</b></span><span class="small" style="align-self:center">An actionable proposal exists; wait for successful APPLIED readback before treating it as current.</span></div>';
+    }else h+='<div class="row"><button id="applynext" class="b primaryAction">APPLY NEXT SHOT</button><span class="small" style="align-self:center">AUTO APPLY is OFF.</span></div>';
+  }else h+='<div class="small" style="margin-top:8px"><b>NO NUMERIC CHANGE YET</b> · the plugin keeps the current profile until the required repeated evidence agrees.</div>';
+  adaptive.innerHTML=h;
+  const q=$('applynext');
+  if(q)q.onclick=async()=>{if(!confirm('Apply the bounded NEXT SHOT adaptive suggestion?\\n\\nThis changes only future-shot profile commands. It does NOT modify the calibration LUT and does NOT change a running shot.'))return;try{const r=await post('adaptive-next-apply',{});if(r&&r.verified!==true)throw new Error('server did not verify the applied override');alert('Next-shot suggestion VERIFIED and applied.\\n\\nThe NEXT SHOT · APPLIED PROFILE block is authoritative.');await loadDiag()}catch(e){alert('Apply next shot failed: '+e)}}
+}
 function renderAutoApplyBox(){const box=$('autoapplybox');if(!box)return;const on=!!latestAutoApplyEnabled;const st=latestAutoApplyStatus||{};let status=st.message?('<span class="small">Last: '+esc(st.message)+(st.runId?' · '+esc(st.runId):'')+'</span>'):'';box.innerHTML='<div class="row"><button id="autoapplytoggle" class="b '+(on?'primaryAction':'tertiaryAction')+'">AUTO APPLY NEXT SHOT: '+(on?'ON':'OFF')+'</button><span class="small" style="align-self:center">'+(on?'Default mode · verified actionable suggestions apply automatically.':'Manual mode · enter DIAG and press APPLY NEXT SHOT when a numeric suggestion is available.')+'</span></div>'+status;const q=$('autoapplytoggle');if(q)q.onclick=async()=>{const next=!latestAutoApplyEnabled;if(!confirm((next?'Enable':'Disable')+' AUTO APPLY NEXT SHOT?\\n\\n'+(next?'Verified actionable suggestions will apply automatically after completed HyperEx shots.':'The plugin will return to the v0.1.39 manual APPLY NEXT SHOT workflow.')))return;try{const r=await post('adaptive-auto-set',{enabled:next});latestAutoApplyEnabled=!!r.autoApplyNextShot;latestAutoApplyStatus=r.autoApplyLastStatus||null;renderAutoApplyBox();renderAdaptive(latestAdaptiveSummary)}catch(e){alert('AUTO APPLY setting failed: '+e)}}}
-function renderS3Shape(c,st){if(!s3shape)return;const saved=c&&c.s3Shape&&c.s3Shape.enabled?c.s3Shape:null;const sug=shapeSuggestion(c,st);const q=saved||sug||{early:c.stage3CommandMlS,earlySeconds:8,mid:c.stage3CommandMlS,midSeconds:14,late:c.stage3CommandMlS};const ap=latestNextShotAdaptive&&latestNextShotAdaptive.s3;const hint=(ap&&ap.action&&(ap.action==='REPEAT SAME SHAPE'||ap.action==='VARIABLE / REPEAT'))?('NEXT SHOT: '+ap.action+' · keep the current shape unchanged until repeated evidence is consistent.'):('Suggested '+(sug&&sug.source==='NEXT SHOT ADAPTIVE'?'from NEXT SHOT ADAPTIVE':'from latest LATE DECAY')+': '+(sug?(sug.early+' × '+sug.earlySeconds+'s → '+sug.mid+' × '+sug.midSeconds+'s → '+sug.late):'—'));s3shape.innerHTML='<b>S3 SHAPE TEST</b> · profile-time only, no extra skipStep<table><tr><th>Mode</th><th>EARLY cmd</th><th>EARLY time</th><th>MID cmd</th><th>MID time</th><th>LATE cmd</th></tr><tr><td><select id="s3shape_mode"><option value="off" '+(!saved?'selected':'')+'>FLAT</option><option value="decay" '+(saved?'selected':'')+'>DECAY COMP TEST</option></select></td><td><input id="s3shape_early" type="number" min=".10" max="8" step=".01" value="'+esc(q.earlyCommand??q.early)+'" style="width:76px"></td><td><input id="s3shape_early_s" type="number" min="3" max="30" step="1" value="'+esc(q.earlySeconds)+'" style="width:62px"> s</td><td><input id="s3shape_mid" type="number" min=".10" max="8" step=".01" value="'+esc(q.midCommand??q.mid)+'" style="width:76px"></td><td><input id="s3shape_mid_s" type="number" min="3" max="30" step="1" value="'+esc(q.midSeconds)+'" style="width:62px"> s</td><td><input id="s3shape_late" type="number" min=".10" max="8" step=".01" value="'+esc(q.lateCommand??q.late)+'" style="width:76px"></td></tr></table><div class="small">Commands must be non-decreasing. Adjacent rises are bounded to ≤35% and ≤0.25 ml/s. '+hint+' The shape is enabled automatically only when AUTO APPLY is ON and a verified actionable adaptive suggestion passes all safety checks.</div>'}
-function renderTestCommands(c,a){if(!testcommands)return;testcommands.innerHTML='<table><tr><th>Stage</th><th>Target g/s</th><th>LUT cmd</th><th>Ref range</th><th>Mode</th><th>Test cmd</th><th>Effective</th></tr>'+stageTestRow('S1','stage1',c,a)+stageTestRow('S2','stage2',c,a)+stageTestRow('S3','stage3',c,a)+'</table><div class="small" style="margin-top:7px">DE1 command hard limit: 0.10–8.00 ml/s. MANUAL TEST changes only the HyperEx profile command; calibration LUT data remains untouched. If S3 DECAY COMP is enabled, its three shape commands override the flat S3 command.</div>';renderS3Shape(c,latestStage3Stability)}
+function renderS3Shape(c,st){if(!s3shape)return;const saved=c&&c.s3Shape&&c.s3Shape.enabled?c.s3Shape:null;const sug=shapeSuggestion(c,st);const q=saved||sug||{early:c.stage3CommandMlS,earlySeconds:8,mid:c.stage3CommandMlS,midSeconds:14,late:c.stage3CommandMlS};const ap=latestNextShotAdaptive&&latestNextShotAdaptive.s3;const hint=(ap&&ap.action&&(ap.action==='REPEAT SAME SHAPE'||ap.action==='VARIABLE / REPEAT'))?('NEXT SHOT: '+ap.action+' · keep the current shape unchanged until repeated evidence is consistent.'):('Suggested '+(sug&&sug.source==='NEXT SHOT ADAPTIVE'?'from NEXT SHOT ADAPTIVE':'from latest LATE DECAY')+': '+(sug?(sug.early+' × '+sug.earlySeconds+'s → '+sug.mid+' × '+sug.midSeconds+'s → '+sug.late):'—'));s3shape.innerHTML='<b>S3 SHAPE OVERRIDE EDITOR</b> · profile-time only, no extra skipStep<div class="small">'+(saved?'<span class="good"><b>APPLIED SHAPE</b></span> · inputs below are loaded from the current applied override.':'<b>NOT APPLIED</b> · inputs below are only a TEST/PROPOSED editor until APPLY TEST COMMANDS succeeds.')+'</div><table><tr><th>Mode</th><th>EARLY cmd</th><th>EARLY time</th><th>MID cmd</th><th>MID time</th><th>LATE cmd</th></tr><tr><td><select id="s3shape_mode"><option value="off" '+(!saved?'selected':'')+'>FLAT</option><option value="decay" '+(saved?'selected':'')+'>DECAY COMP TEST</option></select></td><td><input id="s3shape_early" type="number" min=".10" max="8" step=".01" value="'+esc(q.earlyCommand??q.early)+'" style="width:76px"></td><td><input id="s3shape_early_s" type="number" min="3" max="30" step="1" value="'+esc(q.earlySeconds)+'" style="width:62px"> s</td><td><input id="s3shape_mid" type="number" min=".10" max="8" step=".01" value="'+esc(q.midCommand??q.mid)+'" style="width:76px"></td><td><input id="s3shape_mid_s" type="number" min="3" max="30" step="1" value="'+esc(q.midSeconds)+'" style="width:62px"> s</td><td><input id="s3shape_late" type="number" min=".10" max="8" step=".01" value="'+esc(q.lateCommand??q.late)+'" style="width:76px"></td></tr></table><div class="small">Commands must be non-decreasing. Adjacent rises are bounded to ≤35% and ≤0.25 ml/s. '+hint+' The shape is enabled automatically only when AUTO APPLY is ON and a verified actionable adaptive suggestion passes all safety checks.</div>'}
+function renderTestCommands(c,a){if(!testcommands)return;testcommands.innerHTML='<table><tr><th>Stage</th><th>Target g/s</th><th>LUT cmd</th><th>Ref range</th><th>Editor mode</th><th>Editor flat cmd</th><th>CURRENTLY APPLIED</th></tr>'+stageTestRow('S1','stage1',c,a)+stageTestRow('S2','stage2',c,a)+stageTestRow('S3','stage3',c,a)+'</table><div class="small" style="margin-top:7px">DE1 command hard limit: 0.10–8.00 ml/s. MANUAL TEST changes only the HyperEx profile command; calibration LUT data remains untouched. If S3 DECAY COMP is enabled, its three shape commands override the flat S3 command.</div>';renderS3Shape(c,latestStage3Stability)}
 async function applyTestCommands(){const stages={};for(const key of ['stage1','stage2','stage3']){const mode=$('mode_'+key).value;const command=Number($('cmd_'+key).value);if(mode==='manual'&&(!Number.isFinite(command)||command<0.10||command>8.00)){alert(key.toUpperCase()+' manual command must be 0.10–8.00 ml/s.');return}stages[key]={mode,command}}const sm=$('s3shape_mode');const s3Shape={enabled:!!sm&&sm.value==='decay',earlyCommand:Number($('s3shape_early').value),earlySeconds:Number($('s3shape_early_s').value),midCommand:Number($('s3shape_mid').value),midSeconds:Number($('s3shape_mid_s').value),lateCommand:Number($('s3shape_late').value)};if(s3Shape.enabled){if([s3Shape.earlyCommand,s3Shape.midCommand,s3Shape.lateCommand].some(x=>!Number.isFinite(x)||x<.10||x>8)){alert('S3 shape commands must be 0.10–8.00 ml/s.');return}if(s3Shape.earlyCommand>s3Shape.midCommand||s3Shape.midCommand>s3Shape.lateCommand){alert('S3 DECAY COMP commands must be non-decreasing: EARLY ≤ MID ≤ LATE.');return}if(!Number.isFinite(s3Shape.earlySeconds)||s3Shape.earlySeconds<3||s3Shape.earlySeconds>30||!Number.isFinite(s3Shape.midSeconds)||s3Shape.midSeconds<3||s3Shape.midSeconds>30){alert('S3 EARLY/MID times must be 3–30 seconds.');return}}if(!confirm('Apply these TEST commands to HyperEx?\\n\\nS1/S2/manual flat commands are static. S3 DECAY COMP, if enabled, advances only by profile time and adds NO plugin skipStep calls. Calibration LUT remains unchanged. Use empty-basket validation first.'))return;try{await post('test-command-set',{stages,s3Shape});await loadDiag()}catch(e){alert('Apply failed: '+e)}}
 async function returnAllToLut(){if(!confirm('Return S1/S2/S3 to AUTO / LUT and clear all manual test overrides, including S3 shape?'))return;try{await post('test-command-clear',{});await loadDiag()}catch(e){alert('Reset failed: '+e)}}
 
-async function loadDiag(){b.style.display='none';copy.style.display='block';diag.style.display='block';t.textContent='DIAGNOSTICS / FLOW CAL';d.textContent='Stable three-stage HyperEx execution. Scale regression is advisory only; optional S3 shape tests advance by profile time and never add plugin skipStep calls.';try{const jr=await fetch(base+'/diagnostics');if(jr.ok){const j=await jr.json(),s=j.summary||{};renderCharts(j.run);if(s.kind==='hyperex'){validation.innerHTML=stat('S1 target / RAW reg',(s.stage1?(esc(s.stage1.desiredRealFlowGS)+' / '+esc(s.stage1.rawRegressionGS)):'—'))+stat('S2 target / RAW reg',(s.stage2?(esc(s.stage2.desiredRealFlowGS)+' / '+esc(s.stage2.rawRegressionGS)):'—'))+stat('S3 target / RAW reg',(s.stage3?(esc(s.stage3.desiredRealFlowGS)+' / '+esc(s.stage3.rawRegressionGS)):'—'));validationtable.innerHTML='<table><tr><th>Stage</th><th>Target g/s</th><th>DE1 Flow</th><th>Decaid</th><th>RAW regression</th><th>R²</th><th>Window</th><th>Status / error</th></tr>'+validationRow('S1',s.stage1)+validationRow('S2',s.stage2)+validationRow('S3',s.stage3)+'</table>';latestAdvisorySummary=s.advisory||null;latestStage3Stability=s.stage3Stability||null;latestNextShotAdaptive=s.nextShotAdaptive||null;renderStability(s);renderAdaptive(s);renderAdvisory(s)}else{validation.innerHTML=stat('LATEST RUN',s.kind||'calibration');validationtable.innerHTML='<span class="small">Latest diagnostic run is not a HyperEx shot. Run HyperEx to populate current-shot validation.</span>';latestAdvisorySummary=null;latestStage3Stability=null;latestNextShotAdaptive=null;latestAdaptiveSummary=null;if(stability)stability.innerHTML='<span class="small">S1/S3 stability diagnostics are generated only from a HyperEx shot.</span>';if(adaptive)adaptive.innerHTML='<span class="small"><b>NEW INSTALL / NO PREVIOUS SHOT</b><br>Run one complete HyperEx validation shot to generate the first next-shot suggestion.</span>';if(advisory)advisory.innerHTML='<span class="small">Reference advice is generated only from a HyperEx shot.</span>'}stats.innerHTML=stat('RAW SCALE WEIGHT',s.lastRawScaleWeightG??'—')+stat('RAW instantaneous dW/dt',s.lastRawScaleDwDtGS??'—')+stat('Decaid weightFlow',s.lastDecaidWeightFlowGS??'—')+stat('RUN RESULT',s.result||'—')+stat('COMBINED SAMPLES',s.sampleCount||0)+stat('RAW SCALE SAMPLES',s.rawScaleSampleCount||0);m.textContent=(s.result||'')+' · '+(s.sampleCount||0)+' combined · '+(s.rawScaleSampleCount||0)+' raw scale';const cr=await fetch(base+'/diagnostics-csv');if(cr.ok)csv.value=await cr.text();}else{validation.innerHTML=stat('LAST RUN','none yet');validationtable.innerHTML='';latestAdaptiveSummary=null;if(stability)stability.innerHTML='';if(adaptive)adaptive.innerHTML='<span class="small"><b>NEW INSTALL / NO PREVIOUS SHOT</b><br>Run one complete HyperEx validation shot to generate the first next-shot suggestion.</span>';if(advisory)advisory.innerHTML='';stats.innerHTML=''}}catch(e){validation.innerHTML=stat('DIAG ERROR',esc(e));validationtable.innerHTML='';latestAdaptiveSummary=null;if(stability)stability.innerHTML='';if(adaptive)adaptive.innerHTML='';if(advisory)advisory.innerHTML='';stats.innerHTML=''}await loadCal();await loadAdvancedSettings()}
+async function loadDiag(){b.style.display='none';copy.style.display='block';diag.style.display='block';t.textContent='DIAGNOSTICS / FLOW CAL';d.textContent='STEP 1 calibrates the physical real-flow LUT. STEP 2 measures every completed shot and automatically adapts S1/S2/S3 for the next shot only. STEP 3 is manual engineering; STEP 4 exports CSV.';try{const jr=await fetch(base+'/diagnostics');if(jr.ok){const j=await jr.json(),s=j.summary||{};renderCharts(j.run);renderRunCommands(s);if(s.kind==='hyperex'){validation.innerHTML=stat('S1 target / RAW reg',(s.stage1?(esc(s.stage1.desiredRealFlowGS)+' / '+esc(s.stage1.rawRegressionGS)):'—'))+stat('S2 target / RAW reg',(s.stage2?(esc(s.stage2.desiredRealFlowGS)+' / '+esc(s.stage2.rawRegressionGS)):'—'))+stat('S3 target / RAW reg',(s.stage3?(esc(s.stage3.desiredRealFlowGS)+' / '+esc(s.stage3.rawRegressionGS)):'—'));validationtable.innerHTML='<table><tr><th>Stage</th><th>Target g/s</th><th>DE1 Flow</th><th>Decaid</th><th>RAW regression</th><th>R²</th><th>Window</th><th>Status / error</th></tr>'+validationRow('S1',s.stage1)+validationRow('S2',s.stage2)+validationRow('S3',s.stage3)+'</table>';latestAdvisorySummary=s.advisory||null;latestStage3Stability=s.stage3Stability||null;latestNextShotAdaptive=s.nextShotAdaptive||null;renderStability(s);renderAdaptive(s);renderAdvisory(s)}else{validation.innerHTML=stat('LATEST RUN',s.kind||'calibration');validationtable.innerHTML='<span class="small">Latest diagnostic run is not a HyperEx shot. Run HyperEx to populate current-shot validation.</span>';latestAdvisorySummary=null;latestStage3Stability=null;latestNextShotAdaptive=null;latestAdaptiveSummary=null;if(stability)stability.innerHTML='<span class="small">S1/S3 stability diagnostics are generated only from a HyperEx shot.</span>';if(adaptive)adaptive.innerHTML='<span class="small"><b>NEW INSTALL / NO PREVIOUS SHOT</b><br>Run one complete HyperEx validation shot to generate the first next-shot suggestion.</span>';if(advisory)advisory.innerHTML='<span class="small">Reference advice is generated only from a HyperEx shot.</span>'}stats.innerHTML=stat('RAW SCALE WEIGHT',s.lastRawScaleWeightG??'—')+stat('RAW instantaneous dW/dt',s.lastRawScaleDwDtGS??'—')+stat('Decaid weightFlow',s.lastDecaidWeightFlowGS??'—')+stat('RUN RESULT',s.result||'—')+stat('COMBINED SAMPLES',s.sampleCount||0)+stat('RAW SCALE SAMPLES',s.rawScaleSampleCount||0);m.textContent=(s.result||'')+' · '+(s.sampleCount||0)+' combined · '+(s.rawScaleSampleCount||0)+' raw scale';const cr=await fetch(base+'/diagnostics-csv');if(cr.ok)csv.value=await cr.text();}else{renderRunCommands(null);validation.innerHTML=stat('LAST RUN','none yet');validationtable.innerHTML='';latestAdaptiveSummary=null;if(stability)stability.innerHTML='';if(adaptive)adaptive.innerHTML='<span class="small"><b>NEW INSTALL / NO PREVIOUS SHOT</b><br>Run one complete HyperEx validation shot to generate the first next-shot suggestion.</span>';if(advisory)advisory.innerHTML='';stats.innerHTML=''}}catch(e){if(runcommands)runcommands.innerHTML='<span class="bad">Latest-shot command snapshot unavailable: '+esc(e)+'</span>';validation.innerHTML=stat('DIAG ERROR',esc(e));validationtable.innerHTML='';latestAdaptiveSummary=null;if(stability)stability.innerHTML='';if(adaptive)adaptive.innerHTML='';if(advisory)advisory.innerHTML='';stats.innerHTML=''}await loadCal();await loadAdvancedSettings()}
 const saveAdv=$('saveadvanced');if(saveAdv)saveAdv.onclick=saveAdvancedSettings;$('applytest').onclick=applyTestCommands;$('returnlut').onclick=returnAllToLut;
 $('prepare').onclick=async()=>{let c={calibrationModeLabel:'Low Water',calibrationSteps:9,calibrationStepSeconds:7.5,nominalCommandWaterMl:95,recommendedContainerMl:300,calibrationHardStopG:240,primeFlow:3,primeSeconds:3,waterPreflight:{status:'unknown',available:false,message:'Tank level unavailable'}};try{const rr=await fetch(base+'/calibration-status');if(rr.ok)c=await rr.json()}catch(_){}const w=c.waterPreflight||{};if(w.status==='block'){alert('WATER PREFLIGHT BLOCKED.\\n\\n'+(w.message||'DE1 tank level is too close to/below the refill threshold.')+'\\n\\nRefill the tank and try again.');return}let allowUnknown=false;if(w.status==='unknown'||!w.available){if(!confirm('DE1 tank level is unavailable or stale.\\n\\nThe plugin cannot verify tank water automatically. Continue only if you have manually checked the tank.'))return;allowUnknown=true}else if(w.status==='warn'){if(!confirm('DE1 tank water margin is low.\\n\\n'+(w.message||'')+'\\n\\nContinue anyway?'))return}const msg='EMPTY BASKET ONLY · '+c.calibrationModeLabel+' CALIBRATION.\\n\\nPrime '+c.primeFlow+' ml/s × '+c.primeSeconds+' s, then '+c.calibrationSteps+' target/search plateaus × '+c.calibrationStepSeconds+' s.\\nNominal DE1 commanded water: ≈'+c.nominalCommandWaterMl+' ml.\\nActual-water safety stop: ≈'+c.calibrationHardStopG+' g.\\n\\nUse a '+c.recommendedContainerMl+' ml or larger catch vessel.\\nTare the scale, then start Espresso manually. Do not remove the vessel until Idle.\\n\\nContinue?';if(!confirm(msg))return;try{await post('calibration-prepare',{allowUnknownWater:allowUnknown,allowLowMargin:w.status==='warn'});alert(c.calibrationModeLabel+' calibration profile selected. EMPTY BASKET. Tare scale, start Espresso, and leave the vessel in place until Idle.');await loadCal()}catch(e){alert('Prepare failed: '+e)}};
 $('sync').onclick=async()=>{try{await post('calibration-sync',{});await loadCal()}catch(e){alert('Sync failed: '+e)}};
@@ -1873,7 +2179,7 @@ $('suggested').onclick=async()=>{try{await post('calibration-use-suggested',{});
 $('global').onclick=async()=>{if(!confirm('This changes DE1 flowMultiplier globally for ALL profiles. The current value will be saved for Restore. After applying, run Flow Cal again. Continue?'))return;try{await post('calibration-apply-global',{});alert('Global multiplier applied. Run Flow Cal again before using the LUT.');await loadCal()}catch(e){alert('Global apply failed: '+e)}};
 $('restore').onclick=async()=>{if(!confirm('Restore the DE1 flowMultiplier saved before the last global apply?'))return;try{await post('calibration-restore-global',{});await loadCal()}catch(e){alert('Restore failed: '+e)}};
 $('clearcal').onclick=async()=>{if(!confirm('Clear the saved real-flow LUT? HyperEx will return to direct DE1 flow commands.'))return;try{await post('calibration-clear',{});await loadCal()}catch(e){alert('Clear failed: '+e)}};
-async function poll(){try{const r=await fetch(base+'/status');paint(await r.json())}catch(e){}setTimeout(poll,400)}b.onclick=()=>doRearm(false);copy.onclick=async()=>{csv.focus();csv.select();try{await navigator.clipboard.writeText(csv.value);copy.textContent='COPIED'}catch(e){document.execCommand('copy');copy.textContent='SELECTED / COPIED'}setTimeout(()=>copy.textContent='COPY CSV',1200)};function homeFallback(){try{if(window.top&&window.top!==window&&window.top.history&&window.top.history.length>1){window.top.history.back();return}}catch(_){}if(window.history&&window.history.length>2){window.history.go(-2);return}if(window.history&&window.history.length>1){window.history.back();return}try{if(window.top&&window.top!==window)window.top.location.href='/';else window.location.href='/'}catch(_){try{window.location.href='/'}catch(__){}}}function closeUi(){try{if(window.parent&&window.parent!==window)window.parent.postMessage({type:'streamline:close'},'*')}catch(_){}setTimeout(homeFallback,280)}$('close').textContent=view==='diag'?'CLOSE / HOME':'CLOSE';$('close').onclick=closeUi;if(view==='diag'){loadDiag()}else if(view==='rearm'){doRearm(true)}else{poll()}
+async function poll(){try{const r=await fetch(base+'/status');paint(await r.json())}catch(e){}setTimeout(poll,400)}b.onclick=()=>doRearm(false);copy.onclick=async()=>{csv.focus();csv.select();try{await navigator.clipboard.writeText(csv.value);copy.textContent='COPIED'}catch(e){document.execCommand('copy');copy.textContent='SELECTED / COPIED'}setTimeout(()=>copy.textContent='COPY CSV',1200)};function dashboardBack(){if(window.history&&window.history.length>1){window.history.back();return}homeFallback()}function homeFallback(){try{if(window.top&&window.top!==window&&window.top.history&&window.top.history.length>1){window.top.history.back();return}}catch(_){}if(window.history&&window.history.length>2){window.history.go(-2);return}if(window.history&&window.history.length>1){window.history.back();return}}function closeUi(){try{if(window.parent&&window.parent!==window)window.parent.postMessage({type:'streamline:close'},'*')}catch(_){}setTimeout(dashboardEntry?dashboardBack:homeFallback,280)}$('close').textContent=diagView?'CLOSE / HOME':'CLOSE';$('close').onclick=closeUi;if(diagView){loadDiag()}else if(view==='rearm'){doRearm(true)}else{poll()}
 </script></body></html>`;
   }
 
@@ -1930,6 +2236,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     clearTimer("armReinforceTimer");
     clearTimer("armReinforceTimer2");
     clearTimer("autoApplyTimer");
+    clearTimer("storageProbeTimer");
   }
 
   function profileObject() {
@@ -1995,7 +2302,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     return {
       title: c.profileTitle,
       author: "ladiosupp / HyperEx",
-      notes: `DE1XL v1.45 HyperEx pulse filtration. User flow settings mean desired cup-scale mass flow (g/s). ${calNote} Stable skip topology: one restart skip to S2 and one 40 g skip to S3. Optional S3 DECAY COMP uses only natural profile-time transitions inside S3; no extra plugin skipStep calls. Final stop is by Idle. Current-shot regression is advisory only.`,
+      notes: `DE1XL v1.48 HyperEx pulse filtration. User flow settings mean desired cup-scale mass flow (g/s). ${calNote} Stable skip topology: one restart skip to S2 and one 40 g skip to S3. Optional S3 DECAY COMP uses only natural profile-time transitions inside S3; no extra plugin skipStep calls. Final stop is by Idle. Current-shot regression is advisory only.`,
       beverage_type: "espresso",
       steps,
       tank_temperature: "0", target_weight: "0", target_volume: "0", target_volume_count_start: "0",
@@ -2015,7 +2322,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     return {
       title: calibrationProfileTitle(normalizedMode),
       author: "ladiosupp / HyperEx",
-      notes: `EMPTY BASKET ONLY. HyperEx v0.1.41 ${wp.modeLabel} real-flow calibration. Prime ${wp.primeFlow.toFixed(2)} ml/s × ${wp.primeSeconds.toFixed(1)} s, then ${wp.steps} ${wp.algorithm === "target-lut" ? "target-search" : "calibration"} plateaus × ${wp.stepSeconds.toFixed(1)} s; nominal DE1 commanded water ≈${wp.nominalCommandWaterMl} ml. Use a ${wp.recommendedContainerMl} ml or larger catch vessel. The plugin actively stops calibration at about ${wp.hardStopG} g actual collected water to preserve margin below 300 ml. Tank level is checked before PREPARE when live DE1 water-level telemetry is available. Tare the scale, start Espresso manually, and leave the vessel in place until Idle.`,
+      notes: `EMPTY BASKET ONLY. HyperEx v0.1.48 ${wp.modeLabel} real-flow calibration. Prime ${wp.primeFlow.toFixed(2)} ml/s × ${wp.primeSeconds.toFixed(1)} s, then ${wp.steps} ${wp.algorithm === "target-lut" ? "target-search" : "calibration"} plateaus × ${wp.stepSeconds.toFixed(1)} s; nominal DE1 commanded water ≈${wp.nominalCommandWaterMl} ml. Use a ${wp.recommendedContainerMl} ml or larger catch vessel. The plugin actively stops calibration at about ${wp.hardStopG} g actual collected water to preserve margin below 300 ml. Tank level is checked before PREPARE when live DE1 water-level telemetry is available. Tare the scale, start Espresso manually, and leave the vessel in place until Idle.`,
       beverage_type: "espresso",
       steps: [
         ...(wp.primeSeconds > 0 ? [{
@@ -2067,6 +2374,132 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     }
   }
 
+  function normalizedProfileExecution(profile) {
+    if (!profile || typeof profile !== "object") return null;
+    const num = value => {
+      const v = Number(value);
+      return Number.isFinite(v) ? round(v, 5) : String(value == null ? "" : value);
+    };
+    const steps = Array.isArray(profile.steps) ? profile.steps.map(step => ({
+      name: String(step && step.name || ""),
+      temperature: num(step && step.temperature),
+      sensor: String(step && step.sensor || ""),
+      pump: String(step && step.pump || ""),
+      transition: String(step && step.transition || ""),
+      pressure: num(step && step.pressure),
+      flow: num(step && step.flow),
+      seconds: num(step && step.seconds),
+      volume: num(step && step.volume),
+      weight: num(step && step.weight),
+      limiter: step && step.limiter ? { value: num(step.limiter.value), range: num(step.limiter.range) } : null
+    })) : [];
+    return {
+      beverage_type: String(profile.beverage_type || ""),
+      steps,
+      tank_temperature: num(profile.tank_temperature),
+      target_weight: num(profile.target_weight),
+      target_volume: num(profile.target_volume),
+      target_volume_count_start: num(profile.target_volume_count_start),
+      legacy_profile_type: String(profile.legacy_profile_type || ""),
+      type: String(profile.type || ""),
+      version: num(profile.version)
+    };
+  }
+
+  function profileExecutionEquivalent(a, b) {
+    try {
+      return JSON.stringify(normalizedProfileExecution(a)) === JSON.stringify(normalizedProfileExecution(b));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function profileCommandSummaryFromProfile(profile) {
+    if (!profile || !Array.isArray(profile.steps) || profile.steps.length < 3) return null;
+    const flow = step => { const v = Number(step && step.flow); return Number.isFinite(v) ? round(v, 3) : null; };
+    const steps = profile.steps;
+    const s3steps = steps.slice(2);
+    const shape = s3steps.length >= 3;
+    return {
+      title: String(profile.title || ""),
+      stage1CommandMlS: flow(steps[0]),
+      stage2CommandMlS: flow(steps[1]),
+      stage3Mode: shape ? "shape" : "flat",
+      stage3CommandMlS: shape ? flow(s3steps[1]) : flow(s3steps[0]),
+      s3Shape: shape ? {
+        enabled: true,
+        earlyCommand: flow(s3steps[0]), earlySeconds: round(Number(s3steps[0] && s3steps[0].seconds),1),
+        midCommand: flow(s3steps[1]), midSeconds: round(Number(s3steps[1] && s3steps[1].seconds),1),
+        lateCommand: flow(s3steps[2])
+      } : { enabled:false }
+    };
+  }
+
+  function runtimeProfileTruthPayload() {
+    const expected = state.cfg ? profileObject() : null;
+    const actual = state.workflowProfile;
+    return {
+      selectedTitle: state.workflowTitle || "",
+      verified: !!state.runtimeProfileVerified,
+      status: state.runtimeProfileStatus || "not verified",
+      expected: expected ? profileCommandSummaryFromProfile(expected) : null,
+      actual: actual ? profileCommandSummaryFromProfile(actual) : null
+    };
+  }
+
+  async function readWorkflowProfile() {
+    const response = await api('/workflow', { method: 'GET' });
+    const body = await response.json();
+    return body && body.profile && typeof body.profile === 'object' ? body.profile : null;
+  }
+
+  async function verifyAndRepairSelectedHyperExProfile(reason) {
+    if (!state.cfg || state.workflowTitle !== state.cfg.profileTitle || state.runtimeProfileRepairBusy) return;
+    state.runtimeProfileRepairBusy = true;
+    state.armed = false;
+    try {
+      const expected = profileObject();
+      let actual = state.workflowProfile;
+      if (!actual) {
+        try { actual = await readWorkflowProfile(); } catch (error) { log(`Workflow profile readback failed before verification: ${error.message || error}`); }
+      }
+      state.workflowProfile = actual;
+      if (actual && profileExecutionEquivalent(actual, expected)) {
+        state.runtimeProfileVerified = true;
+        state.runtimeProfileStatus = `verified ${reason || 'workflow'}`;
+        state.armed = !!state.cfg.enabled;
+        state.runtimeProfileMismatchAbortSent = false;
+        emitSkinChanged();
+        return;
+      }
+
+      const actualSummary = profileCommandSummaryFromProfile(actual);
+      const expectedSummary = profileCommandSummaryFromProfile(expected);
+      state.runtimeProfileVerified = false;
+      state.runtimeProfileStatus = `mismatch detected; repairing (${reason || 'workflow'})`;
+      log(`HyperEx workflow profile mismatch. Expected commands ${JSON.stringify(expectedSummary)}, actual ${JSON.stringify(actualSummary)}. Re-syncing workflow and machine before arming.`);
+      await syncHyperExProfile(true);
+
+      let readback = null;
+      try { readback = await readWorkflowProfile(); } catch (error) { log(`Workflow profile readback after repair failed: ${error.message || error}`); }
+      state.workflowProfile = readback || expected;
+      if (!readback || !profileExecutionEquivalent(readback, expected)) {
+        state.runtimeProfileVerified = false;
+        state.runtimeProfileStatus = 'repair failed: workflow readback does not match LUT/adaptive profile';
+        state.armed = false;
+        throw new Error(state.runtimeProfileStatus);
+      }
+      state.runtimeProfileVerified = true;
+      state.runtimeProfileStatus = `verified after repair ${new Date().toISOString()}`;
+      state.armed = !!state.cfg.enabled;
+      state.runtimeProfileMismatchAbortSent = false;
+      log(`HyperEx workflow profile repair VERIFIED. Actual workflow commands now ${JSON.stringify(profileCommandSummaryFromProfile(readback))}.`);
+      emitSkinChanged();
+    } finally {
+      state.runtimeProfileRepairBusy = false;
+    }
+  }
+
   async function upsertProfile(profile) {
     const title = profile && profile.title ? String(profile.title) : "";
     if (!title) throw new Error("profile title missing");
@@ -2080,11 +2513,12 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     }
     const matching = records.filter(r => r && r.profile && String(r.profile.title || '') === title && r.visibility !== 'deleted');
     if (matching.length) {
-      const chosen = matching[0];
-      if (profilesEquivalent(chosen.profile, profile)) {
+      const exact = matching.find(r => profilesEquivalent(r.profile, profile));
+      if (exact) {
         log(`Profile '${title}' already current; Decaid write skipped.`);
-        return chosen;
+        return exact;
       }
+      const chosen = matching.find(r => !r.isDefault) || matching[0];
       const response = await api(`/profiles/${encodeURIComponent(chosen.id)}`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile })
       });
@@ -2149,9 +2583,13 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     const rec = await upsertProfile(profile);
     state.hyperExProfileId = rec && rec.id ? rec.id : state.hyperExProfileId;
     if (updateCurrentWorkflow && state.workflowTitle === state.cfg.profileTitle) {
-      await api('/workflow', {
+      const workflowResponse = await api('/workflow', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile })
       });
+      try {
+        const workflowBody = await workflowResponse.json();
+        if (workflowBody && workflowBody.profile) state.workflowProfile = workflowBody.profile;
+      } catch (_) { state.workflowProfile = profile; }
       // Upload immediately as well; workflow updates can be queued behind other app work.
       try {
         await api('/machine/profile', {
@@ -2769,7 +3207,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     recomputeCalibrationUsability();
     const map = state.calibrationMap;
     return {
-      pluginVersion: '0.1.41',
+      pluginVersion: '0.1.48',
       autoApplyNextShot: !!state.autoApplyNextShot,
       autoApplyLastStatus: state.autoApplyLastStatus,
       calibrationMode: state.calibrationMode,
@@ -2797,6 +3235,8 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       actualRange: map ? map.actualRange : null,
       pointCount: calibrationPoints().length,
       commandFlows: commandFlowSummary(),
+      profileTruth: runtimeProfileTruthPayload(),
+      persistentHistory: historyStatusPayload(),
       manualTestOverride: testOverrideStatus(),
       profileSyncStatus: state.profileSyncStatus,
       stage1StartupCorrection: stage1StartupFactor(),
@@ -3438,7 +3878,19 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     state.lastFrame = machine.profileFrame;
     noteMachine(machine);
 
-    const active = state.cfg && state.cfg.enabled && state.armed;
+    const active = state.cfg && state.cfg.enabled && state.armed && state.runtimeProfileVerified;
+
+    // Never allow a HyperEx-labelled workflow to pour while its execution profile
+    // differs from the LUT/adaptive profile the plugin believes is current.
+    if (state.cfg && state.cfg.enabled && state.workflowTitle === state.cfg.profileTitle && !state.runtimeProfileVerified &&
+        machine.machineState === "espresso" && (machine.substate === "preinfusion" || machine.substate === "pouring")) {
+      if (!state.runtimeProfileMismatchAbortSent) {
+        state.runtimeProfileMismatchAbortSent = true;
+        log(`SAFETY STOP: HyperEx workflow started before profile truth was verified (${state.runtimeProfileStatus}). Sending Idle; this run will not enter adaptive history.`);
+        requestMachineState("idle").catch(error => log(`Profile-mismatch safety Idle failed: ${error.message || error}`));
+      }
+      return;
+    }
 
     // Do not arm control during Decaid's preparingForShot/preheat phase.
     // Decaid treats any Idle command before preinfusion/pouring as a preheat abort.
@@ -3501,8 +3953,26 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     const previousCalMode = calibrationModeFromTitle(previousTitle);
     const selectedCalMode = calibrationModeFromTitle(title);
     state.workflowTitle = title;
+    state.workflowProfile = payload && payload.profile && typeof payload.profile === "object" ? payload.profile : null;
     state.calibrationArmed = selectedCalMode !== null;
-    state.armed = !!(state.cfg && state.cfg.enabled && title === state.cfg.profileTitle);
+    state.runtimeProfileMismatchAbortSent = false;
+    if (state.cfg && title === state.cfg.profileTitle) {
+      const expected = profileObject();
+      state.runtimeProfileVerified = !!(state.workflowProfile && profileExecutionEquivalent(state.workflowProfile, expected));
+      state.runtimeProfileStatus = state.runtimeProfileVerified ? "verified from workflowUpdated" : "selected HyperEx profile needs LUT/adaptive verification";
+      state.armed = !!(state.cfg.enabled && state.runtimeProfileVerified);
+      if (!state.runtimeProfileVerified) {
+        setTimeout(() => verifyAndRepairSelectedHyperExProfile('workflowUpdated').catch(error => {
+          state.runtimeProfileVerified = false; state.armed = false;
+          state.runtimeProfileStatus = `repair failed: ${error.message || error}`;
+          log(`HyperEx profile verification/repair failed: ${error.message || error}`); emitSkinChanged();
+        }), 0);
+      }
+    } else {
+      state.runtimeProfileVerified = false;
+      state.runtimeProfileStatus = title ? `not HyperEx (${title})` : "no workflow selected";
+      state.armed = false;
+    }
 
     if (selectedCalMode !== null && state.calibrationMode !== selectedCalMode) {
       state.calibrationMode = selectedCalMode;
@@ -3532,7 +4002,9 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       log(`FLOW CAL ARMED (${calibrationModeConfig().label}) by workflow '${title}'. EMPTY BASKET: tare scale and start Espresso; let the staircase finish.`);
     } else if (state.armed) {
       const flows = commandFlowSummary();
-      log(`ARMED by workflow '${title}'. Real targets ${flows.stage1DesiredGS}/${flows.stage2DesiredGS}/${flows.stage3DesiredGS} g/s -> DE1 commands ${flows.stage1CommandMlS}/${flows.stage2CommandMlS}/${flows.stage3CommandMlS} ml/s.`);
+      log(`ARMED by VERIFIED workflow '${title}'. Real targets ${flows.stage1DesiredGS}/${flows.stage2DesiredGS}/${flows.stage3DesiredGS} g/s -> DE1 commands ${flows.stage1CommandMlS}/${flows.stage2CommandMlS}/${flows.stage3CommandMlS} ml/s.`);
+    } else if (title === (state.cfg && state.cfg.profileTitle)) {
+      log(`HyperEx selected but NOT ARMED until profile truth is verified: ${state.runtimeProfileStatus}.`);
     } else if (title) {
       log(`Not armed: selected workflow profile is '${title}'.`);
     }
@@ -3541,7 +4013,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
 
   return {
     id: ID,
-    version: "0.1.41",
+    version: "0.1.48",
 
     onLoad(settings) {
       state.cfg = loadConfig(settings || {});
@@ -3550,9 +4022,13 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       state.autoApplyNextShot = state.cfg.autoApplyNextShot !== false;
       state.autoApplyLastStatus = null;
       state.armed = false;
+      state.workflowProfile = null;
+      state.runtimeProfileVerified = false;
+      state.runtimeProfileStatus = "not verified";
+      state.runtimeProfileMismatchAbortSent = false;
       state.calibrationArmed = false;
       resetSequence();
-      log(`Loaded v0.1.41. Stable two-skip topology; scale feedback is validation/advisory only; optional S3 decay-compensation subframes advance by profile time and add no skipStep calls. Dual calibration profiles are installed/updated at first load; HyperEx flow settings are desired REAL mass flow: ${state.cfg.stage1Flow}/${state.cfg.stage2Flow}/${state.cfg.stage3Flow} g/s. flowMultiplier scope=${scopeLabel(state.scopeMode)}. Dashboard idle shortcut=${state.cfg.idleDashboardShortcut ? "enabled" : "off (plugin page primary)"}. Brew state machine remains v0.1.16/v0.1.17 baseline.`);
+      log(`Loaded v0.1.48. Stable two-skip topology; scale feedback is validation/advisory only; optional S3 decay-compensation subframes advance by profile time and add no skipStep calls. Dual calibration profiles are installed/updated at first load; HyperEx flow settings are desired REAL mass flow: ${state.cfg.stage1Flow}/${state.cfg.stage2Flow}/${state.cfg.stage3Flow} g/s. flowMultiplier scope=${scopeLabel(state.scopeMode)}. Dashboard idle shortcut=${state.cfg.idleDashboardShortcut ? "enabled" : "off (plugin page primary)"}. Brew state machine remains v0.1.16/v0.1.17 baseline.`);
       connectScaleStream();
       connectWaterLevelStream();
       storageRead(STORAGE_CAL);
@@ -3564,6 +4040,9 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       storageRead(STORAGE_S1_STARTUP);
       storageRead(STORAGE_TEST_OVERRIDES);
       storageRead(STORAGE_AUTO_APPLY);
+      storageRead(STORAGE_HISTORY_FILE);
+      storageRead(STORAGE_ADAPTIVE_HISTORY);
+      startPersistentHistoryProbe();
       refreshFlowMultiplier(true).then(() => {
         recomputeCalibrationUsability();
         emitSkinChanged();
@@ -3658,7 +4137,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
             s3Shape = { enabled:true, earlyCommand:round(earlyCommand,3), earlySeconds:round(earlySeconds,1), midCommand:round(midCommand,3), midSeconds:round(midSeconds,1), lateCommand:round(lateCommand,3) };
           }
           const binding = testOverrideBinding();
-          state.testOverrides = { schema:3, writerVersion:"0.1.41", savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, targets:binding.targets, stages, s3Shape };
+          state.testOverrides = { schema:3, writerVersion:"0.1.48", savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, targets:binding.targets, stages, s3Shape };
           storageWrite(STORAGE_TEST_OVERRIDES, state.testOverrides);
           await syncHyperExProfile(state.workflowTitle === state.cfg.profileTitle);
           log(`Manual test commands updated: ${JSON.stringify(commandFlowSummary())}`);
@@ -3776,13 +4255,14 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
         state.calibrationPendingMultiplier = null;
         storageWrite(STORAGE_CAL, '');
         state.testOverrides = null; storageWrite(STORAGE_TEST_OVERRIDES, '');
+        state.adaptiveHistory = []; state.persistentHistoryCompatibleCount = 0; storageWrite(STORAGE_ADAPTIVE_HISTORY, '');
         storageWrite(STORAGE_PENDING_MULT, '');
         try { await syncHyperExProfile(state.workflowTitle === state.cfg.profileTitle); } catch (_) {}
         emitSkinChanged();
         return pluginHttpJson(request, 200, calibrationStatusPayload());
       }
       if (request.endpoint === "startup-apply") {
-        return pluginHttpJson(request, 409, { error: "v0.1.41 does not auto-apply S1 startup correction. Use the Reference Advisory as guidance only; rerun empty-basket validation or Low Water calibration before changing the LUT." });
+        return pluginHttpJson(request, 409, { error: "Legacy startup-apply is disabled in v0.1.48. S1 is handled only by the unified shot-to-shot adaptive engine after two matching MEDIUM-confidence startup shots." });
       }
       if (request.endpoint === "startup-clear") {
         state.stage1StartupCorrection = null; storageWrite(STORAGE_S1_STARTUP, '');
@@ -3837,8 +4317,12 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
           const parsed = parseStoredJson(value);
           if (parsed && Number(parsed.schema || 0) >= 1) state.calibrationMap = parsed;
           recomputeCalibrationUsability();
+          restoreAdaptiveHistoryFromPersistentFile();
           if (state.cfg && state.cfg.calibrationAutoSync && state.calibrationMapUsable) {
-            syncHyperExProfile(false).catch(error => log(`Stored calibration auto-sync failed: ${error.message || error}`));
+            const selected = state.workflowTitle === state.cfg.profileTitle;
+            syncHyperExProfile(selected).then(() => {
+              if (selected) return verifyAndRepairSelectedHyperExProfile('stored calibration loaded');
+            }).catch(error => log(`Stored calibration auto-sync failed: ${error.message || error}`));
           }
           emitSkinChanged();
         } else if (key === STORAGE_CAL_MODE && value) {
@@ -3867,6 +4351,32 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
         } else if (key === STORAGE_AUTO_APPLY) {
           if (value !== null && value !== undefined && value !== "") state.autoApplyNextShot = b(value, state.cfg ? state.cfg.autoApplyNextShot !== false : true);
           emitSkinChanged();
+        } else if (key === STORAGE_HISTORY_PROBE) {
+          if (String(value || "") === String(state.storageProbeToken || "") && state.storageProbeToken) {
+            state.persistentHistoryAvailable = true;
+            state.persistentHistoryStatus = "pluginStorage write/readback verified";
+            if (state.storageProbeTimer) { clearTimeout(state.storageProbeTimer); state.storageProbeTimer = null; }
+            storageWrite(STORAGE_HISTORY_PROBE, "");
+            persistHistoryFile();
+            emitSkinChanged();
+          }
+        } else if (key === STORAGE_HISTORY_FILE) {
+          const parsed = parseStoredJson(value);
+          if (parsed && Number(parsed.schema || 0) >= 2 && Array.isArray(parsed.shots)) {
+            state.persistentHistoryFile = parsed;
+          } else {
+            state.persistentHistoryFile = { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:"0.1.48", createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(), shots:[] };
+          }
+          state.persistentHistoryLoaded = true;
+          restoreAdaptiveHistoryFromPersistentFile();
+          emitSkinChanged();
+        } else if (key === STORAGE_ADAPTIVE_HISTORY) {
+          const parsed = parseStoredJson(value);
+          if (Array.isArray(parsed)) {
+            state.legacyAdaptiveHistory = parsed.filter(x => x && typeof x === "object" && x.runId).slice(-8);
+            restoreAdaptiveHistoryFromPersistentFile();
+          }
+          emitSkinChanged();
         } else if (key === STORAGE_TEST_OVERRIDES) {
           state.testOverrides = parseStoredJson(value);
           const os = testOverrideStatus();
@@ -3874,7 +4384,10 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
           // Storage returns asynchronously after the initial profile install;
           // resync once so a valid persisted MANUAL TEST command is visible.
           if (state.cfg && os.valid && os.activeStages.length) {
-            syncHyperExProfile(false).catch(error => log(`Stored manual test override sync failed: ${error.message || error}`));
+            const selected = state.workflowTitle === state.cfg.profileTitle;
+            syncHyperExProfile(selected).then(() => {
+              if (selected) return verifyAndRepairSelectedHyperExProfile('stored override loaded');
+            }).catch(error => log(`Stored manual test override sync failed: ${error.message || error}`));
           }
           emitSkinChanged();
         }

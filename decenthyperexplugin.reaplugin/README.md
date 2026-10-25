@@ -1,4 +1,45 @@
-# HyperEx Pulse Filter v0.1.41
+# HyperEx Pulse Filter v0.1.48
+
+
+
+## v0.1.48 S3 stall-recovery adaptive path
+
+- Adds a conservative **STALL RECOVERY** path to the shot-to-shot S3 controller. A single stall never triggers a numeric change: the same S3 command shape must be observed in two matching shots, both must show late weakness, and at least one must contain the dedicated 6 s low-flow stall signature (RAW cup slope collapsed while DE1 flow remained active).
+- A confirmed stall no longer discards the whole S3 shot just because the LATE linear-fit R² is poor. EARLY and MID still require clean regressions; LATE is accepted only as qualitative stall evidence from the dedicated stall detector.
+- Recovery keeps **LEVEL** and **SHAPE** separate. LEVEL may rise only when both matching overall S3 flows are more than 10% below target, and is capped at +4% for one next-shot step. SHAPE is normalized and shifts command toward LATE; each frame remains capped at ±7% and ±0.05 ml/s.
+- Adaptive auto-applied overrides now report `adaptive auto applied` instead of the misleading `manual test active` source label.
+- Shot-to-shot adaptive evidence is now persisted in plugin storage (last 8 evidence rows), so ordinary plugin/UI reloads and later upgrades no longer reset two-shot consensus. Calibration clear also clears this history.
+- S1 startup safety, S2 HIT/consensus behavior, calibration LUT immutability, no running-shot scale closed loop, and no extra `skipStep` calls are unchanged.
+
+
+## v0.1.45 S3 adaptive command-provenance fix
+
+- Fixes S3 adaptive evidence fallback when a shaped shot lacks complete per-profile-frame RAW regressions.
+- Measurement windows may still fall back to the robust S3 EARLY/MID/LATE 25/50/25 regressions, but command provenance now always comes from the actual shot-start shape (`EARLY / MID / LATE`) rather than flattening all three to the MID command.
+- Prevents a real `0.698 → 0.720 → 0.778` shot from being stored as `0.720 → 0.720 → 0.720`, which would otherwise poison the two-shot same-shape consensus gate.
+- Adaptive history remains runtime-only, so upgrading/reloading starts fresh evidence collection after this fix.
+
+## v0.1.44 workflow + three-stage automatic next-shot adaptive
+
+Diagnostics now follows the actual user workflow:
+
+1. **STEP 1 · FLOW CALIBRATION** — first-time empty-basket RAW-scale calibration; a valid LUT is required before normal adaptive use.
+2. **STEP 2 · SHOT-TO-SHOT AUTO ADAPTIVE** — authoritative next-shot profile, latest-shot command snapshot, RAW regression validation, S1 startup/S3 stability, automatic S1/S2/S3 next-shot decisions, and real flow/weight curves.
+3. **STEP 3 · MANUAL / ENGINEERING** — reference advisory, manual test overrides, S3 shape editor, and advanced settings.
+4. **STEP 4 · COPY CSV** — raw engineering export.
+
+Adaptive behavior is completed-shot only. S1 requires repeated MEDIUM-confidence startup evidence; S2 requires repeated high-quality RAW-regression evidence; S3 separately solves overall **LEVEL** and normalized EARLY/MID/LATE **SHAPE** before combining a bounded next-shot command. No running-shot scale closed loop is introduced, calibration LUT data is never rewritten by adaptive history, and no additional `skipStep` calls are added.
+
+
+## v0.1.43 diagnostics provenance + Dashboard exit fix
+
+- Separates diagnostic command semantics into **NEXT SHOT · APPLIED PROFILE**, **LATEST SHOT · COMMAND SNAPSHOT**, **PROPOSED next shot**, and **MEASURED** telemetry/results. A single S3 MID value is no longer presented as if it represented the whole active S3 shape.
+- S3 frame-result tables are explicitly historical: their command values are the commands captured for the completed shot, not the current next-shot profile.
+- AUTO APPLY now distinguishes `APPLIED ✓`, `NOT APPLIED`, and `AUTO APPLY ARMED`; an ON switch alone is no longer shown as proof that a suggestion was written.
+- Dashboard `DIAG / CAL` uses the same Streamline **page/history navigation model** as the Settings → OPEN path, avoiding external-browser root fallbacks.
+- Normal entry from **Plugins → HyperEx Pulse Filter → OPEN** keeps the same internal history-based close behavior.
+- Adds the missing `adaptive-auto-set` HTTP declaration to the manifest so the diagnostics AUTO APPLY toggle is declared consistently with its handler.
+- Brew execution, calibration LUT rules, no-running-shot feedback rule, and no-extra-`skipStep` invariant are unchanged.
 
 
 ## v0.1.41 settings / navigation / profile-write regression fix
@@ -408,3 +449,19 @@ Flow Calibration is for an **empty basket** and a sufficiently large catch vesse
 - Users who explicitly want the idle `DIAG / CAL` header shortcut may enable it in plugin settings. HyperEx does not implement any polling/reclaim loop for the slot; Streamline remains the sole arbiter.
 - Active-shot status surfaces (release / soak / GHC / running calibration) remain available because they are transient operational cues, not persistent idle launchers.
 - The diagnostics page explicitly reminds users to open **Plugins → HyperEx Pulse Filter** if a dashboard shortcut is unavailable.
+
+
+### v0.1.43
+- Dashboard `DIAG / CAL` now opens diagnostics using the same Streamline page-navigation model as the plugin Settings `OPEN` path instead of a separate overlay route.
+- `CLOSE / HOME` no longer uses `/` or browser-location fallbacks; Dashboard entry returns through Decaid history, preventing accidental launch of the system browser.
+- Keeps the diagnostics command-provenance cleanup (`APPLIED`, `LATEST SHOT`, `PROPOSED`, `MEASURED`) unchanged.
+
+
+## v0.1.48 profile truth guard
+
+HyperEx desired S1/S2/S3 values are always cup-scale real mass-flow targets (g/s). The DE1 workflow profile must contain only LUT/adaptive actuator commands. When a HyperEx workflow is selected, the plugin now compares the selected workflow execution steps against the generated LUT/adaptive profile. A mismatch is repaired before the controller arms, and a shot that begins before verification is stopped and excluded from adaptive history. Diagnostics reports the actual workflow readback rather than treating in-memory commands as authoritative. The old static HyperEx_Pulse_Filter.json bootstrap profile is no longer shipped because its literal 2/5/1.5 machine-flow values could be mistaken for calibrated commands.
+
+
+## v0.1.48 persistent adaptive history
+
+Each completed HyperEx shot appends a compact record to pluginStorage key `adaptiveHistoryFileV2` (up to 30 shots). Records carry a calibration/LUT fingerprint, actual shot commands, RAW regression summaries, S1 startup metrics, S3 stability/stall data, the adaptive decision, and the compact evidence used by the controller. On load the plugin restores only rows whose fingerprint matches the current calibration map, flowMultiplier binding, and S1/S2/S3 real-flow targets; incompatible history remains stored for diagnostics but cannot drive numeric adaptation. A write/readback probe verifies pluginStorage availability. If the probe fails, Diagnostics explicitly reports SESSION ONLY: same-session adaptation remains active, while cross-reload/version history is disabled. Legacy `adaptiveHistoryV1` evidence is migrated when possible.

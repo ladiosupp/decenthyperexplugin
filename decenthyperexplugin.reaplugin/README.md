@@ -1,39 +1,26 @@
-# HyperEx Pulse Filter0.1.61
+# HyperEx Pulse Filter 0.1.62
 
-Based on delivered/GitHub1.60. Install over the same plugin; preserve LUT/history/seed. No new calibration or dedicated coffee acceptance. Simulation validation only; no1.61 hardware result yet.
+Based on delivered/GitHub1.61. Install over the same plugin; retain LUT/history and valid starting commands. No new calibration or dedicated coffee tests. No1.62 hardware validation yet.
 
-## Recoverable target-feedback loss (1.61)
+## 下一杯曲线编辑（Step 2）
 
-Missing target feedback alone no longer terminates live trim after the fourth consecutive miss. First three misses allow the existing exact-target retry path. From the fourth, continue normal level-cadence checks but retry the SAME unresolved target no sooner than3s after its last send. Matching actual frame/target resets the streak and restores normal decision cadence. ACK is still mandatory; lack of target response never advances the known command or stacks flow increments.
+Step2 now contains a visual command editor with5 selectable handles: S1,S2,S3 EARLY/MID/LATE. Select a handle and drag vertically, use ↑/↓ buttons, or keyboard arrows. Each button advances to the next native1/16ml/s command level. Preview the draft and current commands, inspect generated parameters, then click 应用到下一杯. This is an explicit next-shot application, never a running-shot edit. Preview does not write to the machine.
 
-Fresh scale endpoint, RAW regression, frame, machine data, pressure and actuator guards apply to every retry. If error reverses, hold the unresolved command; if output enters the2% band, keep observing without resending. Discard old-frame retries on transition before another send. All retries count toward the existing write cap; recovery resets neither budget. Check cap/shot completion/transport failure can still end trim. Missing driver ACK retains the original abort path. A whole-cup good result does not manufacture a per-write confirmation or normalized learning evidence.
+The vertical axis is DE1 flow command ml/s, not measured cup g/s. Gray dashed is current setup; orange is draft. This is a stage diagram: S1/S2 remain weight-triggered, release/soak are omitted, and the S3 handles show their actual0/early/early+mid second starts. Change S3 EARLY/MID durations with±1s buttons (3–30s); late runs to final weight. S3 retains non-decreasing commands and existing adjacent-rise limits. No free-form profile frames, extra skipStep calls, physical-response guarantee or invented delay model.
 
-Only target-feedback recovery is changed here. S2 learning admission/coverage rules remain1.60 behavior; its ambiguous admission-reason text remains a separate follow-up issue.
+Editing S1/S2 preserves other stage modes and current commands. Editing S3 enables the3-part shape; switching shape off gives flat S3 at the middle command. Flow command bounds remain0.1–8ml/s. Draft/current visibility switches are separate. Dirty drafts survive refresh; changed applied parameters disable applying an obsolete draft until reloaded. Applying requires selected verified HyperEx, idle state, valid LUT, a fresh unchanged workflow, upload acknowledgement and final readback. Failure rolls back previous overrides. A successful upload followed by a page-refresh failure remains labelled applied, with a refresh warning. A successful application updates Step2 APPLIED PROFILE and provenance. Old-run automatic or manual adaptive proposals cannot overwrite the new curve; new completed coffees continue normal learning. Numeric precision editor remains under optional Step3 details, using the same storage/profile source, verification/rollback and prior-run supersession. RETURN ALL TO LUT also verifies application and suppresses stale old-run proposals. AUTO APPLY remains unchanged.
 
-## Everyday self-diagnosis
+## Curve and decision output audit
 
-Diagnostics now includes 本杯控制诊断: actual RAW stage-wide error, final60% mean/error, ripple CV, RMSE and observed overshoot, followed by stage learning-admission reasons and action-group comparisons. Routine use does not require sending screenshots/CSV. Export remains optional for unusual failures or deeper engineering review.
+- Real-scale flow chart has independent visibility checkboxes for cup target, RAW cup flow, Decaid cup flow, machine target, machine actual and issued flow commands. Units remain visible; original raw weight chart unchanged.
+- Issued writes use small upward/downward arrows according to command change. SAME-target retries use↻, rather than falsely counting another increment. Historical writes without a recorded previous command have an unknown-direction dot. ACK is not a cup-output confirmation; matching machine target remains a separate square.
+- Validation now has an adjacent 下一杯决策 panel explaining each stage's output error, whether an adjustment is proposed/applied/failed/held/waiting, and the exact learning blocker. Manual application marks the old cup analysis as superseded. An available proposal is not described as already applied before successful readback.
+- Fixed-target learning previously tried dynamic exposure only when fixed-window seconds were too short. It now tries the dynamic path if ANY fixed-window admission gate fails, including temporal coverage or consistent-cohort share. Prefer an eligible dynamic analysis. RAW/machine/pressure gates, ≥1.2s and6unique source samples,R²≥.90, S2≥2.4s,25% temporal coverage,60% consistent-window share, matching two-cup consensus and correction bounds remain unchanged.
+- Learning reports structured actual/required seconds, temporal coverage, consistent-window share and precise failures. It no longer says merely “need2.4s” when2.84s has already passed that condition. This repairs a skipped analysis path; it does not guarantee every MISS should cause an automatic adjustment.
 
-Outcome labels are heuristics: final60% absolute mean error≤8% and ripple CV≤10% -> target tracking/smoothness good. These are not a certified physical-performance standard. Stage-wide error and tail metrics are separate so startup ramp loss is not confused with a stable plateau error. Metrics are g/s from source-scale regressions, not DE1 ml/s commands. Group writes within3s on the same frame; use clean pre/post RAW windows when available. Overlapping actions are evaluated as a group, never falsely assigned individual causal success. Insufficient windows retain an explicit reason. Raw output quality remains visible even when command attribution is unavailable.
+## Retained controller and learning behavior
 
-## Live-trim evidence can enter normal learning
-
-The old last-write+2s settle+5s single-command-only gate no longer excludes a whole corrected phase. Current learning uses all fresh, observed machine-target epochs, including earlier valid windows before a late unconfirmed attempt. Machine target must correspond to the quantized initial command or a bounded prior written target for that frame; local send/ACK alone is not enough.
-
-Constant epochs: allow750ms settling,≥6unique RAW source timestamps,≥1.2s regression,R²≥.90. Pool usable windows; S2 needs≥2.4s; shaped S3 needs≥1.2s per frame and≥5s overall. Require≥25% regional temporal coverage and keep a robust normalized-response cohort (within25% of median, at least60% of usable candidate duration).
-
-If fast target changes leave too little fixed-epoch data, use contiguous source-time windows (about2s) and integrate actual observed target/starting-seed exposure. Both RAW time regression and exposure regression require R²≥.90; gaps/tare/duplicates do not create evidence. Normalization is a LOCAL PROPORTIONAL RESPONSE MODEL, not an exact hydraulic-delay model or measured physical law. Results are explicitly labelled and kept separate from original RAW diagnostics. Same seed/target/compatible frame-basis, two-cup consistency, variability and bounded next-shot correction still apply. Known S3 stalls are not normalized away.
-
-Pressure/actuator protection uses actual observed dynamic targets rather than incorrectly treating every changed command as the shot-start command:≥80% fresh target/frame coverage,≥4 machine samples,hold if≥20% near pressure limit or≥25% actual flow below70% of target. Unknown targets,stale machine data,insufficient source samples or poor regressions show specific reasons. No LUT rewriting. Old compact records without enough original data are not fabricated into new evidence; existing valid compatible evidence remains usable, including different temperatures.
-
-## Tolerances and timing
-
-- Live cup-flow target band±2%; ordinary next-shot S1/S2 deadband±8% and S3 LEVEL threshold8%. S1 startup-quality gates and all correction bounds unchanged. Historical empty qualification/calibration search thresholds remain separate.
-- The stock-DE1 A010 quantum remains1/16ml/s.±2% is a target, not guaranteed accuracy. Dynamic hydraulic smoothing might help but pure delay does not suppress ripple. No forced fixed-frequency dithering or invented measured delay is implemented.
-- Successful write: require BOTH driver ACK and matching frame/target, then release wait after minimum50ms. Another correction is considered only on the next level tick with a new source-scale endpoint.50ms is not a mandatory50ms write loop.
-- Missing response keeps original max(2s,2check periods) fault deadline. Missing driver ACK -> Idle abort. ACK but missing target -> exact-target retries; after3 misses use recoverable3s retry spacing rather than stopping trim. No blind quantum accumulation. Matching feedback resets streak. One pending write,per-frame±20%,pressure/data guards remain.
-
-## Budgets and retained behavior
+Original LUT unchanged. S1 startup quality gates unchanged; normal next-shot S1/S2 deadband8%,S3 LEVEL8%. Live target band2% is an aim, not guaranteed physical precision; DE1 command quantum1/16ml/s. Unique RAW source timestamps, pressure/actuator and fresh-machine guards retained. S3 timed subframes advance naturally. Only the original2business skip transitions; physical GHC confirmation remains. Home temperature persists; temperature alone does not invalidate numeric consensus or require a new LUT. Actual output review stays separate from labelled target-normalized local-model learning. Whole-cup smoothness supports overall outcome, not isolated per-write causal proof.
 
 |Level|Check cadence|Check cap S2+S3|Write cap including retries|
 |---|---|---|---|
@@ -42,10 +29,12 @@ Pressure/actuator protection uses actual observed dynamic targets rather than in
 |3|250ms|2000|200|
 |4|200ms|2000|250|
 
-Four-position diagnostic slider; native settings dropdown. Enable default OFF. Budgets are software caps, not hardware limits or required write counts. Full profile restored at Idle before rearming after live writes. Normal physical GHC start confirmation and original pressure/no-scale/total-time/final-weight guards retained. Home temperature persists via selected workflow; temperature alone does not reset LUT/coffee context or exclude historical numeric evidence.
+Live trim default OFF; diagnostic slider/native dropdown. Success waits at least50ms for BOTH ACK and matching target, then next level tick/new source sample. Missing target alone does not end trim: after3misses, retry SAME unresolved target at least3s after prior send while continuing checks. Matching target recovers automatically; no unconfirmed accumulation. Missing driver ACK retains original abort path. Budgets never reset on recovery. Original pressure/no-scale/total-time/final-weight safeguards and post-shot profile restoration remain.
 
 ## Validation
 
-219/219 Node simulations pass, including repeated feedback loss, cooldown/freshness/direction/write-cap gates, automatic late-feedback recovery, S2→S3 retry disposal, unchanged ACK abort and generated HTML script compilation, controlled S2 normalized evidence -> bounded auto-application, all corrected S3 frames, rapid-target exposure fallback, late unconfirmed writes retaining earlier data, pressure/stale/unknown/duplicate/bad-regression rejection, successful feedback release/new-source/50ms and missing-response paths, self-review/output metrics, plus retained previous tests. Fixtures are synthetic, not unavailable user RAW replays. Browser visual rendering unavailable: Chromium not installed. No1.61 hardware validation.
+243/243 Node simulations: retained controller tests, generated browser-script compilation, UI draft/refresh/stale checks, pointer and keyboard interaction with a simulated DOM, quantization/shape/time bounds, real HTTP handlers for application and reset, rollback, fresh workflow edits, prior-run suppression/new-run learning, queued evaluation restoration, successful application vs failed UI refresh, arrow/retry direction, explicit stage decisions and dynamic fallback when fixed seconds pass but coverage fails. Generated full HTML has balanced elements and unique IDs; generated editor SVG parses as XML. Fixtures are synthetic, not unavailable user RAW replays.
 
-Run node --check plugin.js and node tests/verify_v0161.cjs. See HANDOFF_v0161.md/results. LICENSE/calibration JSON unchanged. Package finalized before GitHub synchronization; release commit records completion.
+Full browser visual/touch rendering was unavailable (Chromium/Firefox and SVG raster delegate not installed); simulated DOM/pointer checks are not hardware or full WebView validation. Existing handheld/tablet screenshots remain the actual1.60 evidence. No1.62 device results yet.
+
+Run node --check plugin.js and node tests/verify_v0162.cjs. Current HANDOFF_v0162.md and tests/RESULTS_v0162.txt accompany this package. LICENSE and original calibration JSON are unchanged. Delivered older ZIPs remain immutable; old remote files retained for history.

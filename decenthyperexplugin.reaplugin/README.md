@@ -1,6 +1,14 @@
-# HyperEx Pulse Filter0.1.60
+# HyperEx Pulse Filter0.1.61
 
-Based on delivered/GitHub1.59. Install over the same plugin; preserve LUT/history/seed. No new calibration or dedicated coffee acceptance. Simulation validation only; no1.60 hardware result yet.
+Based on delivered/GitHub1.60. Install over the same plugin; preserve LUT/history/seed. No new calibration or dedicated coffee acceptance. Simulation validation only; no1.61 hardware result yet.
+
+## Recoverable target-feedback loss (1.61)
+
+Missing target feedback alone no longer terminates live trim after the fourth consecutive miss. First three misses allow the existing exact-target retry path. From the fourth, continue normal level-cadence checks but retry the SAME unresolved target no sooner than3s after its last send. Matching actual frame/target resets the streak and restores normal decision cadence. ACK is still mandatory; lack of target response never advances the known command or stacks flow increments.
+
+Fresh scale endpoint, RAW regression, frame, machine data, pressure and actuator guards apply to every retry. If error reverses, hold the unresolved command; if output enters the2% band, keep observing without resending. Discard old-frame retries on transition before another send. All retries count toward the existing write cap; recovery resets neither budget. Check cap/shot completion/transport failure can still end trim. Missing driver ACK retains the original abort path. A whole-cup good result does not manufacture a per-write confirmation or normalized learning evidence.
+
+Only target-feedback recovery is changed here. S2 learning admission/coverage rules remain1.60 behavior; its ambiguous admission-reason text remains a separate follow-up issue.
 
 ## Everyday self-diagnosis
 
@@ -23,7 +31,7 @@ Pressure/actuator protection uses actual observed dynamic targets rather than in
 - Live cup-flow target band±2%; ordinary next-shot S1/S2 deadband±8% and S3 LEVEL threshold8%. S1 startup-quality gates and all correction bounds unchanged. Historical empty qualification/calibration search thresholds remain separate.
 - The stock-DE1 A010 quantum remains1/16ml/s.±2% is a target, not guaranteed accuracy. Dynamic hydraulic smoothing might help but pure delay does not suppress ripple. No forced fixed-frequency dithering or invented measured delay is implemented.
 - Successful write: require BOTH driver ACK and matching frame/target, then release wait after minimum50ms. Another correction is considered only on the next level tick with a new source-scale endpoint.50ms is not a mandatory50ms write loop.
-- Missing response keeps original max(2s,2check periods) fault deadline. Missing driver ACK -> Idle abort. ACK but missing target -> tolerate3 consecutive misses, fourth stops trim; exact-target retries, no blind quantum accumulation. Matching feedback resets streak. One pending write,per-frame±20%,pressure/data guards remain.
+- Missing response keeps original max(2s,2check periods) fault deadline. Missing driver ACK -> Idle abort. ACK but missing target -> exact-target retries; after3 misses use recoverable3s retry spacing rather than stopping trim. No blind quantum accumulation. Matching feedback resets streak. One pending write,per-frame±20%,pressure/data guards remain.
 
 ## Budgets and retained behavior
 
@@ -38,6 +46,6 @@ Four-position diagnostic slider; native settings dropdown. Enable default OFF. B
 
 ## Validation
 
-211/211 Node simulations pass, including generated HTML script compilation, controlled S2 normalized evidence -> bounded auto-application, all corrected S3 frames, rapid-target exposure fallback, late unconfirmed writes retaining earlier data, pressure/stale/unknown/duplicate/bad-regression rejection, successful feedback release/new-source/50ms and missing-response paths, self-review/output metrics, plus retained previous tests. Fixtures are synthetic, not unavailable user RAW replays. Browser visual rendering unavailable: Chromium not installed. No1.60 hardware validation.
+219/219 Node simulations pass, including repeated feedback loss, cooldown/freshness/direction/write-cap gates, automatic late-feedback recovery, S2→S3 retry disposal, unchanged ACK abort and generated HTML script compilation, controlled S2 normalized evidence -> bounded auto-application, all corrected S3 frames, rapid-target exposure fallback, late unconfirmed writes retaining earlier data, pressure/stale/unknown/duplicate/bad-regression rejection, successful feedback release/new-source/50ms and missing-response paths, self-review/output metrics, plus retained previous tests. Fixtures are synthetic, not unavailable user RAW replays. Browser visual rendering unavailable: Chromium not installed. No1.61 hardware validation.
 
-Run node --check plugin.js and node tests/verify_v0160.cjs. See HANDOFF_v0160.md/results. LICENSE/calibration JSON unchanged. Package finalized before GitHub synchronization; release commit records completion.
+Run node --check plugin.js and node tests/verify_v0161.cjs. See HANDOFF_v0161.md/results. LICENSE/calibration JSON unchanged. Package finalized before GitHub synchronization; release commit records completion.

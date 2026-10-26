@@ -1,0 +1,221 @@
+PASS LUT translates real targets to .719 / 2.507 / .569
+PASS matching workflow event cannot arm without GET and upload
+PASS old literal profile repaired, uploaded and read back
+PASS unchanged repeated verification skips every PUT and POST
+PASS parallel requests are serialized and do not duplicate uploads
+PASS GET failure cannot use cached matching profile
+PASS machine upload failure is fatal to verification
+PASS workflow PUT failure stays unarmed
+PASS final readback mismatch fails after upload
+PASS null workflow does not produce fabricated actual commands
+PASS final readback failure clears old acknowledgement
+PASS active phase rejects all profile writes
+PASS machine espresso blocks even if plugin phase is idle
+PASS shot starting during verification blocks subsequent uploads
+PASS switching workflows mid-verification never arms new workflow
+PASS away-and-back selection revision invalidates in-flight verification
+PASS expected profile changing mid-flight cannot arm stale commands
+PASS strict multiplier GET cannot fall back to cached multiplier
+PASS mismatched actual multiplier blocks arming
+PASS missing stored override read blocks premature arming
+PASS profile truth reports acknowledgement, not hardware memory readback
+PASS LUT point change invalidates fingerprint even with same creation date
+PASS actual multiplier and real target changes invalidate fingerprint
+PASS snapshot fingerprint is not recomputed at shot completion
+PASS old 1.48 truth and interrupted shots cannot suggest numeric changes
+PASS incompatible and legacy rows excluded from persistent restore
+PASS SESSION ONLY never restores disk evidence and preserves session evidence
+PASS storage failure removes restored evidence but keeps session rows
+PASS probe arriving before initial history read cannot overwrite disk
+PASS initial history read arriving before probe is also safe
+PASS history file mismatch reports SESSION ONLY despite successful probe
+PASS history file timeout reports SESSION ONLY
+PASS starting a shot cannot cancel storage verification timeout
+PASS concurrent history updates serialize and persist newest file
+PASS late initial history read merges new session record without loss
+PASS confirmed next-shot application is stored separately from source evidence
+PASS S2 two high-quality HIT measurements HOLD the existing command
+PASS S2 repeated high flow correction stays within both bounds
+PASS unverified pouring sends Idle only once and never starts diagnostics
+PASS S1 insufficient startup data yields REPEAT without numeric trim
+PASS S1 delay is separate from active flow
+PASS S2 uses timestamp regression despite misleading instantaneous derivatives
+PASS S3 fallback retains actual .698 / .720 / .778 commands
+PASS two matching clean S3 shots produce bounded next-shot LEVEL and SHAPE
+PASS shape factors are normalized independently from S3 level factor
+PASS invalid empty calibration retains previous LUT and history
+PASS compact history keeps real diagnostic field values
+PASS pressure and phase weight changes isolate old adaptive evidence
+PASS HyperEx-only scope restores calibrated multiplier before verification
+PASS GLOBAL scope never writes multiplier automatically
+PASS selection switch before scoped multiplier write cancels it
+PASS leaving scope during multiplier upload restores original multiplier
+PASS failed scoped restore retains saved original multiplier for retry
+PASS verification deferred during espresso retries after machine returns idle
+PASS late stored scope cannot trigger default HyperEx multiplier writes
+PASS late saved-original read cannot overwrite a newly captured multiplier
+PASS real Decaid serialization roundtrip preserves equivalent execution
+PASS matching real DTO workflow arms without unnecessary PUT
+PASS old literal machine-flow workflow repairs through actual DTO serialization
+PASS repeated DTO roundtrips skip library, workflow and machine rewrites
+PASS real DTO S3 seed shape survives readback verification
+PASS changed actual flow is never hidden by DTO normalization
+PASS unexpected step exit condition blocks verification
+PASS changed limiter, duration, temperature, weight or target blocks equivalence
+PASS missing required numeric command is not equivalent to zero
+PASS null and omitted no-exit condition are equivalent
+PASS pressure step compares pressure and ignores unused flow
+PASS stored-profile equivalence ignores dropped import metadata but preserves author and notes
+PASS mismatch error names the actual field and preserves the guard
+PASS truth schema 2 evidence from 1.49 is excluded from new consensus
+PASS photographed shots 2/3 allow SHAPE ONLY while LEVEL stays held
+PASS shape-only rejects opposite frame trend even if status says decay
+PASS shape-only rejects different measurement basis and command provenance
+PASS shape-only rejects weak regressions, short windows and stall evidence
+PASS shape-only rejects inconsistent normalized shape and excessive level variability
+PASS S1 short clean startup explains rejection without relaxing 0.90 s gate
+PASS S1 clean sufficient window reports passed gates and retains MEDIUM evidence
+PASS varying level with repeated decay reaches shape-only through full RAW evidence pipeline
+PASS shape-only applies only while idle, verifies DTO readback and leaves LUT untouched
+PASS shape-only upload failure preserves previous overrides and cannot arm
+PASS rendered diagnostics browser scripts compile and show quality/shape action labels
+PASS Idle burst completes once, preserves pending apply, and automatically verifies the new shape
+PASS stale completion callback cannot reset a later sequence
+PASS starting a new shot explicitly cancels pending adaptation without rewriting its commands
+PASS auto OFF finalization saves shot without scheduling application
+PASS automatic upload failure is an explicit error and never APPLIED
+PASS normal coffee learning is automatic after upgrade without a user mode switch
+PASS coffee preserves empty/legacy commands as baseline priors without losing LUT or records
+PASS coffee overrides cannot leak back into empty-basket commands
+PASS context freezes at shot start and mismatched context invalidates completed-run evidence
+PASS old empty and unknown history remain saved but cannot restore into coffee consensus
+PASS ordinary complete coffee shots can form bounded next-shot evidence without rewriting calibration
+PASS persisted coffee context restores only into matching coffee settings
+PASS coffee pressure-limited stage yields LIMITED/HOLD and no numeric evidence
+PASS coffee actuator mismatch or stale/missing telemetry blocks numeric adaptation
+PASS coffee S3 without actual frame identity cannot use assumed shape actuator commands
+PASS missing telemetry cannot masquerade as zero pressure with valid actuator evidence
+PASS fresh audit exposes actual JSON separately from cached UI and proposal, without writes
+PASS failed raw audit cannot fabricate readback, repair or upload
+PASS audit refuses to mark matching when selection changes during read
+PASS unknown-context run cannot masquerade as current coffee evidence
+PASS read-only audit detects a basket context switch even if execution fields stay equal
+PASS coffee telemetry coverage below 80 percent cannot pass from a handful of valid samples
+PASS pressure-limited old coffee shot cannot supply the second clean consensus measurement
+PASS raw audit reports null actual commands when no workflow profile exists
+PASS coffee manual/auto override is stamped with context when applied
+PASS legacy verified history is retained as baseline response after automatic coffee transition
+PASS baseline history with changed calibration or targets cannot become a transferable reference
+PASS legacy empty adaptive seed is labelled as prior rather than coffee auto-apply success
+PASS dedicated calibration remains empty-basket while normal HyperEx uses automatic coffee context
+PASS baseline seed never bypasses existing invalid calibration binding and legacy corruption guards
+PASS manual basket mode selection is absent from the new normal-use UI
+PASS new-user path begins with empty-basket Step 1 when no usable LUT exists
+PASS after calibration, zero or one empty Step 2 shot cannot skip qualification
+PASS two stable qualified empty shots automatically prompt coffee and preserve the baseline
+PASS three usable but imperfect empty shots end empty tuning and recommend at most one coffee acceptance
+PASS existing four pre-upgrade empty records qualify without restarting the test count
+PASS completion waits for automatic apply and storage readback before changing the interpretation
+PASS three runs never override invalid data, stall, workflow or application failure gates
+PASS changing physical LUT/settings invalidates old qualification count
+PASS active shot context never flips midway through a pour
+PASS qualified coffee start freezes coffee context while retaining empty baseline references
+PASS qualified readiness uses the existing cooperative dashboard shortcut to prompt coffee
+PASS history-context initial read blocks premature profile uploads after reload
+PASS initial saved coffee history restores context before verified profile uploads
+PASS direct setting defaults OFF and shares normal settings source
+PASS optional raw attempt keeps original GHC timeout and both retries
+PASS GHC machine skips redundant raw attempt and keeps original guard
+PASS unknown GHC capability skips raw, leaves normal confirmation active
+PASS raw ACK clears transport timer, never clears original GHC guard
+PASS original GHC deadline sends Idle when no pour confirmed
+PASS pour cancels raw timer and original GHC guard; no later cup-gain timer
+PASS raw failure retains original GHC wait without second abort owner
+PASS late raw socket after cleanup cannot send and is closed
+PASS manual re-arm cancels optional pending raw setup and preserves original deadline
+PASS soak still completes before any REST/raw startup request
+PASS REST failure retains normal restart failure handling without raw write
+PASS live trim default OFF; original shot-to-shot and profile unchanged
+PASS live trim has independent setting and freezes 944ms /50 budget at shot start
+PASS below-band S2 writes one quantized current A010 frame and no skip/profile/multiplier
+PASS inside ±2 percent writes nothing but logs a valid check point
+PASS above-band S3 lowers one flow quantum without altering limiter frame
+PASS pressure or actuator limitation prevents upward trim
+PASS stale scale or machine blocks write; duplicate source timestamps fail regression
+PASS pending driver write never stacks another correction before feedback
+PASS repeated missing targets stay recoverable without blind accumulation
+PASS missing ACK aborts with Idle rather than accumulating writes
+PASS target feedback is counted separately; subsequent correction stays inside ±20%
+PASS stage transition cannot write the S2 frame after S3 transition request
+PASS 2000 checks is a hard cap across S2/S3, no2001st check or extra send
+PASS Bengle/v2 model is rejected before any frame write
+PASS late socket open after cancellation cannot write
+PASS frame encoder preserves original metadata and rejects unsupported pressure/exit frames
+PASS reset after a raw write invalidates machine ACK for full original-profile restoration
+PASS live trim keeps trusted shot-to-shot eligibility and skips unverified corrected-stage evidence only
+PASS verified stable learning window uses actual changed command, preserving raw run and LUT
+PASS experimental trace survives summary/CSV with check, write, ACK and target response separately
+PASS generated chart renders circles, write diamonds and target feedback squares
+PASS live-trim completed shot still queues the normal next-shot evaluator
+PASS original profile is actually re-uploaded after raw edits before next shot
+PASS live trim forces required diagnostics even when regular diagnostic logging is OFF
+PASS all four levels freeze cadence and budgets independently of enable switch
+PASS invalid levels fall back to1 and selecting a level does not enable trim
+PASS fast levels release successful feedback and permit a later level tick
+PASS each level stops at its budget and reports dynamic limits in UI
+PASS unconfirmed write records observed frame and target for transition diagnosis
+PASS final budget write retains ACK watchdog without creating another check
+PASS slider loads current level, updates labels without saving, and saves enum value
+PASS confirmed target after retry clears streak and advances only one command quantum
+PASS retry still requires fresh data and pressure headroom
+PASS error reversal holds an unresolved target rather than retrying wrong direction
+PASS late target response during retry hold is accepted and clears streak
+PASS after frame transition retry never writes old frame and S3 monitoring continues
+PASS missing ACK on a retry still aborts normally
+PASS exhausted check budget does not permit a retry beyond cap
+PASS home temperature94 is preserved by fresh workflow verification and reload
+PASS home event invalidates old temperature and verifies every frame including shaped S3
+PASS non-temperature profile tampering is still repaired while valid home temperature is kept
+PASS invalid or nonuniform temperatures cannot be adopted as a home setting
+PASS home edits during a shot do not change frozen active temperature or send profile writes
+PASS temperature change keeps LUT and seeds and preserves original temperature metadata
+PASS advanced temperature is a home-controlled readout, no conflicting Temperature save key
+PASS temperature-only change keeps existing coffee qualification and shaped command seed
+PASS temperature-only change retains prior empty qualification and baseline references
+PASS home change while initial GET is in flight prevents old-temperature upload and retries
+PASS three hundred checks can continue past old level3 cap without writes
+PASS all write caps are independent of2000 checks and never exceeded
+PASS temperature differences do not exclude prior cup numeric consensus or rewrite original temperature
+PASS cross-temperature matching retains basket/LUT/targets/pressure bindings and exact storage keys
+PASS cross-temperature evidence still fails pressure quality and same-command gates
+PASS all known S2 target epochs supply learning even when final write lacks feedback
+PASS controlled S2 evidence forms bounded next-shot adjustment rather than INSUFFICIENT
+PASS corrected S3 frames contribute independent known-target windows to consensus
+PASS ACK or local writes without observed fresh machine target cannot supply numeric data
+PASS live learning retains pressure and actuator gates using observed command
+PASS unknown target outside bounded written trajectory is excluded
+PASS duplicate RAW timestamps cannot satisfy relaxed live-learning windows
+PASS poor RAW regression is not admitted merely because machine targets are known
+PASS original fixed-command evidence path remains unchanged when live trim never writes
+PASS ±2% live band can act where old±6% would hold, without extra command quantum
+PASS next-shot±8% band adjusts two consistent10% deficits and holds within8%
+PASS learning reports and raw diagnostics remain distinct in exports
+PASS ACK alone cannot release feedback wait early
+PASS target alone cannot release feedback wait without driver ACK
+PASS confirmed feedback still respects minimum50ms and needs a new scale source sample
+PASS wrong-frame target cannot release a pending write
+PASS rapid confirmed command changes use dynamic exposure instead of needing long fixed epochs
+PASS observed RAW output quality stays available when driver command attribution is missing
+PASS plugin self-review reports stage outcome and learning without requiring external exports
+PASS review never turns overlapping actions into individual causal success claims
+PASS self-review panel is present in final generated script and summary export
+PASS fourth target miss enters recoverable cooldown while checks continue
+PASS late exact target during degraded cooldown automatically recovers normal control
+PASS degraded target retry holds after cup error reverses
+PASS degraded target retries require fresh scale and machine telemetry
+PASS degraded retry cannot spend beyond write cap; checks and late recovery remain active
+PASS new S3 frame drops degraded S2 retry and can control its own bounded target
+PASS target retries cannot reuse the last written scale source endpoint
+PASS recoverable feedback still ends at check budget and never resets budgets on recovery
+
+219/219 checks passed

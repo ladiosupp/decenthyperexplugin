@@ -1,36 +1,43 @@
-# HyperEx Pulse Filter0.1.59
+# HyperEx Pulse Filter0.1.60
 
-Current release based on delivered1.58, incorporating changes since GitHub1.54. Install over the same plugin; preserve LUT, history and command seeds. No new calibration or dedicated coffee acceptance is needed.1.59 has simulation validation, not hardware validation.
+Based on delivered/GitHub1.59. Install over the same plugin; preserve LUT/history/seed. No new calibration or dedicated coffee acceptance. Simulation validation only; no1.60 hardware result yet.
 
-## Live control budgets
+## Everyday self-diagnosis
 
-Each shot allows up to2000 checks across S2+S3. Write limits are separate; all initial writes and retries consume the write budget.
+Diagnostics now includes 本杯控制诊断: actual RAW stage-wide error, final60% mean/error, ripple CV, RMSE and observed overshoot, followed by stage learning-admission reasons and action-group comparisons. Routine use does not require sending screenshots/CSV. Export remains optional for unusual failures or deeper engineering review.
 
-|Level|Check interval|Check cap|Write cap|
+Outcome labels are heuristics: final60% absolute mean error≤8% and ripple CV≤10% -> target tracking/smoothness good. These are not a certified physical-performance standard. Stage-wide error and tail metrics are separate so startup ramp loss is not confused with a stable plateau error. Metrics are g/s from source-scale regressions, not DE1 ml/s commands. Group writes within3s on the same frame; use clean pre/post RAW windows when available. Overlapping actions are evaluated as a group, never falsely assigned individual causal success. Insufficient windows retain an explicit reason. Raw output quality remains visible even when command attribution is unavailable.
+
+## Live-trim evidence can enter normal learning
+
+The old last-write+2s settle+5s single-command-only gate no longer excludes a whole corrected phase. Current learning uses all fresh, observed machine-target epochs, including earlier valid windows before a late unconfirmed attempt. Machine target must correspond to the quantized initial command or a bounded prior written target for that frame; local send/ACK alone is not enough.
+
+Constant epochs: allow750ms settling,≥6unique RAW source timestamps,≥1.2s regression,R²≥.90. Pool usable windows; S2 needs≥2.4s; shaped S3 needs≥1.2s per frame and≥5s overall. Require≥25% regional temporal coverage and keep a robust normalized-response cohort (within25% of median, at least60% of usable candidate duration).
+
+If fast target changes leave too little fixed-epoch data, use contiguous source-time windows (about2s) and integrate actual observed target/starting-seed exposure. Both RAW time regression and exposure regression require R²≥.90; gaps/tare/duplicates do not create evidence. Normalization is a LOCAL PROPORTIONAL RESPONSE MODEL, not an exact hydraulic-delay model or measured physical law. Results are explicitly labelled and kept separate from original RAW diagnostics. Same seed/target/compatible frame-basis, two-cup consistency, variability and bounded next-shot correction still apply. Known S3 stalls are not normalized away.
+
+Pressure/actuator protection uses actual observed dynamic targets rather than incorrectly treating every changed command as the shot-start command:≥80% fresh target/frame coverage,≥4 machine samples,hold if≥20% near pressure limit or≥25% actual flow below70% of target. Unknown targets,stale machine data,insufficient source samples or poor regressions show specific reasons. No LUT rewriting. Old compact records without enough original data are not fabricated into new evidence; existing valid compatible evidence remains usable, including different temperatures.
+
+## Tolerances and timing
+
+- Live cup-flow target band±2%; ordinary next-shot S1/S2 deadband±8% and S3 LEVEL threshold8%. S1 startup-quality gates and all correction bounds unchanged. Historical empty qualification/calibration search thresholds remain separate.
+- The stock-DE1 A010 quantum remains1/16ml/s.±2% is a target, not guaranteed accuracy. Dynamic hydraulic smoothing might help but pure delay does not suppress ripple. No forced fixed-frequency dithering or invented measured delay is implemented.
+- Successful write: require BOTH driver ACK and matching frame/target, then release wait after minimum50ms. Another correction is considered only on the next level tick with a new source-scale endpoint.50ms is not a mandatory50ms write loop.
+- Missing response keeps original max(2s,2check periods) fault deadline. Missing driver ACK -> Idle abort. ACK but missing target -> tolerate3 consecutive misses, fourth stops trim; exact-target retries, no blind quantum accumulation. Matching feedback resets streak. One pending write,per-frame±20%,pressure/data guards remain.
+
+## Budgets and retained behavior
+
+|Level|Check cadence|Check cap S2+S3|Write cap including retries|
 |---|---|---|---|
-|1|planned S2+S3/50, min300ms; default944ms|2000|50|
+|1|planned duration/50,minimum300ms; default944ms|2000|50|
 |2|300ms|2000|150|
 |3|250ms|2000|200|
 |4|200ms|2000|250|
 
-Level1 retains its original cadence formula, not a2000th-of-duration interval. Diagnostics provides a4-position slider; native plugin settings provide a dropdown. Enable remains default OFF. Changing level does not enable it. Diagnostics/exports show separate counts. Exhausting writes leaves checks running until normal termination or check cap; pending final writes retain ACK/target watchdogs. Natural final weight/total-time/pressure/scale guards take precedence. Raw scale acquisition rate is unchanged.
-
-A010 current-frame writes remain one native1/16ml/s quantum from the last confirmed command, per-frame±20%, with fresh1.6s regression,6unique samples,1.2s span,R²≥.90,±6% deadband, pressure/actuator headroom and one outstanding write. At least max(2s,2check periods) between correction attempts. ACK without target feedback: tolerate3 consecutive misses, stop on fourth; matching feedback resets streak. Unconfirmed targets retry identically without accumulating quanta; direction reversal holds unresolved command. No missing-ACK bypass. No extra skipStep. Full original application profile restored after raw writes at Idle before another shot may arm.
-
-## Temperature and learning
-
-Adjust an existing HyperEx curve's brew temperature on the home page. Fresh workflow read adopts valid uniform70–100°C temperature before generating/upserting the profile, so it is not reset to92°C. Plugin Temperature is INITIAL DEFAULT for new profiles; diagnostic page shows current effective value. Active-shot temperature is not changed by this plugin. Reload retains the home temperature through the saved workflow.
-
-Temperature alone does not reset LUT, empty qualification, coffee context, seed or numeric-history eligibility. Prior cups at other temperatures are eligible for numeric learning. Their original temperature metadata remains unchanged. Existing basket-context, LUT/targets, multiplier, pressure limits, same-command/shape/timing, regression quality, actuator quality, variability, consensus and bounded-correction rules still apply. Temperature is no longer an independent history veto; inclusion is not guaranteed numeric adjustment when another quality gate fails. Exact storage/readback checks still include full original metadata.
-
-## Startup and evidence
-
-Retain physical GHC confirmation. Added20s cup-gain startup watchdog removed; original GHC countdown/retries/timeout,pressure/no-scale/total-run/final-weight guards remain. Optional legacy raw startup switch stays OFF; GHC/unknown capability skips redundant A002. REST and raw write the same requestedState; no interlock/flag modification is implemented.
-
-1.57 user evidence: level3,checks200/200,writes8,ACK8,target responses5,misses3,streak3,retries2,then old check budget ended. At94°C, coffee context and shaped seed reverted to EMPTY/LUT; simulation reproduced the92→94 fingerprint path.1.58 fixed home temperature and qualification;1.59 extends temperature compatibility to numeric learning and separates2000 checks from write caps. Do not compare these hardware curves as identical starting trajectories, or claim raw ACK alone proves cup-response convergence.
+Four-position diagnostic slider; native settings dropdown. Enable default OFF. Budgets are software caps, not hardware limits or required write counts. Full profile restored at Idle before rearming after live writes. Normal physical GHC start confirmation and original pressure/no-scale/total-time/final-weight guards retained. Home temperature persists via selected workflow; temperature alone does not reset LUT/coffee context or exclude historical numeric evidence.
 
 ## Validation
 
-190/190 Node simulations pass, including generated HTML scripts compiling, slider shared-settings save, temperature persistence/races/seed preservation, cross-temperature numeric consensus and bounded auto-application, pressure exclusion, separate write caps, checks beyond200 and2000 hard cap, missing-target tolerance and profile restoration. Browser visual rendering unavailable: Chromium not installed. No1.59 hardware result received.
+211/211 Node simulations pass, including generated HTML script compilation, controlled S2 normalized evidence -> bounded auto-application, all corrected S3 frames, rapid-target exposure fallback, late unconfirmed writes retaining earlier data, pressure/stale/unknown/duplicate/bad-regression rejection, successful feedback release/new-source/50ms and missing-response paths, self-review/output metrics, plus retained previous tests. Fixtures are synthetic, not unavailable user RAW replays. Browser visual rendering unavailable: Chromium not installed. No1.60 hardware validation.
 
-Run: node --check plugin.js; node tests/verify_v0159.cjs. See HANDOFF_v0159.md and tests/RESULTS_v0159.txt. LICENSE and calibration JSON contents are preserved. This package was finalized before its authorized GitHub upload; the release commit records upload completion.
+Run node --check plugin.js and node tests/verify_v0160.cjs. See HANDOFF_v0160.md/results. LICENSE/calibration JSON unchanged. Package finalized before GitHub synchronization; release commit records completion.

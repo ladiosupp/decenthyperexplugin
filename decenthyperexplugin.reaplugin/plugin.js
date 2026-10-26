@@ -822,7 +822,7 @@ function createPlugin(host) {
     state.diagnosticCurrent = {
       schema: 3,
       kind: String(kind || "hyperex"),
-      pluginVersion: "0.1.59",
+      pluginVersion: "0.1.60",
       runId: `${now}-${state.diagnosticRunSeq}`,
       profileTitle: state.workflowTitle || (state.cfg ? state.cfg.profileTitle : ""),
       startedAt: new Date(now).toISOString(),
@@ -1074,7 +1074,7 @@ function createPlugin(host) {
     if (m.confidence === "INSUFFICIENT" || !Number.isFinite(err) || current === null) {
       return { phase: "stage1", basis: "20–80% startup trajectory", confidence: m.confidence || "INSUFFICIENT", action: "REPEAT", message: "S1 whole-phase regression is startup-sensitive; the 20–80% trajectory is still insufficient for a numeric adjustment.", referenceCommandMlS: null, referenceRangeMlS: null, currentCommandMlS: current === null ? null : round(current,3), startupMetrics: m };
     }
-    if (Math.abs(err) <= 12) {
+    if (Math.abs(err) <= 8) {
       return { phase: "stage1", basis: "20–80% startup trajectory", confidence: m.confidence, action: "HOLD", message: `S1 20–80% trajectory is within ${Math.abs(err).toFixed(1)}% of target. Keep the current command; startup delay is reported separately.`, referenceCommandMlS: round(current,3), referenceRangeMlS: [round(current,3),round(current,3)], currentCommandMlS: round(current,3), ratio: round(Number(m.targetGS)/Number(m.midFlowGS),3), errorPct: round(err,1), startupMetrics: m };
     }
     const ratio = Number(m.targetGS) / Number(m.midFlowGS);
@@ -1203,10 +1203,10 @@ function createPlugin(host) {
       if (phase === "stage1") {
         const sm = stage1StartupMetrics(run);
         if (!sm || sm.confidence === "INSUFFICIENT" || (reg && Number(reg.seconds) < 1.5)) validationStatus = "STARTUP / REPEAT";
-        else if (Math.abs(errorPct) <= 12) validationStatus = "HIT";
+        else if (Math.abs(errorPct) <= 8) validationStatus = "HIT";
         else if (Math.abs(errorPct) <= 25) validationStatus = "NEAR";
         else validationStatus = "STARTUP / REPEAT";
-      } else if (Math.abs(errorPct) <= 12) validationStatus = "HIT";
+      } else if (Math.abs(errorPct) <= 8) validationStatus = "HIT";
       else if (Math.abs(errorPct) <= 25) validationStatus = "NEAR";
       else validationStatus = "MISS";
     }
@@ -1278,7 +1278,7 @@ function createPlugin(host) {
     if (confidence === "INSUFFICIENT") {
       return { phase, confidence, action: "REPEAT", message: "Regression quality/window is insufficient; keep the current LUT command and repeat the empty-basket validation.", referenceCommandMlS: null, referenceRangeMlS: null, currentCommandMlS: current === null ? null : round(current,3) };
     }
-    if (Math.abs(err) <= 12) {
+    if (Math.abs(err) <= 8) {
       const suffix = confidence === "LOW" ? " Data confidence is low, so repeat once before treating this as confirmed." : "";
       return { phase, confidence, action: "HOLD", message: `Within ${Math.abs(err).toFixed(1)}% of target; keep the current command.${suffix}`, referenceCommandMlS: current === null ? null : round(current,3), referenceRangeMlS: current === null ? null : [round(current,3),round(current,3)], currentCommandMlS: current === null ? null : round(current,3) };
     }
@@ -1318,6 +1318,10 @@ function createPlugin(host) {
 
 
   function stageActuatorEvidence(run, phase) {
+    if(phase!=="stage1"){
+      const controlled=controlLearningAssessment(run,phase);
+      if(controlled.applicable)return {...(controlled.actuator||{}),eligible:!!(controlled.actuator&&controlled.actuator.eligible),reason:controlled.actuator&&controlled.actuator.eligible?"Actual observed target/pressure quality passed":controlled.reason};
+    }
     const cfg=run && run.config || {};
     if (cfg.basketContext !== "coffee") return {eligible:true,reason:"Empty/legacy engineering context"};
     const limit=finiteOrNull(cfg[phase+"PressureLimit"]);
@@ -1371,6 +1375,8 @@ function createPlugin(host) {
   }
 
   function stage2AdaptiveEvidence(run) {
+    const controlled=controlLearningAssessment(run,"stage2");
+    if(controlled.applicable)return controlled.eligible?controlled.evidence:null;
     run = liveTrimLearningView(run, "stage2");
     if (!run || !stageActuatorEvidence(run, "stage2").eligible) return null;
     if (!run || (run.kind || "hyperex") !== "hyperex") return null;
@@ -1388,6 +1394,8 @@ function createPlugin(host) {
   }
 
   function stage3AdaptiveEvidence(run) {
+    const controlled=controlLearningAssessment(run,"stage3");
+    if(controlled.applicable)return controlled.eligible?controlled.evidence:null;
     run = liveTrimLearningView(run, "stage3");
     if (!run || !stageActuatorEvidence(run, "stage3").eligible) return null;
     if (!run || (run.kind || "hyperex") !== "hyperex") return null;
@@ -1468,7 +1476,8 @@ function createPlugin(host) {
 
   function sameStage3Shape(a, b) {
     if (!a || !b || !Array.isArray(a.source) || !Array.isArray(b.source) || a.source.length !== 3 || b.source.length !== 3) return false;
-    if (a.measurementBasis !== b.measurementBasis) return false;
+    const family=e=>e.measurementBasis==="live target-normalized frame windows"?"profile-frame regression":e.measurementBasis==="live target-normalized stability windows"?"stability 25/50/25 fallback":e.measurementBasis;
+    if (family(a) !== family(b)) return false;
     if (Math.abs(Number(a.earlySeconds) - Number(b.earlySeconds)) > 0.25 || Math.abs(Number(a.midSeconds) - Number(b.midSeconds)) > 0.25) return false;
     if (Math.abs(Number(a.targetGS)-Number(b.targetGS)) > 0.01) return false;
     for (let i = 0; i < 3; i++) if (Math.abs(Number(a.source[i].command) - Number(b.source[i].command)) > 0.005) return false;
@@ -1665,7 +1674,7 @@ function createPlugin(host) {
     const st = summary.stage3Stability || null;
     return {
       runId: String(run.runId),
-      pluginVersion: "0.1.59",
+      pluginVersion: "0.1.60",
       basketContext: run.config && run.config.basketContext || "unknown",
       startedAt: run.startedAt || null, endedAt: run.endedAt || null, result: run.result || null,
       fingerprint: run.config && run.config.adaptiveFingerprint || null,
@@ -1691,7 +1700,7 @@ function createPlugin(host) {
     // Never overwrite disk before the initial read, and serialize full-file writes.
     if (!state.persistentHistoryLoaded || !state.storageProbeVerified || state.persistentHistoryAvailable === false || !state.persistentHistoryFile) return false;
     if (state.pendingHistoryWrite) { state.historyWriteDirty = true; return true; }
-    state.persistentHistoryFile.writerVersion = "0.1.59";
+    state.persistentHistoryFile.writerVersion = "0.1.60";
     state.persistentHistoryFile.updatedAt = new Date().toISOString();
     state.persistentHistoryFile.writeToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     state.pendingHistoryWrite = JSON.stringify(state.persistentHistoryFile);
@@ -1716,7 +1725,7 @@ function createPlugin(host) {
     const record = compactPersistentShotRecord(run, evidence);
     if (!record) return;
     if (!state.persistentHistoryFile || typeof state.persistentHistoryFile !== "object") {
-      state.persistentHistoryFile = { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:"0.1.59", createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(), shots:[] };
+      state.persistentHistoryFile = { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:"0.1.60", createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(), shots:[] };
     }
     if (!Array.isArray(state.persistentHistoryFile.shots)) state.persistentHistoryFile.shots = [];
     state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.filter(x => x && x.runId !== record.runId);
@@ -1858,7 +1867,7 @@ function createPlugin(host) {
     if (!trustedAdaptiveRun(run)) return null;
     const s1ev=stage1AdaptiveEvidence(run), s2ev=stage2AdaptiveEvidence(run), s3ev=stage3AdaptiveEvidence(run);
     const s1=scalarConsensusSuggestion("S1 startup",s1ev,previousMatchingAdaptiveEvidence(s1ev,"s1"),{
-      deadbandPct:12,maxVariability:0.18,gain:0.18,maxFraction:0.04,maxAbs:0.04,rule:"2 matching MEDIUM-confidence startup shots; ±12% deadband; max ±4% and ±0.04 ml/s per next shot"
+      deadbandPct:8,maxVariability:0.18,gain:0.18,maxFraction:0.04,maxAbs:0.04,rule:"2 matching MEDIUM-confidence startup shots; ±8% deadband; max ±4% and ±0.04 ml/s per next shot"
     });
     if (!s1ev) {
       const startup=stage1StartupMetrics(run);
@@ -1866,10 +1875,13 @@ function createPlugin(host) {
       s1.startupMetrics=startup;
     }
     const s2=scalarConsensusSuggestion("S2",s2ev,previousMatchingAdaptiveEvidence(s2ev,"s2"),{
-      deadbandPct:12,maxVariability:0.15,gain:0.25,maxFraction:0.05,maxAbs:0.10,rule:"2 matching high-quality shots; ±12% HIT deadband; max ±5% and ±0.10 ml/s per next shot"
+      deadbandPct:8,maxVariability:0.15,gain:0.25,maxFraction:0.05,maxAbs:0.10,rule:"2 matching high-quality shots; ±8% HIT deadband; max ±5% and ±0.10 ml/s per next shot"
     });
 
-    let s3={usable:false,action:"REPEAT",confidence:"INSUFFICIENT",reason:"S3 segment/overall data is insufficient."};
+    const liveS2=controlLearningAssessment(run,"stage2"),liveS3=controlLearningAssessment(run,"stage3");
+    s2.evidenceBasis=liveS2.applicable?liveS2.basis:"RAW fixed-command regression";
+    if(liveS2.applicable)s2.reason=liveS2.reason+"; "+s2.reason;
+    let s3={usable:false,action:"REPEAT",confidence:"INSUFFICIENT",reason:liveS3.applicable?liveS3.reason:"S3 segment/overall data is insufficient."};
     if (s3ev) {
       const prev=previousMatchingAdaptiveEvidence(s3ev,"s3");
       if (!prev) {
@@ -1931,7 +1943,7 @@ function createPlugin(host) {
           const levelErr=(overallMean-target)/target*100;
           const levelGain=confidence==="HIGH"?0.22:0.16;
           let levelFactor=1;
-          if (Math.abs(levelErr)>10) levelFactor=1+(target/overallMean-1)*levelGain;
+          if (Math.abs(levelErr)>8) levelFactor=1+(target/overallMean-1)*levelGain;
           levelFactor=Math.max(0.95,Math.min(1.05,levelFactor));
           const weights=pairs.map(x=>Math.max(1,x.seconds));
           const wsum=weights.reduce((a,b)=>a+b,0);
@@ -1962,7 +1974,9 @@ function createPlugin(host) {
       if (!guard.eligible) Object.assign(decision,{usable:false,action:"LIMITED / HOLD",confidence:"INSUFFICIENT",reason:guard.reason,actuatorGuard:guard});
     }
     const actionable=!!((s1.usable&&s1.action==="ADJUST"&&Number.isFinite(Number(s1.suggestedCommandMlS)))||(s2.usable&&s2.action==="ADJUST"&&Number.isFinite(Number(s2.suggestedCommandMlS)))||(s3.usable&&s3.suggestedShape));
-    return {usable:!!(s1.usable||s2.usable||s3.usable),actionable,basketContext:run.config.basketContext||"unknown",actuatorGuards,runId:run.runId,mode:"SHOT-TO-SHOT ONLY",s1,s2,s3,note:"All three stages use completed-shot evidence only. No running-shot scale control, no extra skipStep calls, and the calibration LUT is never rewritten."};
+    if(liveS2.applicable)s2.outputQuality=liveS2.outputQuality;
+    if(liveS3.applicable){s3.outputQuality=liveS3.outputQuality;s3.evidenceBasis=liveS3.basis;if(liveS3.eligible)s3.reason=liveS3.reason+"; "+s3.reason;}
+    return {usable:!!(s1.usable||s2.usable||s3.usable),actionable,basketContext:run.config.basketContext||"unknown",actuatorGuards,runId:run.runId,mode:"SHOT-TO-SHOT ONLY",s1,s2,s3,note:run.config.experimentalLiveTrim?"Experimental live trim ran in this shot. This table proposes NEXT-SHOT changes only; normalized response is a local model. Actual RAW tracking metrics remain separate; LUT unchanged.":"All three stages use completed-shot evidence only. No running-shot scale control, no extra skipStep calls, and the calibration LUT is never rewritten."};
   }
 
 
@@ -2012,7 +2026,7 @@ function createPlugin(host) {
     }
     const previousOverrides = state.testOverrides ? JSON.parse(JSON.stringify(state.testOverrides)) : null;
     try {
-      state.testOverrides = { schema:3, writerVersion:"0.1.59", savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, basketContext:binding.basketContext, targets:binding.targets, stages, s3Shape, adaptiveSource:{ runId:suggestion.runId, appliedAt:new Date().toISOString(), mode:String(source || "manual") } };
+      state.testOverrides = { schema:3, writerVersion:"0.1.60", savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, basketContext:binding.basketContext, targets:binding.targets, stages, s3Shape, adaptiveSource:{ runId:suggestion.runId, appliedAt:new Date().toISOString(), mode:String(source || "manual") } };
       storageWrite(STORAGE_TEST_OVERRIDES, state.testOverrides);
 
       const verifyStatus = testOverrideStatus();
@@ -2163,6 +2177,8 @@ function createPlugin(host) {
       endedAt: run.endedAt,
       result: run.result,
       liveFlowTrim: run.liveFlowTrim || null,
+      controlReview: controlRunReview(run),
+      learningEvidence: {stage2:controlLearningAssessment(run,"stage2"),stage3:controlLearningAssessment(run,"stage3")},
       shotCommands: diagnosticRunCommandSnapshot(run),
       sampleCount: Array.isArray(run.samples) ? run.samples.length : 0,
       rawScaleSampleCount: Array.isArray(run.rawScaleSamples) ? run.rawScaleSamples.length : 0,
@@ -2427,7 +2443,7 @@ function createPlugin(host) {
     return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 html,body{margin:0;width:100%;min-height:100%;background:transparent;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;color:#f7f7f8;overflow-x:hidden}.card{width:860px;max-width:96vw;box-sizing:border-box;padding:22px;border-radius:20px;background:#17191d;box-shadow:0 18px 60px rgba(0,0,0,.45)}html.diagview,body.diagview{background:#17191d;min-width:100%;min-height:100vh}body.diagview .card{width:100vw;max-width:none;min-height:100vh;border-radius:0;box-shadow:none;padding:24px 30px}body.diagview .chart{height:250px}body.diagview textarea{height:190px}.k{font-size:13px;letter-spacing:.12em;opacity:.65}.t{font-size:27px;font-weight:800;margin:7px 0}.d{font-size:15px;line-height:1.45}.row{display:flex;gap:9px;margin-top:14px;flex-wrap:wrap}.b{border:0;border-radius:12px;padding:12px 14px;font-size:14px;font-weight:800;cursor:pointer}.p{background:#ff4fa3;color:#fff}.s{background:#343840;color:#fff}.warn{background:#8a4b18;color:#fff}.danger{background:#8a2530;color:#fff}.primaryAction{background:#f27a22;color:#fff;padding:14px 20px;font-size:15px;box-shadow:0 5px 18px rgba(0,0,0,.28)}.secondaryAction{background:#2b2f36;color:#e7e9ec;border:1px solid #555b65;padding:10px 13px;font-size:13px}.tertiaryAction{background:transparent;color:#c9cdd3;border:1px solid #3d424a;padding:10px 13px;font-size:13px}.actionBadge{display:inline-block;margin-left:8px;padding:3px 7px;border-radius:999px;background:#4a321d;color:#ffd4ac;font-size:9px;font-weight:800;letter-spacing:.08em;vertical-align:middle}.manualPanel{margin-top:10px;padding:12px;border-radius:10px;background:#1c1f24;border:1px solid #30343b}.active{outline:2px solid #fff}.m{margin-top:12px;font:12px ui-monospace,monospace;opacity:.78}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}.stat{background:#23262c;border-radius:11px;padding:10px}.stat b{display:block;font-size:17px;margin-top:4px}.small{font-size:11px;opacity:.68}.section{margin-top:14px;padding-top:13px;border-top:1px solid #343840}.section h3{margin:0 0 8px;font-size:16px}.good{color:#77d98b}.bad{color:#ff8c92}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}textarea{width:100%;height:150px;box-sizing:border-box;background:#0f1114;color:#dfe6ef;border:1px solid #343840;border-radius:10px;padding:9px;font:10px ui-monospace,monospace;resize:vertical}table{width:100%;border-collapse:collapse;font-size:11px}th,td{text-align:right;padding:5px 6px;border-bottom:1px solid #292d33}th:first-child,td:first-child{text-align:left}.chart{width:100%;height:205px;background:#101216;border:1px solid #2f333a;border-radius:10px;margin-top:8px}.legend{font-size:11px;opacity:.8;line-height:1.5}.stepHead{margin-top:18px;padding:14px 16px;border-radius:14px;background:#20242a;border:1px solid #3a4049}.stepHead b{font-size:19px}.stepBadge{float:right;padding:4px 9px;border-radius:999px;background:#343840;font-size:10px;letter-spacing:.06em}.stepBadge.good{background:#173b25}.stepBadge.bad{background:#4a2024}.stepHint{margin-top:5px;font-size:12px;opacity:.72;line-height:1.45}
-</style></head><body><div class="card"><div class="k">HYPEREX v0.1.59</div><div id="title" class="t">Checking…</div><div id="detail" class="d"></div>
+</style></head><body><div class="card"><div class="k">HYPEREX v0.1.60</div><div id="title" class="t">Checking…</div><div id="detail" class="d"></div>
 <div id="diag" style="display:none">
   <div class="d" style="margin:2px 0 12px;padding:10px 12px;border-radius:10px;background:#23262c"><b>ENTRY</b> · Dashboard <b>DIAG / CAL</b> is enabled by default. If another plugin occupies the reserved header slot, open <b>Plugins → HyperEx Pulse Filter</b>.</div>
 
@@ -2447,7 +2463,7 @@ html,body{margin:0;width:100%;min-height:100%;background:transparent;font-family
   <div class="stepHead"><span class="stepBadge">OPTIONAL</span><b>STEP 3 · MANUAL / ENGINEERING</b><div class="stepHint">Only for diagnosis, experiments or manual override. Normal users should leave AUTO APPLY on and let STEP 2 manage future shots.</div></div>
   <div class="section"><h3>REFERENCE ADVISORY · NO RUNNING-SHOT CONTROL</h3><div class="small">Manual reference ranges derived from the latest shot. These are not LUT rewrites.</div><div id="advisory" class="m"></div></div>
   <div class="section"><h3>ADVANCED / TEST OVERRIDE EDITOR</h3><div class="manualPanel"><div class="small"><b>EDITOR ONLY.</b> AUTO / LUT uses the saved calibration LUT. MANUAL TEST changes only future HyperEx profile commands. S3 shape advances by profile time only.</div><div id="testcommands" class="m"></div><div id="s3shape" class="m" style="margin-top:10px"></div><div class="row"><button id="applytest" class="b secondaryAction">APPLY TEST COMMANDS</button><button id="returnlut" class="b tertiaryAction">RETURN ALL TO LUT</button></div></div></div>
-  <div class="section"><details id="advancedsettings" class="manualPanel"><summary style="cursor:pointer;font-weight:800;font-size:16px">ADVANCED SETTINGS · QUICK EDIT</summary><div class="small" style="margin-top:8px">Same source of truth as <b>Plugins → HyperEx Pulse Filter</b>. Saving here writes normal plugin Settings; there is no second settings store.</div><div id="advancedmeta" class="m"></div><div class="m"><b>REAL-FLOW TARGETS</b></div><table><tr><th>Parameter</th><th>Value</th><th>Parameter</th><th>Value</th></tr><tr><td>S1 target (g/s)</td><td><input id="adv_stage1Flow" type="number" step="0.1" min="0.3" max="6.5"></td><td>S2 target (g/s)</td><td><input id="adv_stage2Flow" type="number" step="0.1" min="0.3" max="6.5"></td></tr><tr><td>S3 target (g/s)</td><td><input id="adv_stage3Flow" type="number" step="0.1" min="0.3" max="6.5"></td><td></td><td></td></tr></table><div class="m"><b>TEMPERATURE / PRESSURE SAFETY</b></div><table><tr><td>Temperature (°C)</td><td><output id="adv_temperature">—</output><div class="small">当前曲线温度 · 在首页调整</div></td><td>Emergency pressure (bar)</td><td><input id="adv_hardPressureLimit" type="number" step="0.1" min="1" max="12"></td></tr><tr><td>S1 pressure limiter (bar)</td><td><input id="adv_stage1PressureLimit" type="number" step="0.1" min="0.5" max="12"></td><td>S2 pressure limiter (bar)</td><td><input id="adv_stage2PressureLimit" type="number" step="0.1" min="0.5" max="12"></td></tr><tr><td>S3 pressure limiter (bar)</td><td><input id="adv_stage3PressureLimit" type="number" step="0.1" min="0.5" max="12"></td><td></td><td></td></tr></table><div class="m"><b>EXPERIMENTAL S2/S3 LIVE FLOW TRIM · DEFAULT OFF</b><br><label><input id="adv_liveFlowTrimTest" type="checkbox"> Enable live flow trim</label><br><label>Level <input id="adv_liveFlowTrimLevel" type="range" min="1" max="4" step="1" value="1" aria-label="杯内调流档位" style="width:260px;max-width:90%;vertical-align:middle;accent-color:#63d89b"><output id="adv_liveFlowTrimLevelLabel" for="adv_liveFlowTrimLevel">一档 · 原周期 / 最多50次写入</output></label><br>All levels: max 2000 checks per shot across S2+S3. Write budget is separate and shown by level; retries count as writes. Actual writes retain at least 2 s response wait. Up to 3 consecutive ACK-without-target misses are tolerated; the 4th stops trim. Unconfirmed targets retry without accumulating commands. Level 1 defaults to 944 ms. Level 4 is an experimental software cap, not a proven hardware maximum. Target band ±6%; bounded raw A010 changes, no extra skips. Normal shot-to-shot learning remains ON; corrected frames use only verified stable-command windows. Original profile restored afterwards.</div><div class="m"><b>DIRECT DRIVER START TEST · DEFAULT OFF</b><br><label><input id="adv_directDriverStartTest" type="checkbox"> After soak: Espresso request, then raw A002=04 write</label><br>One optional raw write. Original GHC confirmation countdown, re-arm retries and safety guards remain active. Physical GHC confirmation was still required in the 1.54 device test.</div><div class="m"><b>RELEASE / SCALE / RETRY / DIAGNOSTICS</b></div><table><tr><td>Release flow threshold (ml/s)</td><td><input id="adv_dumpFlowThreshold" type="number" step="0.05" min="0" max="2"></td><td>Low-flow stable samples</td><td><input id="adv_dumpFlowStableSamples" type="number" step="1" min="1" max="20"></td></tr><tr><td>Release fallback (s)</td><td><input id="adv_dumpFallbackSeconds" type="number" step="0.1" min="0.2" max="15"></td><td>Release timeout (s)</td><td><input id="adv_dumpTimeoutSeconds" type="number" step="0.1" min="1" max="30"></td></tr><tr><td>Scale tare threshold (g)</td><td><input id="adv_scaleResetThreshold" type="number" step="0.1" min="0.5" max="20"></td><td>No-scale timeout (s)</td><td><input id="adv_noScaleTimeoutSeconds" type="number" step="0.5" min="1" max="30"></td></tr><tr><td>Auto-arm retry 1 (s)</td><td><input id="adv_autoArmRetry1Seconds" type="number" step="0.5" min="0" max="30"></td><td>Auto-arm retry 2 (s)</td><td><input id="adv_autoArmRetry2Seconds" type="number" step="0.5" min="0" max="60"></td></tr><tr><td>Diagnostic sample (ms)</td><td><input id="adv_diagnosticSampleIntervalMs" type="number" step="10" min="50" max="1000"></td><td>Maximum sequence (s)</td><td><input id="adv_maxRunSeconds" type="number" step="10" min="30" max="600"></td></tr></table><div class="row"><button id="saveadvanced" class="b secondaryAction">SAVE TO PLUGIN SETTINGS</button></div><div id="startupbox" class="d" style="margin-top:10px"></div></details></div>
+  <div class="section"><details id="advancedsettings" class="manualPanel"><summary style="cursor:pointer;font-weight:800;font-size:16px">ADVANCED SETTINGS · QUICK EDIT</summary><div class="small" style="margin-top:8px">Same source of truth as <b>Plugins → HyperEx Pulse Filter</b>. Saving here writes normal plugin Settings; there is no second settings store.</div><div id="advancedmeta" class="m"></div><div class="m"><b>REAL-FLOW TARGETS</b></div><table><tr><th>Parameter</th><th>Value</th><th>Parameter</th><th>Value</th></tr><tr><td>S1 target (g/s)</td><td><input id="adv_stage1Flow" type="number" step="0.1" min="0.3" max="6.5"></td><td>S2 target (g/s)</td><td><input id="adv_stage2Flow" type="number" step="0.1" min="0.3" max="6.5"></td></tr><tr><td>S3 target (g/s)</td><td><input id="adv_stage3Flow" type="number" step="0.1" min="0.3" max="6.5"></td><td></td><td></td></tr></table><div class="m"><b>TEMPERATURE / PRESSURE SAFETY</b></div><table><tr><td>Temperature (°C)</td><td><output id="adv_temperature">—</output><div class="small">当前曲线温度 · 在首页调整</div></td><td>Emergency pressure (bar)</td><td><input id="adv_hardPressureLimit" type="number" step="0.1" min="1" max="12"></td></tr><tr><td>S1 pressure limiter (bar)</td><td><input id="adv_stage1PressureLimit" type="number" step="0.1" min="0.5" max="12"></td><td>S2 pressure limiter (bar)</td><td><input id="adv_stage2PressureLimit" type="number" step="0.1" min="0.5" max="12"></td></tr><tr><td>S3 pressure limiter (bar)</td><td><input id="adv_stage3PressureLimit" type="number" step="0.1" min="0.5" max="12"></td><td></td><td></td></tr></table><div class="m"><b>EXPERIMENTAL S2/S3 LIVE FLOW TRIM · DEFAULT OFF</b><br><label><input id="adv_liveFlowTrimTest" type="checkbox"> Enable live flow trim</label><br><label>Level <input id="adv_liveFlowTrimLevel" type="range" min="1" max="4" step="1" value="1" aria-label="杯内调流档位" style="width:260px;max-width:90%;vertical-align:middle;accent-color:#63d89b"><output id="adv_liveFlowTrimLevelLabel" for="adv_liveFlowTrimLevel">一档 · 原周期 / 最多50次写入</output></label><br>All levels: max 2000 checks per shot across S2+S3. Write budget is separate and shown by level; retries count as writes. ACK + matching target releases waiting after at least50ms; new writes occur only at level checks with fresh scale data. Missing responses retain the2s fault timeout. Up to 3 consecutive ACK-without-target misses are tolerated; the 4th stops trim. Unconfirmed targets retry without accumulating commands. Level 1 defaults to 944 ms. Level 4 is an experimental software cap, not a proven hardware maximum. Target band ±2% (native quantization and response dynamics may prevent reaching it); bounded raw A010 changes, no extra skips. Normal shot-to-shot learning remains ON; confirmed target windows are pooled and normalized to the starting seed with a labelled local response model. Original profile restored afterwards.</div><div class="m"><b>DIRECT DRIVER START TEST · DEFAULT OFF</b><br><label><input id="adv_directDriverStartTest" type="checkbox"> After soak: Espresso request, then raw A002=04 write</label><br>One optional raw write. Original GHC confirmation countdown, re-arm retries and safety guards remain active. Physical GHC confirmation was still required in the 1.54 device test.</div><div class="m"><b>RELEASE / SCALE / RETRY / DIAGNOSTICS</b></div><table><tr><td>Release flow threshold (ml/s)</td><td><input id="adv_dumpFlowThreshold" type="number" step="0.05" min="0" max="2"></td><td>Low-flow stable samples</td><td><input id="adv_dumpFlowStableSamples" type="number" step="1" min="1" max="20"></td></tr><tr><td>Release fallback (s)</td><td><input id="adv_dumpFallbackSeconds" type="number" step="0.1" min="0.2" max="15"></td><td>Release timeout (s)</td><td><input id="adv_dumpTimeoutSeconds" type="number" step="0.1" min="1" max="30"></td></tr><tr><td>Scale tare threshold (g)</td><td><input id="adv_scaleResetThreshold" type="number" step="0.1" min="0.5" max="20"></td><td>No-scale timeout (s)</td><td><input id="adv_noScaleTimeoutSeconds" type="number" step="0.5" min="1" max="30"></td></tr><tr><td>Auto-arm retry 1 (s)</td><td><input id="adv_autoArmRetry1Seconds" type="number" step="0.5" min="0" max="30"></td><td>Auto-arm retry 2 (s)</td><td><input id="adv_autoArmRetry2Seconds" type="number" step="0.5" min="0" max="60"></td></tr><tr><td>Diagnostic sample (ms)</td><td><input id="adv_diagnosticSampleIntervalMs" type="number" step="10" min="50" max="1000"></td><td>Maximum sequence (s)</td><td><input id="adv_maxRunSeconds" type="number" step="10" min="30" max="600"></td></tr></table><div class="row"><button id="saveadvanced" class="b secondaryAction">SAVE TO PLUGIN SETTINGS</button></div><div id="startupbox" class="d" style="margin-top:10px"></div></details></div>
 
   <div class="stepHead"><span class="stepBadge">EXPORT</span><b>STEP 4 · COPY CSV</b><div class="stepHint">Raw engineering export for offline analysis or bug reports. This is intentionally last because it is not needed for normal brewing.</div></div>
   <div class="section"><h3>LAST RUN CSV</h3><div class="small">Combined DE1/Decaid samples plus RAW scale weight/timestamp/dW-dt and profile-frame markers.</div><textarea id="csv" readonly></textarea></div>
@@ -2493,11 +2509,11 @@ const trimLevelSlider=$('adv_liveFlowTrimLevel');if(trimLevelSlider)trimLevelSli
 
 async function loadAdvancedSettings(){try{const r=await fetch(base+'/advanced-settings');if(!r.ok)return;const j=await r.json(),a=j.settings||{};for(const k of ADV_FIELDS){const q=$('adv_'+k);if(q&&a[k]!=null){if(q.type==='checkbox')q.checked=!!a[k];else q.value=a[k]}}const currentTemp=$('adv_temperature');if(currentTemp&&a.temperature!=null)currentTemp.value=Number(a.temperature).toFixed(1)+' °C';const meta=$('advancedmeta');updateTrimLevelLabel();if(meta){const bt=j.basicCurve||{};meta.innerHTML='Single settings source · core curve: S1 <b>'+esc(bt.stage1WeightG)+'g</b> → settle <b>'+esc(bt.releaseSettleSeconds)+'s</b> → soak <b>'+esc(bt.soakSeconds)+'s</b> → S2→S3 <b>'+esc(bt.stage2WeightG)+'g</b> → final <b>'+esc(bt.finalWeightG)+'g</b> · GHC timeout <b>'+esc(bt.ghcConfirmTimeoutSeconds)+'s</b>.'+(j.directStartTest?'<br><b>DIRECT DRIVER TEST: '+esc(j.directStartTest.status)+'</b>':'')}}catch(e){const meta=$('advancedmeta');if(meta)meta.textContent='Settings load error: '+e}}
 async function saveAdvancedSettings(){const payload={};for(const k of ADV_FIELDS){const q=$('adv_'+k);if(!q)continue;if(q.type==='checkbox'){payload[ADV_SETTING_KEYS[k]]=q.checked;continue}const v=Number(q.value);if(!Number.isFinite(v)){alert('Invalid setting: '+k);return}payload[ADV_SETTING_KEYS[k]]=k==='liveFlowTrimLevel'?String(v):v}if(!confirm('Save these values to the normal HyperEx plugin Settings?\\n\\nThis uses the same settings source shown on the Plugins page and reloads HyperEx once.'))return;const r=await fetch(coreSettings,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});if(!r.ok){alert('Save failed: '+await r.text());return}alert('Settings saved. HyperEx is reloading; reopen DIAG / CAL if this page closes.');setTimeout(()=>location.reload(),1200)}
-async function loadCal(){try{const r=await fetch(base+'/calibration-status');const c=await r.json();renderAppliedCommands(c.commandFlows||{},c.profileTruth||{});renderBasketContext(c);latestAutoApplyEnabled=c.autoApplyNextShot!==false;latestAutoApplyStatus=c.autoApplyLastStatus||null;renderAutoApplyBox();renderAdaptive(latestAdaptiveSummary);const ok=c.calibrationUsable;const b1=$("step1badge"),b2=$("step2badge");if(b1){b1.textContent=ok?"CAL READY":"REQUIRED FIRST";b1.className="stepBadge "+(ok?"good":"bad")}if(b2){b2.textContent=ok?"ACTIVE · AUTO NEXT SHOT":"WAITING FOR VALID LUT";b2.className="stepBadge "+(ok?"good":"bad")}const hs=c.persistentHistory||{},hb=$("historystatus");if(hb){if(hs.available===true){hb.style.background="#173b25";hb.style.color="#9ff0b5";hb.innerHTML='<b>ADAPTIVE HISTORY · PERSISTENT</b> · '+esc(hs.savedShots)+' saved shot(s), '+esc(hs.compatibleShots)+' compatible with the current calibration/LUT and basket context. '+esc(hs.baselineReferenceShots||0)+' empty/pre-upgrade baseline references retained; coffee consensus accumulates from normal coffees.'}else if(hs.available===false){hb.style.background="#4a2024";hb.style.color="#ffb4b8";hb.innerHTML='<b>ADAPTIVE HISTORY · SESSION ONLY</b> · '+esc(hs.status)+'<br>Shot-to-shot adaptation still works in this session, but cross-reload/version regression is disabled.'}else{hb.style.background="#3b2d16";hb.style.color="#ffd58a";hb.innerHTML='<b>ADAPTIVE HISTORY</b> · checking pluginStorage write/readback…'}}if($("t1")){ $("t1").value=c.commandFlows&&c.commandFlows.stage1DesiredGS!=null?c.commandFlows.stage1DesiredGS:""; $("t2").value=c.commandFlows&&c.commandFlows.stage2DesiredGS!=null?c.commandFlows.stage2DesiredGS:""; $("t3").value=c.commandFlows&&c.commandFlows.stage3DesiredGS!=null?c.commandFlows.stage3DesiredGS:"";}if(calmode){calmode.innerHTML=(c.calibrationModes||[{id:'low',label:'Low Water'},{id:'full',label:'Full'}]).map(x=>'<button class="b s '+(c.calibrationMode===x.id?'active':'')+'" data-mode="'+esc(x.id)+'">'+esc(x.label)+(x.id==='low'?' · DEFAULT':'')+'</button>').join('');calmode.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-mode',{mode:q.dataset.mode});await loadCal()})}if(waterwarn){const w=c.waterPreflight||{};const wc=w.status==='ok'?'#163b26':w.status==='warn'?'#3b2d16':'#4a2024';const fg=w.status==='ok'?'#9ff0b5':w.status==='warn'?'#ffd58a':'#ffb4b8';waterwarn.style.background=wc;waterwarn.style.color=fg;let tank='Tank level unavailable';if(w.available)tank='Tank: <b>'+esc(w.currentLevelMm)+' mm</b> · refill threshold: <b>'+esc(w.refillLevelMm)+' mm</b> · margin: <b>'+esc(w.marginMm)+' mm</b>';waterwarn.innerHTML='<b>WATER / VESSEL / TANK PREFLIGHT · '+esc(c.calibrationModeLabel)+' · '+esc((w.status||'unknown').toUpperCase())+'</b><br>'+tank+'<br>Prime: '+esc(c.primeFlow)+' ml/s × '+esc(c.primeSeconds)+' s · '+esc(c.calibrationSteps)+' calibration plateaus × '+esc(c.calibrationStepSeconds)+' s · nominal DE1 command water <b>≈'+esc(c.nominalCommandWaterMl)+' ml</b>.<br>Use a <b>'+esc(c.recommendedContainerMl)+' ml or larger</b> catch vessel. Plugin actively stops around <b>'+esc(c.calibrationHardStopG)+' g</b> actual collected water. '+esc(w.message||'');}calstatus.innerHTML='<b class="'+(ok?'good':'bad')+'">'+(ok?'CALIBRATION READY':'CALIBRATION NOT READY')+'</b><br>Mode: <b>'+esc(c.calibrationModeLabel)+'</b> · Profile: <b>'+esc(c.calibrationProfileTitle)+'</b><br>Scope: <b>'+esc(c.scopeLabel)+'</b> · DE1 multiplier: <b>'+esc(c.currentFlowMultiplier)+'</b> · map base: <b>'+esc(c.calibrationBaseMultiplier)+'</b> · suggested: <b>'+esc(c.suggestedFlowMultiplier)+'</b><br>'+esc(c.calibrationStaleReason||'LUT valid')+(c.lastCalibrationValid===false?'<br><b class="bad">LAST CAL RUN INVALID — previous valid LUT retained</b>':c.lastCalibrationValid===true?'<br><b class="good">LAST CAL RUN VALID</b>':'')+'<br>Real→command: S1 '+esc(c.commandFlows&&c.commandFlows.stage1DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage1CommandMlS)+' · S2 '+esc(c.commandFlows&&c.commandFlows.stage2DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage2CommandMlS)+' · S3 '+esc(c.commandFlows&&c.commandFlows.stage3DesiredGS)+'→'+appliedS3Text(c.commandFlows||{})+'<br>Test mode: <b>'+esc((c.commandFlows&&c.commandFlows.manualTestStatus)||'none')+'</b>';renderTestCommands(c.commandFlows||{},latestAdvisorySummary||{});scope.innerHTML=['off','hyperex','global'].map(x=>'<button class="b s '+(c.scope===x?'active':'')+'" data-scope="'+x+'">'+(x==='off'?'OFF':x==='hyperex'?'HYPEREX ONLY':'GLOBAL')+'</button>').join('');scope.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-scope',{scope:q.dataset.scope});await loadCal()});const last=c.lastCalibration||null;const rows=last&&Array.isArray(last.plateauResults)?last.plateauResults:[];const anchors=last&&last.map&&Array.isArray(last.map.targetAnchors)?last.map.targetAnchors:[];const anchorHtml=anchors.length?'<div style="margin:8px 0"><b>TARGET LUT:</b> '+anchors.map(a=>esc(a.blockId)+' '+esc(a.actualFlow)+' g/s → '+esc(a.commandFlow)+' ml/s ('+esc(a.quality)+')').join(' · ')+'</div>':'';map.innerHTML=rows.length?anchorHtml+'<table><tr><th>Frame</th><th>Block / target</th><th>DE1 cmd</th><th>RAW real g/s</th><th>DE1 flow</th><th>R²</th><th>Status</th></tr>'+rows.map(p=>'<tr><td>'+esc(p.frame)+'</td><td>'+esc((p.blockId||'—')+(p.targetReal!=null?' / '+p.targetReal:'') )+'</td><td>'+esc(p.commandFlow)+'</td><td>'+esc(p.actualFlow)+'</td><td>'+esc(p.machineFlow)+'</td><td>'+esc(p.r2)+'</td><td class="'+(p.acceptedInMap?'good':(p.valid?'':'bad'))+'">'+esc(p.acceptedInMap?'ANCHOR SOURCE':(p.reason||'REJECTED'))+'</td></tr>').join('')+'</table><div style="margin-top:8px">'+esc(c.profileSyncStatus||'')+'</div>':'No calibration run yet. Low Water automatically searches the three HyperEx real-flow targets and generates the LUT only when all targets pass. Full remains the wide engineering staircase.';const cur=c.stage1StartupCorrection||1;startupbox.innerHTML='<b>Stable skip topology:</b> scale feedback is advisory only. Optional S3 DECAY COMP may use 5 profile frames, but S3 subframes advance only by their own timers and never add plugin skipStep calls.'+(Number(cur)!==1?(' <br><span class="bad">Legacy S1 startup factor '+esc(cur)+'× is stored but ignored in v0.1.59.</span> <button id=clearstartup class="b s">CLEAR LEGACY</button>'):'');const cl=$("clearstartup");if(cl)cl.onclick=async()=>{try{await post('startup-clear',{});await loadCal()}catch(e){alert('Clear failed: '+e)}};}catch(e){calstatus.textContent='Calibration status error: '+e}}
+async function loadCal(){try{const r=await fetch(base+'/calibration-status');const c=await r.json();renderAppliedCommands(c.commandFlows||{},c.profileTruth||{});renderBasketContext(c);latestAutoApplyEnabled=c.autoApplyNextShot!==false;latestAutoApplyStatus=c.autoApplyLastStatus||null;renderAutoApplyBox();renderAdaptive(latestAdaptiveSummary);const ok=c.calibrationUsable;const b1=$("step1badge"),b2=$("step2badge");if(b1){b1.textContent=ok?"CAL READY":"REQUIRED FIRST";b1.className="stepBadge "+(ok?"good":"bad")}if(b2){b2.textContent=ok?"ACTIVE · AUTO NEXT SHOT":"WAITING FOR VALID LUT";b2.className="stepBadge "+(ok?"good":"bad")}const hs=c.persistentHistory||{},hb=$("historystatus");if(hb){if(hs.available===true){hb.style.background="#173b25";hb.style.color="#9ff0b5";hb.innerHTML='<b>ADAPTIVE HISTORY · PERSISTENT</b> · '+esc(hs.savedShots)+' saved shot(s), '+esc(hs.compatibleShots)+' compatible with the current calibration/LUT and basket context. '+esc(hs.baselineReferenceShots||0)+' empty/pre-upgrade baseline references retained; coffee consensus accumulates from normal coffees.'}else if(hs.available===false){hb.style.background="#4a2024";hb.style.color="#ffb4b8";hb.innerHTML='<b>ADAPTIVE HISTORY · SESSION ONLY</b> · '+esc(hs.status)+'<br>Shot-to-shot adaptation still works in this session, but cross-reload/version regression is disabled.'}else{hb.style.background="#3b2d16";hb.style.color="#ffd58a";hb.innerHTML='<b>ADAPTIVE HISTORY</b> · checking pluginStorage write/readback…'}}if($("t1")){ $("t1").value=c.commandFlows&&c.commandFlows.stage1DesiredGS!=null?c.commandFlows.stage1DesiredGS:""; $("t2").value=c.commandFlows&&c.commandFlows.stage2DesiredGS!=null?c.commandFlows.stage2DesiredGS:""; $("t3").value=c.commandFlows&&c.commandFlows.stage3DesiredGS!=null?c.commandFlows.stage3DesiredGS:"";}if(calmode){calmode.innerHTML=(c.calibrationModes||[{id:'low',label:'Low Water'},{id:'full',label:'Full'}]).map(x=>'<button class="b s '+(c.calibrationMode===x.id?'active':'')+'" data-mode="'+esc(x.id)+'">'+esc(x.label)+(x.id==='low'?' · DEFAULT':'')+'</button>').join('');calmode.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-mode',{mode:q.dataset.mode});await loadCal()})}if(waterwarn){const w=c.waterPreflight||{};const wc=w.status==='ok'?'#163b26':w.status==='warn'?'#3b2d16':'#4a2024';const fg=w.status==='ok'?'#9ff0b5':w.status==='warn'?'#ffd58a':'#ffb4b8';waterwarn.style.background=wc;waterwarn.style.color=fg;let tank='Tank level unavailable';if(w.available)tank='Tank: <b>'+esc(w.currentLevelMm)+' mm</b> · refill threshold: <b>'+esc(w.refillLevelMm)+' mm</b> · margin: <b>'+esc(w.marginMm)+' mm</b>';waterwarn.innerHTML='<b>WATER / VESSEL / TANK PREFLIGHT · '+esc(c.calibrationModeLabel)+' · '+esc((w.status||'unknown').toUpperCase())+'</b><br>'+tank+'<br>Prime: '+esc(c.primeFlow)+' ml/s × '+esc(c.primeSeconds)+' s · '+esc(c.calibrationSteps)+' calibration plateaus × '+esc(c.calibrationStepSeconds)+' s · nominal DE1 command water <b>≈'+esc(c.nominalCommandWaterMl)+' ml</b>.<br>Use a <b>'+esc(c.recommendedContainerMl)+' ml or larger</b> catch vessel. Plugin actively stops around <b>'+esc(c.calibrationHardStopG)+' g</b> actual collected water. '+esc(w.message||'');}calstatus.innerHTML='<b class="'+(ok?'good':'bad')+'">'+(ok?'CALIBRATION READY':'CALIBRATION NOT READY')+'</b><br>Mode: <b>'+esc(c.calibrationModeLabel)+'</b> · Profile: <b>'+esc(c.calibrationProfileTitle)+'</b><br>Scope: <b>'+esc(c.scopeLabel)+'</b> · DE1 multiplier: <b>'+esc(c.currentFlowMultiplier)+'</b> · map base: <b>'+esc(c.calibrationBaseMultiplier)+'</b> · suggested: <b>'+esc(c.suggestedFlowMultiplier)+'</b><br>'+esc(c.calibrationStaleReason||'LUT valid')+(c.lastCalibrationValid===false?'<br><b class="bad">LAST CAL RUN INVALID — previous valid LUT retained</b>':c.lastCalibrationValid===true?'<br><b class="good">LAST CAL RUN VALID</b>':'')+'<br>Real→command: S1 '+esc(c.commandFlows&&c.commandFlows.stage1DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage1CommandMlS)+' · S2 '+esc(c.commandFlows&&c.commandFlows.stage2DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage2CommandMlS)+' · S3 '+esc(c.commandFlows&&c.commandFlows.stage3DesiredGS)+'→'+appliedS3Text(c.commandFlows||{})+'<br>Test mode: <b>'+esc((c.commandFlows&&c.commandFlows.manualTestStatus)||'none')+'</b>';renderTestCommands(c.commandFlows||{},latestAdvisorySummary||{});scope.innerHTML=['off','hyperex','global'].map(x=>'<button class="b s '+(c.scope===x?'active':'')+'" data-scope="'+x+'">'+(x==='off'?'OFF':x==='hyperex'?'HYPEREX ONLY':'GLOBAL')+'</button>').join('');scope.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-scope',{scope:q.dataset.scope});await loadCal()});const last=c.lastCalibration||null;const rows=last&&Array.isArray(last.plateauResults)?last.plateauResults:[];const anchors=last&&last.map&&Array.isArray(last.map.targetAnchors)?last.map.targetAnchors:[];const anchorHtml=anchors.length?'<div style="margin:8px 0"><b>TARGET LUT:</b> '+anchors.map(a=>esc(a.blockId)+' '+esc(a.actualFlow)+' g/s → '+esc(a.commandFlow)+' ml/s ('+esc(a.quality)+')').join(' · ')+'</div>':'';map.innerHTML=rows.length?anchorHtml+'<table><tr><th>Frame</th><th>Block / target</th><th>DE1 cmd</th><th>RAW real g/s</th><th>DE1 flow</th><th>R²</th><th>Status</th></tr>'+rows.map(p=>'<tr><td>'+esc(p.frame)+'</td><td>'+esc((p.blockId||'—')+(p.targetReal!=null?' / '+p.targetReal:'') )+'</td><td>'+esc(p.commandFlow)+'</td><td>'+esc(p.actualFlow)+'</td><td>'+esc(p.machineFlow)+'</td><td>'+esc(p.r2)+'</td><td class="'+(p.acceptedInMap?'good':(p.valid?'':'bad'))+'">'+esc(p.acceptedInMap?'ANCHOR SOURCE':(p.reason||'REJECTED'))+'</td></tr>').join('')+'</table><div style="margin-top:8px">'+esc(c.profileSyncStatus||'')+'</div>':'No calibration run yet. Low Water automatically searches the three HyperEx real-flow targets and generates the LUT only when all targets pass. Full remains the wide engineering staircase.';const cur=c.stage1StartupCorrection||1;startupbox.innerHTML='<b>Stable skip topology:</b> scale feedback is advisory only. Optional S3 DECAY COMP may use 5 profile frames, but S3 subframes advance only by their own timers and never add plugin skipStep calls.'+(Number(cur)!==1?(' <br><span class="bad">Legacy S1 startup factor '+esc(cur)+'× is stored but ignored in v0.1.60.</span> <button id=clearstartup class="b s">CLEAR LEGACY</button>'):'');const cl=$("clearstartup");if(cl)cl.onclick=async()=>{try{await post('startup-clear',{});await loadCal()}catch(e){alert('Clear failed: '+e)}};}catch(e){calstatus.textContent='Calibration status error: '+e}}
 function svgPath(points,xmin,xmax,ymin,ymax){const W=800,H=205,pad=18,dx=Math.max(.001,xmax-xmin),dy=Math.max(.001,ymax-ymin);let out='';for(const q of points){if(!Number.isFinite(q[0])||!Number.isFinite(q[1]))continue;const x=pad+(q[0]-xmin)/dx*(W-pad*2),y=H-pad-(q[1]-ymin)/dy*(H-pad*2);out+=(out?' L ':'M ')+x.toFixed(1)+' '+y.toFixed(1)}return out}
 function renderChart(svg,series,ymin,ymax,markers){if(!svg)return;let all=[];series.forEach(s=>all=all.concat(s.points));if(!all.length){svg.innerHTML='';return}const xs=all.map(p=>p[0]).filter(Number.isFinite),ys=all.map(p=>p[1]).filter(Number.isFinite);const xmin=Math.min(...xs),xmax=Math.max(...xs);if(ymin==null)ymin=Math.min(...ys);if(ymax==null)ymax=Math.max(...ys);if(ymax-ymin<.01)ymax=ymin+1;let h='<line x1="18" y1="187" x2="782" y2="187" stroke="#3a3f47"/><line x1="18" y1="18" x2="18" y2="187" stroke="#3a3f47"/>';for(const s of series){const path=svgPath(s.points,xmin,xmax,ymin,ymax);if(path)h+='<path d="'+path+'" fill="none" stroke="'+s.stroke+'" stroke-width="'+(s.width||1.7)+'" opacity="'+(s.opacity||1)+'"/>'}h+='<text x="24" y="16" fill="#aeb6c2" font-size="10">'+Number(ymax).toFixed(1)+'</text><text x="24" y="184" fill="#aeb6c2" font-size="10">'+Number(ymin).toFixed(1)+'</text>';for(const q of markers||[]){if(!Number.isFinite(q.x))continue;const xx=18+(q.x-xmin)/Math.max(.001,xmax-xmin)*764;const yy=Number.isFinite(q.y)?187-(q.y-ymin)/Math.max(.001,ymax-ymin)*169:181;const title='<title>'+esc(q.label||'')+'</title>';const tip=' data-tip="'+esc(q.label||'').replace(/"/g,'&quot;')+'"';if(q.shape==='diamond')h+='<path d="M '+xx+' '+(yy-4)+' l 4 4 l -4 4 l -4 -4 Z" fill="'+q.color+'"'+tip+'>'+title+'</path>';else if(q.shape==='square')h+='<rect x="'+(xx-3)+'" y="'+(yy-3)+'" width="6" height="6" fill="'+q.color+'"'+tip+'>'+title+'</rect>';else h+='<circle cx="'+xx+'" cy="'+yy+'" r="3" fill="'+q.color+'"'+tip+'>'+title+'</circle>'}svg.innerHTML=h}
 function liveTrimMarkers(run){return(run.liveFlowTrim&&run.liveFlowTrim.trace||[]).filter(x=>['check','write','machine-target-response'].includes(x.kind)).map(x=>({x:x.tMs/1000,y:x.kind==='check'?x.rawGS:x.commandMlS,shape:x.kind==='write'?'diamond':x.kind==='machine-target-response'?'square':'circle',color:x.kind==='write'?'#ff9c45':x.kind==='machine-target-response'?'#f4e6a5':x.rawGS==null?'#7c8795':'#63d89b',label:x.kind+' @ '+(x.tMs/1000).toFixed(2)+'s · '+(x.kind==='check'?(x.rawGS==null?'no valid RAW regression':x.rawGS+' g/s')+' · '+(x.reason||x.decision):x.commandMlS+' ml/s')}))}
-function renderLiveTrim(run){const q=$('livetrimstatus');if(!q)return;const x=run&&run.liveFlowTrim;if(!x){q.textContent='';return}q.textContent='EXPERIMENTAL LIVE FLOW TRIM · level '+(x.level||1)+' · '+x.status+' · checks '+x.checks+'/'+(x.maxChecks||50)+' · writes '+x.writes+'/'+(x.maxWrites||50)+' · driver ACK '+x.acks+' · target responses '+x.targetConfirmations+' · target misses '+(x.targetMisses||0)+' / streak '+(x.consecutiveTargetMisses||0)+' (tolerate 3) · retries '+(x.retries||0)+' · interval '+x.periodMs+' ms · normal next-shot learning retained; corrected stages require verified stable windows';}
+function renderLiveTrim(run){const q=$('livetrimstatus');if(!q)return;const x=run&&run.liveFlowTrim;if(!x){q.textContent='';return}q.textContent='EXPERIMENTAL LIVE FLOW TRIM · level '+(x.level||1)+' · '+x.status+' · checks '+x.checks+'/'+(x.maxChecks||50)+' · writes '+x.writes+'/'+(x.maxWrites||50)+' · driver ACK '+x.acks+' · target responses '+x.targetConfirmations+' · target misses '+(x.targetMisses||0)+' / streak '+(x.consecutiveTargetMisses||0)+' (tolerate 3) · retries '+(x.retries||0)+' · interval '+x.periodMs+' ms · next-shot band ±8%; confirmed windows pooled with labelled seed-normalization model';}
 function renderCharts(run){if(!run)return;const combined=run.samples||[],raw=run.rawScaleSamples||[];const target=combined.map(s=>[Number(s.tMs)/1000,Number(s.targetFlowMlS)]),machine=combined.map(s=>[Number(s.tMs)/1000,Number(s.machineFlowMlS)]),decaid=combined.map(s=>[Number(s.tMs)/1000,Number(s.decaidWeightFlowGS)]);const cupTarget=combined.map(s=>[Number(s.tMs)/1000,Number(s.desiredRealFlowGS)]);const rawSlope=[];for(let i=0;i<raw.length;i++){let j=i-1;while(j>0&&Number(raw[i].tMs)-Number(raw[j].tMs)<900)j--;if(j>=0){let reset=false;for(let k=j+1;k<=i;k++)if(raw[k].tareReset){reset=true;break}const dt=(Number(raw[i].scaleTimestampSeconds)-Number(raw[j].scaleTimestampSeconds));if(!reset&&Number.isFinite(dt)&&dt>.25){rawSlope.push([Number(raw[i].tMs)/1000,(Number(raw[i].weightG)-Number(raw[j].weightG))/dt])}}}const flowYs=[...target,...machine,...decaid,...rawSlope].map(p=>p[1]).filter(v=>Number.isFinite(v)&&v>-1&&v<20);const fymax=Math.max(6,flowYs.length?Math.min(12,Math.ceil(Math.max(...flowYs)+.5)):8);renderChart($('flowchart'),[{points:cupTarget,stroke:'#f58d9a',width:1.3},{points:target,stroke:'#f0c75e',width:1.4},{points:machine,stroke:'#71a7ff',width:1.8},{points:decaid,stroke:'#c77dff',width:1.5,opacity:.8},{points:rawSlope,stroke:'#63d89b',width:2.1},{points:(run.liveFlowTrim&&run.liveFlowTrim.trace||[]).filter(x=>x.kind==='write').map(x=>[x.tMs/1000,x.commandMlS]),stroke:'#ff9c45',width:2}],0,fymax,liveTrimMarkers(run));const wp=raw.map(r=>[Number(r.tMs)/1000,Number(r.weightG)]);if(wp.length){const wy=wp.map(p=>p[1]).filter(Number.isFinite);renderChart($('weightchart'),[{points:wp,stroke:'#e5e8ed',width:2}],Math.min(...wy),Math.max(...wy))}}
 function validationClass(x){return x==='HIT'?'good':x==='NEAR'||x==='TRANSIENT'?'':'bad'}
 function validationRow(label,p){if(!p)return '<tr><td>'+label+'</td><td colspan=7>—</td></tr>';return '<tr><td>'+label+'</td><td>'+esc(p.desiredRealFlowGS)+'</td><td>'+esc(p.machineFlowAvg)+'</td><td>'+esc(p.gflowAvg)+'</td><td><b>'+esc(p.rawRegressionGS)+'</b></td><td>'+esc(p.rawRegressionR2)+'</td><td>'+esc(p.rawRegressionSeconds)+'s</td><td class="'+validationClass(p.validationStatus)+'">'+esc(p.validationStatus)+' '+(p.rawErrorPct==null?'':('('+p.rawErrorPct+'%)'))+'</td></tr>'}
@@ -2517,10 +2533,11 @@ function renderAdaptive(s){
   const appliedForRun=String(st.runId||'')===String(a.runId||'')&&(st.status==='applied'||st.status==='manual-applied');
   const failedForRun=String(st.runId||'')===String(a.runId||'')&&st.status==='error';
   const scalarRow=(label,x,basis)=>{let measured=x.measuredGS==null?'—':esc(x.measuredGS)+' g/s';if(x.previousGS!=null&&x.currentGS!=null)measured=esc(x.previousGS)+' → '+esc(x.currentGS)+' g/s · mean '+esc(x.measuredGS);let proposed='repeat';if(x.action==='HOLD')proposed='<span class="good"><b>HOLD '+esc(x.currentCommandMlS)+' ml/s</b></span>';else if(x.action==='ADJUST')proposed='<b>'+esc(x.suggestedCommandMlS)+' ml/s</b>';else if(x.action)proposed='<b>'+esc(x.action)+'</b>';return '<tr><td>'+label+'</td><td>'+basis+'<br>'+measured+(x.variabilityPct!=null?' · var '+esc(x.variabilityPct)+'%':'')+'</td><td>'+esc(x.currentCommandMlS)+' ml/s</td><td>'+proposed+'</td><td>'+esc(x.confidence||'—')+'</td></tr>'};
-  let h='<div class="small">Source run: <b>'+esc(a.runId)+'</b> · <b>'+esc(a.mode)+'</b> · all numeric changes below apply to the <b>NEXT SHOT ONLY</b>.</div><table><tr><th>Stage</th><th>Evidence</th><th>SHOT command</th><th>NEXT action / command</th><th>Confidence</th></tr>';
+  let h='<div class="small">Source run: <b>'+esc(a.runId)+'</b> · <b>'+esc(a.mode)+'</b> · all numeric changes below apply to the <b>NEXT SHOT ONLY</b>.</div><table><tr><th>Stage</th><th>Evidence</th><th>LEARNING seed / fixed command</th><th>NEXT action / command</th><th>Confidence</th></tr>';
   h+=scalarRow('S1',s1,'startup 20–80%');
-  h+=scalarRow('S2',s2,'RAW multi-second regression');
+  h+=scalarRow('S2',s2,esc(s2.evidenceBasis||'RAW multi-second regression'));
   let s3meas=s3.overallGS==null?'—':('overall '+esc(s3.overallGS)+' g/s');
+  if(s3.evidenceBasis)s3meas+='<br>'+esc(s3.evidenceBasis);
   if(s3.levelErrorPct!=null)s3meas+=' · LEVEL error '+esc(s3.levelErrorPct)+'%';
   if(s3.variabilityPct!=null)s3meas+=' · max var '+esc(s3.variabilityPct)+'%';
   let s3shot=(s3.sourceFrames||[]).map(x=>esc(x.commandMlS)).join(' → ')||'—';
@@ -2529,6 +2546,8 @@ function renderAdaptive(s){
   if(s3.suggestedShape){const q=s3.suggestedShape;s3next='<b>'+esc(s3.action)+'<br>'+esc(q.earlyCommand)+' × '+esc(q.earlySeconds)+'s → '+esc(q.midCommand)+' × '+esc(q.midSeconds)+'s → '+esc(q.lateCommand)+'</b>';if(s3.levelFactor!=null)s3next+='<br><span class="small">LEVEL ×'+esc(s3.levelFactor)+' · normalized SHAPE '+(s3.shapeFactors||[]).map(x=>'×'+esc(x)).join(' / ')+'</span>'}
   h+='<tr><td>S3</td><td>'+s3meas+'<br>late/early '+esc(s3.lateToEarlyRatio)+' · '+esc(s3.status||'—')+'</td><td>'+s3shot+'</td><td>'+s3next+'</td><td>'+esc(s3.confidence||'—')+'</td></tr>';
   h+='</table><div class="small" style="margin-top:7px">'+esc(a.note||'')+'<br>S1: '+esc(s1.maxStepRule||'')+'<br>'+esc(s1.reason||'—')+'<br>S2: '+esc(s2.maxStepRule||'')+'<br>'+esc(s2.reason||'—')+'<br>S3: '+esc(s3.maxStepRule||'')+'<br>'+esc(s3.reason||'—')+'</div>';
+  const review=s&&s.controlReview;if(review){h+='<div class="manualPanel"><b>本杯控制诊断 · '+esc(review.status)+'</b><div class="small">'+esc(review.note)+' · 杯内状态：'+esc(review.controllerStatus)+'</div>';for(const p of review.phases||[]){const q=p.output||{};h+='<div class="m"><b>'+esc(p.phase==='stage2'?'S2':'S3')+' · '+esc(p.status)+'</b> · 后段误差 '+esc(q.tailErrorPct)+'% · 波动CV '+esc(q.tailRippleCVPct)+'% · 过冲 '+esc(q.tailOvershootPct)+'% · 写入 '+esc(p.writes)+'次<br>'+esc(p.learningStatus)+'</div>';for(const g of p.actionGroups||[])h+='<div class="small">'+esc((g.firstMs/1000).toFixed(1))+'–'+esc((g.lastMs/1000).toFixed(1))+'s · '+esc(g.writes)+'次写入 · '+esc(g.status)+' · '+esc(g.attribution)+'</div>'}h+='</div>'}
+  for(const [label,x] of [['S2',s2],['S3',s3]]){const q=x.outputQuality;if(q&&q.available)h+='<div class="small"><b>'+label+' ACTUAL RAW OUTPUT</b> · phase error '+esc(q.wholePhaseErrorPct)+'% · final60% mean '+esc(q.tailMeanGS)+' g/s · error '+esc(q.tailErrorPct)+'% · ripple CV '+esc(q.tailRippleCVPct)+'% · RMSE '+esc(q.tailRMSEGS)+' g/s · overshoot '+esc(q.tailOvershootPct)+'%</div>'}
   if(ready){
     if(latestAutoApplyEnabled){
       if(appliedForRun)h+='<div class="row"><span class="good"><b>APPLIED ✓ TO NEXT SHOT</b></span><span class="small" style="align-self:center">Readback and profile sync completed. The NEXT SHOT · APPLIED PROFILE block above is authoritative.</span></div>';
@@ -2713,7 +2732,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     return {
       title: calibrationProfileTitle(normalizedMode),
       author: "ladiosupp / HyperEx",
-      notes: `EMPTY BASKET ONLY. HyperEx v0.1.59 ${wp.modeLabel} real-flow calibration. Prime ${wp.primeFlow.toFixed(2)} ml/s × ${wp.primeSeconds.toFixed(1)} s, then ${wp.steps} ${wp.algorithm === "target-lut" ? "target-search" : "calibration"} plateaus × ${wp.stepSeconds.toFixed(1)} s; nominal DE1 commanded water ≈${wp.nominalCommandWaterMl} ml. Use a ${wp.recommendedContainerMl} ml or larger catch vessel. The plugin actively stops calibration at about ${wp.hardStopG} g actual collected water to preserve margin below 300 ml. Tank level is checked before PREPARE when live DE1 water-level telemetry is available. Tare the scale, start Espresso manually, and leave the vessel in place until Idle.`,
+      notes: `EMPTY BASKET ONLY. HyperEx v0.1.60 ${wp.modeLabel} real-flow calibration. Prime ${wp.primeFlow.toFixed(2)} ml/s × ${wp.primeSeconds.toFixed(1)} s, then ${wp.steps} ${wp.algorithm === "target-lut" ? "target-search" : "calibration"} plateaus × ${wp.stepSeconds.toFixed(1)} s; nominal DE1 commanded water ≈${wp.nominalCommandWaterMl} ml. Use a ${wp.recommendedContainerMl} ml or larger catch vessel. The plugin actively stops calibration at about ${wp.hardStopG} g actual collected water to preserve margin below 300 ml. Tank level is checked before PREPARE when live DE1 water-level telemetry is available. Tare the scale, start Espresso manually, and leave the vessel in place until Idle.`,
       beverage_type: "espresso",
       steps: [
         ...(wp.primeSeconds > 0 ? [{
@@ -3717,7 +3736,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     refreshLearningStage();
     const map = state.calibrationMap;
     return {
-      pluginVersion: '0.1.59',
+      pluginVersion: '0.1.60',
       basketContext: state.cfg ? state.cfg.basketContext : "unknown",
       learningStage: state.learningStage,
       baselinePrior: baselineFeedForwardPayload(),
@@ -4238,6 +4257,176 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
   // User-authorized experiment: direct writes to the current flow frame, never skipStep.
   // Firmware live-frame semantics are unverified; ACK is distinct from target feedback.
 
+  function controlRunReview(run) {
+    if(!run||run.kind!=="hyperex")return null;
+    const trace=run.liveFlowTrim&&run.liveFlowTrim.trace||[],writes=trace.filter(x=>x.kind==="write").sort((a,b)=>a.tMs-b.tMs);
+    const phases=["stage2","stage3"].map(phase=>{
+      const q=controlOutputQuality(run,phase),learning=controlLearningAssessment(run,phase);
+      const good=q.available&&Math.abs(q.tailErrorPct)<=8&&q.tailRippleCVPct<=10;
+      const status=!q.available?"缺少可靠杯流量窗口":good?"目标跟踪及平滑度良好":Math.abs(q.tailErrorPct)>8?"杯流量仍偏离目标":"均值接近目标，波动仍需改善";
+      const phaseWrites=writes.filter(x=>phase==="stage2"?Number(x.frame)===1:Number(x.frame)>=2);
+      const groups=[];
+      for(const w of phaseWrites){const g=groups[groups.length-1];if(g&&g.frame===Number(w.frame)&&w.tMs-g.lastMs<3000){g.lastMs=w.tMs;g.writes++;}else groups.push({frame:Number(w.frame),firstMs:w.tMs,lastMs:w.tMs,writes:1});}
+      const raw=phaseRawSamples(run,phase),target=Number(desiredRealForRunPhase(run,phase));
+      const window=(frame,lo,hi)=>{const a=raw.filter(x=>Number(x.profileFrame)===frame&&Number(x.tMs)>=lo&&Number(x.tMs)<=hi),seen=new Set();const rows=a.filter(x=>{const t=finiteOrNull(x.scaleTimestampSeconds);if(t===null||seen.has(t))return false;seen.add(t);return true;});if(rows.length<6||rows.some((x,i)=>i>0&&(Number(x.scaleTimestampSeconds)<=Number(rows[i-1].scaleTimestampSeconds)||Number(x.scaleTimestampSeconds)-Number(rows[i-1].scaleTimestampSeconds)>.6)))return null;const r=regressionForRawSamples(rows);return r&&r.seconds>=1.2&&r.r2>=.90&&r.slope>0?r:null;};
+      for(let i=0;i<groups.length;i++){
+        const g=groups[i],before=window(g.frame,g.firstMs-1800,g.firstMs-100),next=groups[i+1];
+        const after=window(g.frame,g.lastMs+750,Math.min(g.lastMs+2750,next?next.firstMs-100:Infinity));
+        g.attribution=g.writes>1?"重叠动作组，仅评价组合后的变化":"单次动作前后变化，不能单凭一次观察确定因果";
+        if(!before||!after){g.status="前后有效窗口不足，保留记录";continue;}
+        g.beforeGS=before.slope;g.afterGS=after.slope;g.errorReductionGS=round(Math.abs(before.slope-target)-Math.abs(after.slope-target),3);
+        g.status=g.errorReductionGS>target*.02?"组后目标误差减小":g.errorReductionGS< -target*.02?"组后目标误差增大":"组前后变化较小";
+      }
+      return {phase,status,output:q,writes:phaseWrites.length,actionGroups:groups,
+        learningStatus:learning.applicable?(learning.eligible?"已纳入学习候选；仍经过杯间共识与限幅":"暂未纳入："+learning.reason):"使用原固定曲线学习规则"};
+    });
+    const good=phases.every(x=>x.output.available&&Math.abs(x.output.tailErrorPct)<=8&&x.output.tailRippleCVPct<=10);
+    return {status:good?"本杯后段目标跟踪及平滑度良好":"本杯仍有偏差或数据不足，详情见阶段诊断",phases,
+      controllerStatus:run.liveFlowTrim&&run.liveFlowTrim.status||"未开启杯内调流",writes:writes.length,
+      note:"自动分析用于日常判断；动作响应重叠时评价组合效果。无需日常上传截图或CSV；异常时可选择导出深入排查。"};
+  }
+
+
+  function controlOutputQuality(run,phase) {
+    const target=desiredRealForRunPhase(run,phase),raw=phaseRawSamples(run,phase),whole=diagnosticRawRegression(run,phase);
+    if(!target||raw.length<6)return {available:false};
+    const stamps=new Set(),data=raw.filter(x=>{const t=finiteOrNull(x.scaleTimestampSeconds);if(t===null||stamps.has(t))return false;stamps.add(t);return true;});
+    if(data.length<6)return {available:false};
+    const lo=Number(data[0].scaleTimestampSeconds),hi=Number(data[data.length-1].scaleTimestampSeconds),tail=lo+(hi-lo)*.4;
+    const flows=[];
+    for(let i=0;i<data.length;i++){
+      const end=Number(data[i].scaleTimestampSeconds);if(end<tail+1.2)continue;
+      const rows=data.slice(0,i+1).filter(x=>Number(x.scaleTimestampSeconds)>=Math.max(tail,end-2));
+      if(rows.length<6||rows.some((x,j)=>j>0&&(Number(x.scaleTimestampSeconds)<=Number(rows[j-1].scaleTimestampSeconds)||Number(x.scaleTimestampSeconds)-Number(rows[j-1].scaleTimestampSeconds)>.6)))continue;
+      const r=regressionForRawSamples(rows);if(r&&r.seconds>=1.2&&r.r2>=.90&&r.slope>0)flows.push(r.slope);
+    }
+    const mean=average(flows),variance=mean===null?null:average(flows.map(x=>(x-mean)*(x-mean)));
+    return {available:!!flows.length,targetGS:target,wholePhaseErrorPct:whole?round((whole.slope/target-1)*100,2):null,
+      tailMeanGS:round(mean,3),tailErrorPct:mean===null?null:round((mean/target-1)*100,2),tailRippleCVPct:mean?round(Math.sqrt(variance)/mean*100,2):null,
+      tailRMSEGS:flows.length?round(Math.sqrt(average(flows.map(x=>(x-target)*(x-target)))),3):null,
+      tailOvershootPct:flows.length?round(Math.max(0,Math.max(...flows)/target-1)*100,2):null,windows:flows.length,
+      basis:"actual RAW g/s; rolling regressions over final60% of phase, separate from normalized learning model"};
+  }
+
+  // Use every measurable command epoch, not only the last attempted write.
+  // Normalization is a local proportional response model, not a physical identity.
+  function controlLearningAssessment(run,phase) {
+    const c=run&&run.config||{},trace=run&&run.liveFlowTrim&&run.liveFlowTrim.trace||[];
+    const frames=phase==="stage2"?[1]:(c.stage3Shape&&c.stage3Shape.enabled?[2,3,4]:[2]);
+    const changed=!!c.experimentalLiveTrim&&trace.some(x=>x.kind==="write"&&frames.includes(Number(x.frame)));
+    const report={applicable:changed,eligible:false,basis:"confirmed-target windows normalized to shot-start seed (local model)",reason:"Original fixed-command evidence path",frames:[],outputQuality:changed?controlOutputQuality(run,phase):null};
+    if(!changed)return report;
+    const raw=phaseRawSamples(run,phase),allMachine=(run.samples||[]).filter(x=>x.phase===phase).sort((a,b)=>a.tMs-b.tMs);
+    const shape=c.stage3Shape&&c.stage3Shape.enabled?c.stage3Shape:null;
+    const seedFor=f=>phase==="stage2"?Number(c.stage2CommandMlS):shape?Number(shape[f===2?"earlyCommand":f===3?"midCommand":"lateCommand"]):Number(c.stage3CommandMlS);
+    const known=(m)=>{
+      const f=Number(m.profileFrame),seed=seedFor(f),v=finiteOrNull(m.targetFlowMlS);
+      if(!frames.includes(f)||!Number.isFinite(seed)||seed<=0||v===null||v<=0)return null;
+      const base=Math.floor(seed*16+0.5)/16;
+      if(v<LIMITS.commandFlowMin||v>LIMITS.commandFlowMax||v<base*.8-.02||v>base*1.2+.02)return null;
+      if(Math.abs(v-base)<.02)return v;
+      return trace.some(x=>x.kind==="write"&&Number(x.frame)===f&&x.tMs<=m.tMs&&Math.abs(Number(x.commandMlS)-v)<.02)?v:null;
+    };
+    const limit=finiteOrNull(c[phase+"PressureLimit"]),m0=allMachine.length?Number(allMachine[0].tMs):0;
+    const machine=allMachine.filter(x=>Number(x.tMs)-m0>=1000);
+    const valid=m=>m.machineTelemetryValid===true&&finiteOrNull(m.machineAgeMs)!==null&&Number(m.machineAgeMs)<=600&&known(m)!==null&&finiteOrNull(m.pressureBar)!==null&&Number(m.pressureBar)>=0&&finiteOrNull(m.machineFlowMlS)!==null&&Number(m.machineFlowMlS)>=0;
+    const good=machine.filter(valid),near=good.filter(x=>limit!==null&&Number(x.pressureBar)>=limit*.95).length;
+    const under=good.filter(x=>Number(x.machineFlowMlS)<known(x)*.7).length;
+    report.actuator={samples:good.length,total:machine.length,pressureLimitedFraction:good.length?near/good.length:1,underCommandFraction:good.length?under/good.length:1};
+    if(limit===null||limit<=0||good.length<4||good.length<.8*machine.length){report.reason="Live learning: fresh machine target/frame coverage below80% or fewer than4 samples";return report;}
+    if(near/good.length>=.2){report.reason="Live learning: pressure limiter active in at least20% of samples";return report;}
+    if(under/good.length>=.25){report.reason="Live learning: actual flow below70% of observed target in at least25% of samples";return report;}
+    report.actuator.eligible=true;
+    if(phase==="stage3"){
+      const stability=stage3StabilityDiagnostics(run);
+      if(stability&&stability.stall&&stability.stall.suspected){report.reason="Live learning: confirmed S3 stall; withhold normalized numeric evidence";return report;}
+    }
+    if(raw.length<6){report.reason="Live learning: fewer than6 RAW scale samples after latest tare";return report;}
+    const first=Number(raw[0].tMs),last=Number(raw[raw.length-1].tMs);
+    const specs=phase==="stage2"?[{frame:1,name:"S2",lo:first,hi:last,seed:seedFor(1)}]:shape?
+      frames.map((frame,i)=>({frame,name:["S3 EARLY","S3 MID","S3 LATE"][i],lo:first,hi:last,seed:seedFor(frame)})):
+      [{frame:2,name:"S3 EARLY",lo:first,hi:first+(last-first)*.25,seed:seedFor(2)},
+       {frame:2,name:"S3 MID",lo:first+(last-first)*.25,hi:first+(last-first)*.75,seed:seedFor(2)},
+       {frame:2,name:"S3 LATE",lo:first+(last-first)*.75,hi:last,seed:seedFor(2)}];
+    const sources=[];
+    for(const spec of specs){
+      const frameRaw=raw.filter(x=>Number(x.profileFrame)===spec.frame),start=frameRaw.length?Number(frameRaw[0].tMs):Infinity;
+      const data=frameRaw.filter(x=>Number(x.tMs)>=spec.lo&&Number(x.tMs)<=spec.hi&&Number(x.tMs)-start>=1000);
+      const epochs=[],paired=[];let epoch=null,mi=-1,previousStamp=null,previousWeight=null,block=0;
+      for(const x of data){
+        while(mi+1<allMachine.length&&Number(allMachine[mi+1].tMs)<=Number(x.tMs))mi++;
+        const m=allMachine[mi],stamp=finiteOrNull(x.scaleTimestampSeconds),weight=finiteOrNull(x.weightG);
+        if(stamp===null||weight===null||!m||Number(x.tMs)-Number(m.tMs)>600||Number(m.profileFrame)!==spec.frame||!valid(m)){
+          epoch=null;previousStamp=null;previousWeight=null;block++;continue;
+        }
+        if(previousStamp!==null&&stamp<=previousStamp)continue; // duplicates/backward samples cannot add evidence
+        const command=known(m),gap=previousStamp!==null&&stamp-previousStamp>.6;
+        const reset=previousWeight!==null&&weight<previousWeight-.2;
+        if(gap||reset){epoch=null;block++;}
+        previousStamp=stamp;previousWeight=weight;
+        paired.push({...x,command,block});
+        if(!epoch||Math.abs(epoch.command-command)>.02){epoch={command,at:Number(x.tMs),rows:[]};epochs.push(epoch);}
+        // Each command epoch settles briefly. Earlier good epochs survive a late unconfirmed write.
+        if(Number(x.tMs)-epoch.at>=750)epoch.rows.push(x);
+      }
+      let windows=epochs.map(e=>{const reg=regressionForRawSamples(e.rows);return reg&&reg.samples>=6&&reg.seconds>=1.2&&reg.r2>=.90&&reg.slope>0?
+        {commandMlS:e.command,measuredGS:reg.slope,normalizedGS:reg.slope*spec.seed/e.command,r2:reg.r2,seconds:reg.seconds,samples:reg.samples}:null;}).filter(Boolean);
+      if(windows.reduce((a,x)=>a+x.seconds,0)<(phase==="stage2"?2.4:3)){
+        // When commands change faster than a constant epoch can mature, integrate
+        // observed target exposure over source-scale time instead. No invented
+        // fixed command is paired with the changing trajectory.
+        const chunks=[];let chunk=[];
+        for(const row of paired){
+          if(chunk.length&&row.block!==chunk[chunk.length-1].block){chunks.push(chunk);chunk=[];}
+          if(chunk.length&&Number(row.scaleTimestampSeconds)-Number(chunk[0].scaleTimestampSeconds)>=2){
+            chunk.push(row);chunks.push(chunk);chunk=[];
+          }
+          chunk.push(row);
+        }
+        if(chunk.length)chunks.push(chunk);
+        const dynamic=chunks.map(rows=>{
+          if(rows.length<6||rows.some(x=>x.block!==rows[0].block))return null;
+          const rawReg=regressionForRawSamples(rows);if(!rawReg||rawReg.seconds<1.2||rawReg.r2<.90||rawReg.slope<=0)return null;
+          let exposure=0;const points=[{x:0,y:Number(rows[0].weightG)}];
+          for(let i=1;i<rows.length;i++){
+            const dt=Number(rows[i].scaleTimestampSeconds)-Number(rows[i-1].scaleTimestampSeconds);
+            if(!(dt>0&&dt<=.6))return null;
+            exposure+=dt*(rows[i].command+rows[i-1].command)/(2*spec.seed);
+            points.push({x:exposure,y:Number(rows[i].weightG)});
+          }
+          const model=linearRegression(points);if(!model||model.r2<.90||model.slope<=0)return null;
+          return {commandMlS:spec.seed*exposure/rawReg.seconds,measuredGS:rawReg.slope,normalizedGS:model.slope,r2:Math.min(rawReg.r2,model.r2),seconds:rawReg.seconds,samples:rows.length,dynamicExposure:true};
+        }).filter(Boolean);
+        if(dynamic.reduce((a,x)=>a+x.seconds,0)>windows.reduce((a,x)=>a+x.seconds,0))windows=dynamic;
+      }
+      const middle=median(windows.map(x=>x.normalizedGS));
+      const usable=windows.filter(x=>middle>0&&Math.abs(x.normalizedGS/middle-1)<=.25);
+      const seconds=usable.reduce((a,x)=>a+x.seconds,0),allSeconds=windows.reduce((a,x)=>a+x.seconds,0);
+      const info={frame:spec.frame,name:spec.name,seedCommandMlS:spec.seed,windows:usable,windowCount:usable.length,seconds:round(seconds,2),discardedEpochs:epochs.length-usable.length};
+      report.frames.push(info);
+      const minSeconds=phase==="stage2"?2.4:1.2;
+      const observedSpan=data.length?(Number(data[data.length-1].tMs)-Number(data[0].tMs))/1000:0;
+      if(!usable.length||seconds<minSeconds||seconds<allSeconds*.6||seconds<observedSpan*.25){report.reason=`Live learning: ${spec.name} has ${round(seconds,2)}s usable confirmed-target windows; need ${minSeconds}s and25% temporal coverage (each >=1.2s,6unique samples,R²>=.90)`;return report;}
+      const mean=usable.reduce((a,x)=>a+x.normalizedGS*x.seconds,0)/seconds;
+      sources.push({name:spec.name,command:round(spec.seed,3),measured:round(mean,3),r2:round(Math.min(...usable.map(x=>x.r2)),5),seconds:round(seconds,2),quality:"target-normalized local model"});
+    }
+    const duration=sources.reduce((a,x)=>a+x.seconds,0);
+    if(phase==="stage3"&&duration<5){report.reason="Live learning: S3 confirmed-target windows total below5s";return report;}
+    report.eligible=true;report.reason=`Live learning admitted: ${sources.length} region(s), ${round(duration,2)}s across ${report.frames.reduce((a,x)=>a+x.windowCount,0)} confirmed-target windows; response normalized to starting seed using a local proportional model`;
+    if(phase==="stage2"){
+      const x=sources[0],target=Number(c.stage2Flow);
+      report.evidence={runId:run.runId,targetGS:target,command:x.command,measured:x.measured,errorPct:round((x.measured/target-1)*100,1),confidence:"MEDIUM",r2:x.r2,seconds:x.seconds,measurementBasis:report.basis};
+    }else{
+      const overall=sources.reduce((a,x)=>a+x.measured*x.seconds,0)/duration,ratio=sources[2].measured/sources[0].measured;
+      report.evidence={runId:run.runId,targetGS:Number(c.stage3Flow),status:ratio<.75?"LATE DECAY":"STABLE",stall:false,stallQualitative:false,
+        lateToEarlyRatio:round(ratio,3),overallGS:round(overall,3),overallR2:Math.min(...sources.map(x=>x.r2)),overallSeconds:round(duration,2),
+        earlySeconds:shape?Number(shape.earlySeconds):8,midSeconds:shape?Number(shape.midSeconds):14,
+        measurementBasis:shape?"live target-normalized frame windows":"live target-normalized stability windows",normalizationModel:report.basis,source:sources};
+    }
+    return report;
+  }
+
+
   function liveTrimLearningView(run,phase) {
     if(!run||!run.config||!run.config.experimentalLiveTrim)return run;
     const trace=run.liveFlowTrim&&run.liveFlowTrim.trace||[];
@@ -4292,10 +4481,10 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     const budget=[50,150,200,250][level-1];
     const period=level===1?Math.max(300,Math.round(seconds*1000/50)):[0,300,250,200][level-1];
     const report={enabled:true,status:"armed-for-S2",level,plannedDurationMs:Math.round(seconds*1000),periodMs:period,maxChecks:2000,maxWrites:budget,
-      checks:0,writes:0,acks:0,targetConfirmations:0,targetMissTolerance:3,targetMisses:0,consecutiveTargetMisses:0,retries:0,deadbandPct:6,trace:[],adaptiveMode:"normal-shot-to-shot-with-verified-stable-command-windows"};
+      checks:0,writes:0,acks:0,targetConfirmations:0,targetMissTolerance:3,targetMisses:0,consecutiveTargetMisses:0,retries:0,feedbackReleases:0,minWriteIntervalMs:50,responseTimeoutMs:2000,deadbandPct:2,trace:[],adaptiveMode:"confirmed-window-and-dynamic-exposure-learning"};
     run.liveFlowTrim=report;
     state.liveTrim={active:true,started:false,handle:null,run,report,phase:null,frame:null,frameAt:0,
-      commands:{},pending:null,retry:null,profile:JSON.parse(JSON.stringify(profileObject()))};
+      commands:{},pending:null,retry:null,lastDecisionStamp:{},lastWriteAt:null,profile:JSON.parse(JSON.stringify(profileObject()))};
     liveTrimRecord("armed",{periodMs:report.periodMs});
   }
   async function startLiveTrim() {
@@ -4373,7 +4562,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       seen.add(stamp);points.push({x:stamp,y:weight});
     }
     if(points.length<6||points[points.length-1].x-points[0].x<1.2)return null;
-    const r=linearRegression(points);return r&&r.r2>=0.90&&r.slope>0?r:null;
+    const r=linearRegression(points);return r&&r.r2>=0.90&&r.slope>0?{...r,sourceEndStamp:points[points.length-1].x}:null;
   }
   async function liveTrimTick(t) {
     const live=()=>state.liveTrim===t&&t.active&&state.diagnosticCurrent===t.run&&["stage2","stage3"].includes(state.phase);
@@ -4387,7 +4576,9 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     try {
       if(t.pending){
         const p=t.pending;
-        if(Date.now()-p.at>Math.max(2000,t.report.periodMs*2)){
+        if(p.ack&&p.targetSeen&&Date.now()-p.at>=50){
+          t.report.feedbackReleases++;liveTrimRecord("feedback-wait-released",{frame:p.frame,latencyMs:Date.now()-p.at});t.pending=null;
+        }else if(Date.now()-p.at>Math.max(2000,t.report.periodMs*2)){
           if(!p.ack){stopLiveTrim("driver-ack-timeout");abortSequence("Live flow driver acknowledgement timeout",true);return;}
           if(!p.targetSeen){
             t.report.targetMisses++;t.report.consecutiveTargetMisses++;
@@ -4410,9 +4601,11 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       if(frame!==t.frame||state.phase!==t.phase){t.frame=frame;t.phase=state.phase;t.frameAt=Date.now();row.reason="frame-settle";return;}
       if(Date.now()-t.frameAt<1600||Date.now()-state.latestScaleAtMs>600||Date.now()-state.lastMachineAtMs>600||!state.lastMachineTelemetryValid||state.lastMachineState!=="espresso"||!["preinfusion","pouring"].includes(state.lastSubstate)){row.reason="settling-or-stale-telemetry";return;}
       const reg=liveTrimRegression(t);if(!reg){row.reason="raw-regression-insufficient";return;}
+      if(t.lastWriteAt!==null&&Date.now()-t.lastWriteAt<50){row.reason="minimum-write-interval";return;}
+      if(!t.retry&&t.lastDecisionStamp[frame]===reg.sourceEndStamp){row.reason="waiting-for-new-scale-sample";return;}
       const target=state.phase==="stage2"?t.run.config.stage2Flow:t.run.config.stage3Flow;
       row.rawGS=round(reg.slope,3);row.targetGS=target;row.errorPct=round((reg.slope/target-1)*100,2);row.r2=round(reg.r2,4);
-      if(Math.abs(reg.slope/target-1)<=0.06){row.reason="inside-6pct-band";return;}
+      if(Math.abs(reg.slope/target-1)<=0.02+1e-9){row.reason="inside-2pct-band";return;}
       if(t.retry&&t.retry.frame!==frame){
         liveTrimRecord("unconfirmed-frame-ended",{frame:t.retry.frame,commandMlS:t.retry.command,nextFrame:frame});
         t.retry=null; // Never resend an old frame after a natural/weight transition.
@@ -4433,6 +4626,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       // GET/profile upload between frame validation and this single raw write.
       if(!live()||Number(state.lastFrame)!==frame||state.commandBusy){row.reason="frame-changed-or-command-busy";return;}
       const p={frame,command:candidate,at:Date.now(),ack:false,targetSeen:false};t.pending=p;
+      t.lastWriteAt=p.at;t.lastDecisionStamp[frame]=reg.sourceEndStamp;
       if(retry){t.report.retries++;t.retry=null;}
       t.report.writes++;state.liveTrimDirty=true;
       liveTrimRecord("write",{frame,commandMlS:candidate,previousMlS:command,retry:!!retry,rawGS:row.rawGS,targetGS:target,payload});
@@ -4840,7 +5034,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
 
   return {
     id: ID,
-    version: "0.1.59",
+    version: "0.1.60",
 
     onLoad(settings) {
       state.cfg = loadConfig(settings || {});
@@ -4862,7 +5056,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       state.runtimeProfileMismatchAbortSent = false;
       state.calibrationArmed = false;
       resetSequence();
-      log(`Loaded v0.1.59. Stable two-skip topology; scale feedback is validation/advisory only; optional S3 decay-compensation subframes advance by profile time and add no skipStep calls. Dual calibration profiles are installed/updated at first load; HyperEx flow settings are desired REAL mass flow: ${state.cfg.stage1Flow}/${state.cfg.stage2Flow}/${state.cfg.stage3Flow} g/s. flowMultiplier scope=${scopeLabel(state.scopeMode)}. Dashboard idle shortcut=${state.cfg.idleDashboardShortcut ? "enabled" : "off (plugin page primary)"}. Brew state machine remains v0.1.16/v0.1.17 baseline.`);
+      log(`Loaded v0.1.60. Stable two-skip topology; scale feedback is validation/advisory only; optional S3 decay-compensation subframes advance by profile time and add no skipStep calls. Dual calibration profiles are installed/updated at first load; HyperEx flow settings are desired REAL mass flow: ${state.cfg.stage1Flow}/${state.cfg.stage2Flow}/${state.cfg.stage3Flow} g/s. flowMultiplier scope=${scopeLabel(state.scopeMode)}. Dashboard idle shortcut=${state.cfg.idleDashboardShortcut ? "enabled" : "off (plugin page primary)"}. Brew state machine remains v0.1.16/v0.1.17 baseline.`);
       connectScaleStream();
       connectWaterLevelStream();
       storageRead(STORAGE_CAL);
@@ -4978,7 +5172,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
             s3Shape = { enabled:true, earlyCommand:round(earlyCommand,3), earlySeconds:round(earlySeconds,1), midCommand:round(midCommand,3), midSeconds:round(midSeconds,1), lateCommand:round(lateCommand,3) };
           }
           const binding = testOverrideBinding();
-          state.testOverrides = { schema:3, writerVersion:"0.1.59", savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, basketContext:binding.basketContext, targets:binding.targets, stages, s3Shape };
+          state.testOverrides = { schema:3, writerVersion:"0.1.60", savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, basketContext:binding.basketContext, targets:binding.targets, stages, s3Shape };
           storageWrite(STORAGE_TEST_OVERRIDES, state.testOverrides);
           await syncHyperExProfile(state.workflowTitle === state.cfg.profileTitle);
           log(`Manual test commands updated: ${JSON.stringify(commandFlowSummary())}`);
@@ -5103,7 +5297,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
         return pluginHttpJson(request, 200, calibrationStatusPayload());
       }
       if (request.endpoint === "startup-apply") {
-        return pluginHttpJson(request, 409, { error: "Legacy startup-apply is disabled in v0.1.59. S1 is handled only by the unified shot-to-shot adaptive engine after two matching MEDIUM-confidence startup shots." });
+        return pluginHttpJson(request, 409, { error: "Legacy startup-apply is disabled in v0.1.60. S1 is handled only by the unified shot-to-shot adaptive engine after two matching MEDIUM-confidence startup shots." });
       }
       if (request.endpoint === "startup-clear") {
         state.stage1StartupCorrection = null; storageWrite(STORAGE_S1_STARTUP, '');
@@ -5216,7 +5410,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
           if (!state.persistentHistoryLoaded) {
             const sessionRows = state.persistentHistoryFile && state.persistentHistoryFile.shots || [];
             state.persistentHistoryFile = parsed && Number(parsed.schema || 0) >= 2 && Array.isArray(parsed.shots) ? parsed
-              : { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:"0.1.59", shots:[] };
+              : { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:"0.1.60", shots:[] };
             for (const row of sessionRows) {
               state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.filter(x => x && x.runId !== row.runId).concat(row);
             }

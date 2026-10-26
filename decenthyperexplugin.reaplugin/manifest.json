@@ -3,7 +3,7 @@
   "author": "ladiosupp",
   "name": "HyperEx Pulse Filter",
   "description": "HyperEx three-stage controller with verified workflow-profile truth, persistent cross-version adaptive history with storage self-test, first-run RAW-scale flow calibration, automatic S1/S2/S3 next-shot adaptation, S3 LEVEL/SHAPE separation, real-scale diagnostics, manual engineering tools, CSV export, full plugin settings, idempotent profile installation, and scoped DE1 flowMultiplier handling.",
-  "version": "0.1.59",
+  "version": "0.1.60",
   "apiVersion": 1,
   "permissions": [
     "log",
@@ -255,7 +255,7 @@
     "LiveFlowTrimTest": {
       "type": "boolean",
       "label": "TEST: S2/S3 live flow trim",
-      "description": "Default OFF. Up to2000 checks per shot across S2+S3; separate write limits50/150/200/250 by level, including retries. Keep fresh regression, pressure/command limits, ACK/target feedback and at least2s response wait. Tolerate3 consecutive missing targets; fourth stops. Normal next-shot learning retained.",
+      "description": "Default OFF. Up to2000 checks per shot across S2+S3; separate write limits50/150/200/250 by level, including retries. Keep fresh regression, pressure/command limits, ACK/target feedback and ACK+matching target releases waiting after50ms; next level tick plus new scale data required. Missing-response timeout2s. Tolerate3 consecutive missing targets; fourth stops. Normal next-shot learning retained. Cup-flow target band±2%; next-shot deadband±8%. Native1/16ml/s quantization and lag mean2% is a target, not guaranteed accuracy. Verified command windows can now feed next-shot learning through explicitly labelled local-model normalization.",
       "default": false
     },
     "LiveFlowTrimLevel": {

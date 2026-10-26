@@ -3,7 +3,7 @@
   "author": "ladiosupp",
   "name": "HyperEx Pulse Filter",
   "description": "HyperEx three-stage controller with verified workflow-profile truth, persistent cross-version adaptive history with storage self-test, first-run RAW-scale flow calibration, automatic S1/S2/S3 next-shot adaptation, S3 LEVEL/SHAPE separation, real-scale diagnostics, manual engineering tools, CSV export, full plugin settings, idempotent profile installation, and scoped DE1 flowMultiplier handling.",
-  "version": "0.1.66",
+  "version": "0.1.67",
   "apiVersion": 1,
   "permissions": [
     "log",
@@ -19,6 +19,12 @@
       "type": "boolean",
       "label": "Enable HyperEx controller",
       "description": "Only controls shots whose selected workflow profile title exactly matches Profile title.",
+      "default": true
+    },
+    "ActiveRelease": {
+      "type": "boolean",
+      "label": "主动泄压 · Active pressure release",
+      "description": "Default ON: original release/soak and GHC restart. OFF: a single continuous S1→S2→S3 extraction with no intermediate Idle/soak/restart. Both modes learn independently; continuous mode supports S1/S2/S3 live trim. Change only while idle; saving reloads the plugin. Safety pressure/final-weight stops remain active.",
       "default": true
     },
     "ProfileTitle": {
@@ -41,8 +47,8 @@
     },
     "Stage1Weight": {
       "type": "number",
-      "label": "Dump trigger weight (g)",
-      "description": "At this cumulative beverage weight the plugin requests Idle to actively depressurize. Runtime limited to 1–20 g.",
+      "label": "S1 transition weight (g) · S1 转换重量",
+      "description": "At this cumulative beverage weight the plugin requests Idle to actively depressurize. Runtime limited to 1–20 g. With ActiveRelease OFF this weight triggers a single direct S1→S2 advance without Idle/soak/restart.",
       "default": 4.0
     },
     "Stage1PressureLimit": {
@@ -254,8 +260,8 @@
     },
     "LiveFlowTrimTest": {
       "type": "boolean",
-      "label": "TEST: S2/S3 live flow trim",
-      "description": "Default ON at level3 (250ms/200writes). Saved explicit preferences are retained. Up to2000 checks per shot across S2+S3; separate write limits50/150/200/250 by level, including retries. Keep fresh regression, pressure/command limits, ACK/target feedback and ACK+matching target releases waiting after50ms; next level tick plus new scale data required. Missing-response timeout2s. After3 consecutive missing targets, continue observation and retry the SAME unresolved target no sooner than3s after dispatch; matching feedback recovers automatically. Normal next-shot learning retained. Cup-flow target band±2%; next-shot deadband±8%. Native1/16ml/s quantization and lag mean2% is a target, not guaranteed accuracy. Verified command windows can now feed next-shot learning through explicitly labelled local-model normalization.",
+      "label": "TEST: live flow trim · 杯内控流",
+      "description": "Default ON at level3 (250ms/200writes). Saved explicit preferences are retained. Up to2000 checks per shot across S2+S3; separate write limits50/150/200/250 by level, including retries. Keep fresh regression, pressure/command limits, ACK/target feedback and ACK+matching target releases waiting after50ms; next level tick plus new scale data required. Missing-response timeout2s. After3 consecutive missing targets, continue observation and retry the SAME unresolved target no sooner than3s after dispatch; matching feedback recovers automatically. Normal next-shot learning retained. Cup-flow target band±2%; next-shot deadband±8%. Native1/16ml/s quantization and lag mean2% is a target, not guaranteed accuracy. Verified command windows can now feed next-shot learning through explicitly labelled local-model normalization. In continuous mode the same shot budget also covers S1 live control; corrected S1 startup learning uses observed-target exposure normalization with original quality gates.",
       "default": true
     },
     "LiveFlowTrimLevel": {

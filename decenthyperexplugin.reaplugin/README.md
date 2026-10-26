@@ -1,6 +1,14 @@
-# HyperEx Pulse Filter 0.1.63
+# HyperEx Pulse Filter 0.1.64
 
-Based on delivered/GitHub1.62. Install over the same plugin; retain LUT/history and valid starting commands. No new calibration or dedicated coffee tests. No1.63 hardware validation yet.
+Based on delivered/GitHub1.63. Install over the same plugin; retain LUT/history and valid starting commands. No new calibration or dedicated coffee tests. No1.64 hardware validation yet.
+
+## Historical consensus lookup fix (1.64)
+
+A newer cup lacking S2 evidence, with a different phase command/context, or restored from unverified disk used to terminate the history search immediately. That could hide an earlier valid matching cup and make a currently admitted S2 keep reporting REPEAT SAME COMMAND. Now scan newest-to-oldest through the retained history and select the first comparable verified cup. Apply the same correction to S1/S3 history lookup.
+
+Keep the same LUT/target/context/storage truth and stage command/shape checks. After finding the newest comparable cup, retain the existing variability/error-direction/pressure/actuator gates. Never skip a newer contradictory comparable cup to find an older agreeing one. No evidence is invented for a currently inadmissible stage. Missing current evidence still waits; this does not force every MISS into an adjustment.
+
+The decision panel shows lookup counts (checked, missing stage, incompatible context/commands, unverified disk) and matched source run. These are translated while preserving raw IDs. A synthetic before/after replay of the same history (valid S2 → intervening missing-S2 row → current valid S2) changes old REPEAT to ADJUST2.507→2.607ml/s, then passes automatic upload and workflow verification. This reproduces a software defect, not the user's unavailable original1.62 RAW data. The exact blocker in the newly reported1.62 cup still needs its screenshot; do not assume this is its sole cause.
 
 ## 中文／English switch (1.63)
 
@@ -8,7 +16,7 @@ The page header now has 中文 / English buttons. Default language is Chinese; t
 
 Coverage: generated diagnostics/GHC pages, Step1–4 headings and controls, curve editor, automatic status and gate explanations, marker titles/details, confirm/alert dialogs, and plugin-provided dashboard/header/shot-strip text. RAW,LUT,ACK,DE1,units and product names are intentional technical terms. Raw CSV/JSON, numeric input values, IDs and code blocks are never translated. The native Decaid Plugins/settings interface is rendered by Decaid from manifest metadata and is outside the plugin page switch; this switch does not alter Decaid's app-wide language.
 
-Text translation is reversible and observes newly rendered nodes, tooltips and accessible labels. Original text is retained in WeakMaps so switching cannot accumulate translation artifacts. The bootstrap is independent from the main diagnostics script; original CLOSE/HOME failure containment remains. The embedded reviewed catalog contains771phrase entries/aliases. Raw external error messages without a catalog entry remain original diagnostic text, not invented translations. The catalog is embedded in plugin.js; no remote translation/network service or extra dependency is used.
+Text translation is reversible and observes newly rendered nodes, tooltips and accessible labels. Original text is retained in WeakMaps so switching cannot accumulate translation artifacts. The bootstrap is independent from the main diagnostics script; original CLOSE/HOME failure containment remains. The embedded reviewed catalog contains777phrase entries/aliases. Raw external error messages without a catalog entry remain original diagnostic text, not invented translations. The catalog is embedded in plugin.js; no remote translation/network service or extra dependency is used.
 
 ## Default live trim: ON / level3 (1.63)
 
@@ -45,8 +53,8 @@ Live trim defaults ON at level3; diagnostic slider/native dropdown. Saved explic
 
 ## Validation
 
-257/257 Node simulations: reversible localization, newly authored text, raw CSV/JSON/input preservation, dialogs, storage rollback/late-read/serialization, dashboard actions, all static language coverage, ON/level3 defaults and explicit saved preferences; plus retained controller tests, generated browser-script compilation, UI draft/refresh/stale checks, pointer and keyboard interaction with a simulated DOM, quantization/shape/time bounds, real HTTP handlers for application and reset, rollback, fresh workflow edits, prior-run suppression/new-run learning, queued evaluation restoration, successful application vs failed UI refresh, arrow/retry direction, explicit stage decisions and dynamic fallback when fixed seconds pass but coverage fails. Generated full HTML has balanced elements and unique IDs; generated editor SVG parses as XML. Fixtures are synthetic, not unavailable user RAW replays.
+263/263 Node simulations: interrupted historical lookup, missing-stage/context/command/storage exclusions, newest-conflicting-row retention, S3 lookup, absent evidence and automatic upload verification; plus reversible localization, newly authored text, raw CSV/JSON/input preservation, dialogs, storage rollback/late-read/serialization, dashboard actions, all static language coverage, ON/level3 defaults and explicit saved preferences; plus retained controller tests, generated browser-script compilation, UI draft/refresh/stale checks, pointer and keyboard interaction with a simulated DOM, quantization/shape/time bounds, real HTTP handlers for application and reset, rollback, fresh workflow edits, prior-run suppression/new-run learning, queued evaluation restoration, successful application vs failed UI refresh, arrow/retry direction, explicit stage decisions and dynamic fallback when fixed seconds pass but coverage fails. Generated full HTML has balanced elements and unique IDs; generated editor SVG parses as XML. Fixtures are synthetic, not unavailable user RAW replays.
 
-Full browser visual/touch rendering was unavailable (Chromium/Firefox and SVG raster delegate not installed); simulated DOM/pointer checks are not hardware or full WebView validation. Existing handheld/tablet screenshots remain the actual1.60 evidence. No1.63 device results yet.
+Full browser visual/touch rendering was unavailable (Chromium/Firefox and SVG raster delegate not installed); simulated DOM/pointer checks are not hardware or full WebView validation. Existing handheld/tablet screenshots remain the actual1.60 evidence. No1.64 device results yet.
 
-Run node --check plugin.js and node tests/verify_v0163.cjs. Current HANDOFF_v0163.md and tests/RESULTS_v0163.txt accompany this package. LICENSE and original calibration JSON are unchanged. Delivered older ZIPs remain immutable; old remote files retained for history.
+Run node --check plugin.js and node tests/verify_v0164.cjs. Current HANDOFF_v0164.md and tests/RESULTS_v0164.txt accompany this package. LICENSE and original calibration JSON are unchanged. Delivered older ZIPs remain immutable; old remote files retained for history.

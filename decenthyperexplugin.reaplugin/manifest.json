@@ -3,7 +3,7 @@
   "author": "ladiosupp",
   "name": "HyperEx Pulse Filter",
   "description": "HyperEx three-stage controller with verified workflow-profile truth, persistent cross-version adaptive history with storage self-test, first-run RAW-scale flow calibration, automatic S1/S2/S3 next-shot adaptation, S3 LEVEL/SHAPE separation, real-scale diagnostics, manual engineering tools, CSV export, full plugin settings, idempotent profile installation, and scoped DE1 flowMultiplier handling.",
-  "version": "0.1.65",
+  "version": "0.1.66",
   "apiVersion": 1,
   "permissions": [
     "log",
@@ -269,6 +269,12 @@
         "3",
         "4"
       ]
+    },
+    "S2StartupAssist": {
+      "type": "boolean",
+      "label": "S2 起步响应补偿 · Startup assist",
+      "description": "Default ON with live trim. Learn delay/rise separately from level. Only two comparable clean near-target low-ripple slow-rise shots with machine/pressure headroom can enable one native quantum of startup boost for400–800ms. Same-frame base return is reserved and must be ACK+target confirmed within2.5s or Idle safety stop. No added skip/profile frames. Explicit live trim OFF disables assist.",
+      "default": true
     }
   },
   "api": [

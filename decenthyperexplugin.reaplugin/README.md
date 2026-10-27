@@ -1,6 +1,38 @@
-# HyperEx Pulse Filter 0.1.72
+# HyperEx Pulse Filter 0.1.73
 
 Based on delivered/GitHub1.70. Install over the same plugin; retain LUT/history and valid starting commands. No new calibration or dedicated coffee tests. No1.68 hardware validation yet.
+
+## 1.73 · 萃取图排除泄压尖峰，标注补水收回原因
+
+用户提供1.71截图：S2绿色称流峰值不足5g/s，橙色指令在明显出液前下降；S1主动泄压和最终停止阶段出现相似的机器目标/实际流量尖峰。当前代码确实持续采集dumping/finishing等遥测，而日常图原先不筛阶段、把所有点连接，导致停杯后的波形看起来像萃取动作。本版修复展示范围，不声称已经证明固件内部那段泵动作的确切物理目的。
+
+### 日常图只画萃取
+
+- 普通HyperEx图保留S1/S2/S3萃取数据，隐藏dumping、soak、restart_wait、finishing、aborted等准备/泄压/停杯后阶段。组合遥测还要求已提供的机器状态是espresso且子状态为preinfusion/pouring，排除稳温/flush等非萃取状态。
+- 使用已有stage1_weight_trigger和final_weight_trigger事件，在请求停止的时点截止；即使后续点误留在旧活动阶段，也不能跨越这两个截止点。老杯没有事件时按已保存阶段筛选。
+- 主动泄压开启时S1与第二次运行断开绘线，不把停杯/重启两侧数据连成一条线。RAW局部斜率不跨泄压/重启计算。S2→S3仍连续；主动泄压关闭的完整曲线保持连续。称重图也截止于各段萃取停止，保留原时间轴，间隔留空。
+- 写入指令线与目标反馈/检查标记使用同一可见时间窗，排除停杯后的目标回显。空萃取图清空旧图，非法数值不伪装成零流量。校准图保持完整校准阶段，不受普通萃取筛选影响。
+- **仅筛显示**：原始run.samples/rawScaleSamples、事件、统计、学习与CSV均不删除或改写；泄压尾迹保留用于异常排查。界面明确说明日常图省略准备/泄压/停杯后数据。
+
+### 保留滑块，增加上一次参数窗口
+
+五个补水滑块保留。新增独立只读窗口，区分当前已保存设置、最近一次修改前→修改后及修改时间、上一杯实际采用的启动参数。上一杯的计划增强指令与实际记录到的已发送增强指令分别列出，不把计划冒充执行；旧1.71称流目标倍率明确标为旧版，不当作新版泵倍率。没有记录的字段显示未记录，不用当前滑块猜测历史。
+
+最近一次修改记录与现有补水设置共同持久化，成功应用后更新；只改S1/S2/S3曲线不会覆盖补水修改记录，保存/同步失败回滚时一同恢复。重新启动从存储恢复。上一杯参数从冻结的启动计划或已有落盘杯记录读取，不额外篡改旧历史；缺少旧记录时明确提示。当前滑块草稿可与上次保存值对照，尚未应用的拖动不伪装成上一杯数据。
+
+### S2截图与收回原因
+
+1.71中补水受称流阈值、压力、新鲜度和最长时限共同限制；截图下调发生在绿色称流明显建立前，更像最长时限到期，不能仅凭图认定85%称流收回太早。黄色/蓝色是机器ml/s，粉色/绿色是杯中g/s，峰值不能直接混用单位判断。没有CSV/trace，不能给该历史杯编造确定的触发原因。
+
+本版每次补水增强/返回写入记录startupReason，并在箭头详情显示“补水增强/补水收回”及实际记录原因。原先诊断区的执行原因保留。修复上一版下一杯启动摘要残留“估算称流目标”标签，改为基础泵流量倍率，避免把1.72的泵倍率说成杯流百分比。
+
+用户后续实测参考：启动0秒、旧版补水目标7g/s、收回85%、最长4秒、渐进2秒，出现约5.6–6g/s短暂峰值，再回落到约4.5g/s；压力约1bar，机器目标约5.5→3.8ml/s。用户明确该数据用于算法参考，可接受这种短暂过冲，重点是回落后稳定在5g/s，而非把每次峰值都压平。后续交接优化应区分补水结束与稳态维持指令；现有“直接回基础、渐进时暂降杯目标”的组合值得评估，但本版不凭这一杯临时改动作或放宽保护。图像不能替代具体trace证明触发原因。
+
+**控制不再额外放宽**：继承1.72基础泵指令默认160%、最高8ml/s、无＋2限幅；仅此补水幅度按泵指令，其他目标/学习按杯中g/s。85%称流收回、最长4秒请求返回、压力/新鲜度/ACK保护、原skip拓扑、S3设置全部保持。此用户截图为1.71，不是1.72的160%实测。
+
+**476/476 Node模拟/回归检查通过**。验证结果见本包tests/RESULTS_v0173.txt；包括泄压双尖峰、截止事件、旧记录、连续模式、校准模式、断线和RAW斜率重置、原始CSV不变、空图清除、实际收回原因及旧有控制回归。没有1.73真机或完整浏览器验证。
+
+## Historical release notes — 1.72
 
 ## 1.72 · S2补水按基础泵指令160%，取消＋2限制
 
@@ -15,7 +47,7 @@ Based on delivered/GitHub1.70. Install over the same plugin; retain LUT/history 
 
 注意：取消＋2后，不再有原先“额外指令积分≤8个指令ml”的界限；4秒只是计划请求收回时点，不是实测额外水量上限。8 ml/s是软件指令上限，不代表所有粉饼/机器条件下均已实测无过冲或无温度瞬态。
 
-**455/455 Node模拟/回归检查通过**。验证结果见本包`tests/RESULTS_v0172.txt`；Node模拟覆盖新倍率、超过旧＋2边界、8封顶、驱动实际编码/收回、旧值迁移与新值保留、运行中稳温状态禁止派发、界面预览、S3/称流目标/温度保持及既有回归。没有1.72真机或完整浏览器验证。
+**455/455 Node模拟/回归检查通过**。验证结果见本包`tests/RESULTS_v0173.txt`；Node模拟覆盖新倍率、超过旧＋2边界、8封顶、驱动实际编码/收回、旧值迁移与新值保留、运行中稳温状态禁止派发、界面预览、S3/称流目标/温度保持及既有回归。没有1.72真机或完整浏览器验证。
 
 ## Historical release notes — 1.71
 
@@ -261,4 +293,4 @@ Live trim defaults ON at level3; diagnostic slider/native dropdown. Saved explic
 
 Full browser visual/touch rendering was unavailable (Chromium/Firefox and SVG raster delegate not installed); simulated DOM/pointer checks are not hardware or full WebView validation. Existing handheld/tablet screenshots remain the actual1.60 evidence. No1.65 device results yet.
 
-Run node --check plugin.js and node tests/verify_v0172.cjs. Current HANDOFF_v0172.md and tests/RESULTS_v0172.txt accompany this package. LICENSE and original calibration JSON are unchanged. Delivered older ZIPs remain immutable; old remote files retained for history.
+Run node --check plugin.js and node tests/verify_v0173.cjs. Current HANDOFF_v0173.md and tests/RESULTS_v0173.txt accompany this package. LICENSE and original calibration JSON are unchanged. Delivered older ZIPs remain immutable; old remote files retained for history.

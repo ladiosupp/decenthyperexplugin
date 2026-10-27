@@ -1,6 +1,23 @@
-# HyperEx Pulse Filter 0.1.68
+# HyperEx Pulse Filter 0.1.69
 
-Based on delivered/GitHub1.67. Install over the same plugin; retain LUT/history and valid starting commands. No new calibration or dedicated coffee tests. No1.68 hardware validation yet.
+Based on delivered/GitHub1.68. Install over the same plugin; retain LUT/history and valid starting commands. No new calibration or dedicated coffee tests. No1.68 hardware validation yet.
+
+## 1.69 · S2 先补水，85%收回，再渐进到目标
+
+主动泄压后，S2使用独立的有界补水策略：不再先等待上一杯合格慢爬升证据，也不再要求泵实际流量先追到基础值的85%。两个原开关S2StartupAssist与杯内控流仍同时生效，默认开启；主动泄压关闭时保留原连续曲线的短脉冲策略。本版不改S3学习增益/限幅，保留1.68四档策略与历史/LUT。
+
+- **尽早进入S2**：GHC确认preinfusion/pouring后，原固定350ms切换等待移除。并行预备RAW传输与一次新鲜帧号预检；已在S2不重发skip，帧号不符合不连续跳步。没有新增帧、skip、自动GHC按键或曲线上传。准备阶段不写补水指令、不消耗检查预算。
+- **先有界补水**：只有已确认S2帧1、曲线已校验、机器/秤新鲜、压力低于原限压90%、没有未决S2指令且留足返回预算时，才在同一帧写较高流量。上限为基础值1.4倍、基础值+1ml/s和原8ml/s硬上限三者最小值，向下量化至1/16；例如基础2.5→补水3.5ml/s。这不是无限制机器最大流量。
+- **85%提前收回**：短窗RAW重量/源时间回归达到目标85%，或最近上升趋势推算约400ms后将达到85%，即恢复已验证基础指令。目标5g/s对应4.25g/s。需至少6个唯一源样本、约0.6s、R²≥0.90；窗口0.75s为主，较低采样率可用1.3s内窗口，不用单点dW/dt。预测是有界趋势估计，不能保证消除所有惯性过冲。
+- **独立时限与保护**：增强最长4s；压力达到限压90%或秤失鲜也收回。返回不等待补水目标回显/称流回归，但需前次驱动ACK、同帧和新鲜机器数据。补水/返回各有2s驱动ACK保护，最长增强+2.5s总返回保护；返回只有目标回显缺失时保持同基础值重试，不继续向上叠加。进入S3取消所有补水计时器，不再写上一帧。帧号缺失是未知状态，不会取消返回截止保护。
+- **85%→100%渐进**：确认基础值ACK及目标回显后，保留1.6s响应等待，再让内部称流控制目标在3s内从85%渐进至100%。上调至少间隔750ms，检查仍按所选杯内档位继续；若预测现有上升趋势将达到当时目标，就等待惯性响应。下调保留原频率和边界。完成渐进后继续以100%目标微调，上调仍保持750ms间隔。
+- **学习分开**：有实际补水写入的S2，稳态学习使用确认恢复基础值之后再过1.6s的窗口；补水段不进入稳态数值归一化或机器覆盖率分母。未确认返回时保留实测曲线，暂不把该瞬态当稳态证据。整段RAW误差、曲线仍完整显示，不将短暂补水效果伪装为稳态准确度。归一化窗口新增起止时间，诊断/CSV保留实际动作、85%收回原因与预测值。
+
+检查/写入预算仍为每杯2000检查、按杯内档位50/150/200/250实际写入，含补水、返回和重试。原限压、硬停、原始LUT、温度处理、历史人工排除、杯间四档设置保留。无需重新校准。
+
+Validation: **388/388 Node synthetic/regression checks**. Includes the361 prior checks with ordinary-control fixtures explicitly disabling startup to isolate that subject, and legacy planner unit tests explicitly exercising the continuous-mode planner;27 new active-release cases cover arm-without-history, switches/mode separation, quantization/envelopes, early low-actuator dispatch, unconfirmed-frame waiting,85%actual/predicted cutoff, freshness/tare/gaps, pressure/timed return, ACK/timeouts/target-onlydegradation, gradual approach/spacing, transient exclusion, zero-delay/prewarmed single-skip topology, and missing-frame return protection. Plugin and generatedHTMLscripts are syntax checked; both UI languages/HTML structure are covered. No1.69 hardware or full-browser execution validation yet; synthetic input curves are not proof of faster device filling. Physical drain amount is not measured or assumed as a known volume. LICENSE/calibrationJSON bytes unchanged.
+
+## Historical release notes — 1.68
 
 ## 1.68 · 动态学习与来源标记
 
@@ -146,4 +163,4 @@ Live trim defaults ON at level3; diagnostic slider/native dropdown. Saved explic
 
 Full browser visual/touch rendering was unavailable (Chromium/Firefox and SVG raster delegate not installed); simulated DOM/pointer checks are not hardware or full WebView validation. Existing handheld/tablet screenshots remain the actual1.60 evidence. No1.65 device results yet.
 
-Run node --check plugin.js and node tests/verify_v0168.cjs. Current HANDOFF_v0168.md and tests/RESULTS_v0168.txt accompany this package. LICENSE and original calibration JSON are unchanged. Delivered older ZIPs remain immutable; old remote files retained for history.
+Run node --check plugin.js and node tests/verify_v0169.cjs. Current HANDOFF_v0169.md and tests/RESULTS_v0169.txt accompany this package. LICENSE and original calibration JSON are unchanged. Delivered older ZIPs remain immutable; old remote files retained for history.

@@ -3,7 +3,7 @@
   "author": "ladiosupp",
   "name": "HyperEx Pulse Filter",
   "description": "HyperEx three-stage controller with verified workflow-profile truth, persistent cross-version adaptive history with storage self-test, first-run RAW-scale flow calibration, automatic S1/S2/S3 next-shot adaptation, S3 LEVEL/SHAPE separation, real-scale diagnostics, manual engineering tools, CSV export, full plugin settings, idempotent profile installation, and scoped DE1 flowMultiplier handling.",
-  "version": "0.1.68",
+  "version": "0.1.69",
   "apiVersion": 1,
   "permissions": [
     "log",
@@ -291,7 +291,7 @@
     "S2StartupAssist": {
       "type": "boolean",
       "label": "S2 起步响应补偿 · Startup assist",
-      "description": "Default ON with live trim. Startup delay and plateau-relative rise are learned separately from steady level; a plateau HIT is not required. Normal/Aggressive can trial one native1/16 ml/s boost for400ms from one clean slow-rise cup; Conservative needs two compatible observations, Gentle allows a very slow single cup. Same-frame base return retains its independent deadline and driver-ACK safety, while missing target echo alone degrades to same-base retries. Existing physical pressure/flow bounds and shared budgets remain. Actual issued/skipped reason is displayed.",
+      "description": "主动泄压模式：确认S2帧后立即有界补水，不等待历史合格杯或泵追上基础值；补水指令最多基础值的1.4倍且增加不超过1 ml/s，原限压不变。RAW称流速达到或预测即将达到目标85%时收回，最长4秒；确认恢复基础值并等待响应后，控制目标在3秒内由85%渐进至100%，上调写入至少间隔750ms，检查继续。补水瞬态不参与稳态流量学习。关闭主动泄压时保留旧短脉冲策略。 Active-release refill: same-frame bounded fill,85% predicted cutoff,4s maximum; after verified base return and settle, approach100% over3s. No extra skips; pressure/freshness/ACK/shared budgets retained. Continuous mode retains legacy startup pulse.",
       "default": true
     }
   },

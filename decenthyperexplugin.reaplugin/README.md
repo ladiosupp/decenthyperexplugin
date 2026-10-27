@@ -1,6 +1,34 @@
-# HyperEx Pulse Filter 0.1.73
+# HyperEx Pulse Filter 0.1.74
 
 Based on delivered/GitHub1.70. Install over the same plugin; retain LUT/history and valid starting commands. No new calibration or dedicated coffee tests. No1.68 hardware validation yet.
+
+## 1.74 · S2完整目标接管与有效称流起点
+
+用户明确要求修改控制策略：可以接受短暂约6g/s峰值，重点是回落后稳定在5g/s；S2是称流先决曲线，出液前等待不能计入流量合格/置信评估。基线1.73此前仅修显示与参数记录，本版实施控制与评估逻辑修改。
+
+### 补水结束后的接管
+
+- 补水幅度仍是基础泵指令默认160%、最高8ml/s，不恢复＋2限制；称流收回阈值默认85%、最长4秒请求退出增强、压力及数据/ACK保护保留。
+- 接管阶段的真实杯流目标始终是完整目标，默认5g/s；取消原先内部4.25→5g/s目标斜坡，避免4.6g/s本应偏低却被当成超目标继续下调。原“渐进至100%时间”滑块保留并改名“接管渐进时间”，用于限制接管期节奏，不再降低杯流目标。
+- 确认返回指令后，杯内控制等待从1600ms改为50ms；新鲜度、帧确认、有效RAW回归、原驱动最小发送间隔仍需满足。仅补水返回控制如此，原连续模式短脉冲和数值学习的稳态排除时段不被取消。
+- 接管期用带符号的短窗流量趋势：正在回落、预测已接近目标时避免再叠加下调；持续偏高且没有回落趋势仍可下调，低于5且没有上升惯性则可上调。750ms上调间隔只约束所设接管时长，结束后恢复原档位检查/写入节奏，不再贯穿整个S2。
+- 若上一杯是已完成、未排除、同物理上下文，后段称流稳定，且多次新鲜机器目标/实际流量与压力佐证可靠，则用后段实际杯流偏差做半幅局部比例估计，生成有界接管指令。范围为基础指令至基础×120%，不得超过增强指令或8ml/s，按1/16向下量化。不用补水峰值估计维持流量；没有可靠证据就用基础指令，由杯内控流接管。不会凭一次峰值无界抬高基础/LUT。
+- 压力或数据过期触发退出增强时，返回原基础指令，不采用较高接管估计。强补水4秒上限依然生效；接管指令处在普通杯内调流的原有±20%范围内。
+- 返回已有驱动ACK、却缺少机器目标回显时，至少3次不同时间的新鲜同帧实际流量观测、跨度至少500ms、距返回写入至少600ms、流量在返回值约5%或一个原生档位内且压力有余量，可标记“actual-flow-corroborated”恢复接管。不是伪造目标ACK，目标回显计数不增加，驱动ACK缺失仍停止。重复/过期/高压/流量不符不能满足佐证。
+
+### S2出液前不算低流量
+
+- 从RAW秤重与源时间戳检测持续增重：至少4个唯一采样、跨度约0.4秒、总增重至少0.2g、回归R²≥0.85，斜率超过低噪声阈值。最长2.05秒检测窗支持很慢的真实出液，不要求接近目标或85%才开始计量。
+- 确认后回溯到持续上升的起点，纳入最初出液数据；重复时间、单次跳重、无持续趋势的小抖动不能触发。归零后重新检测。原始出液前记录仍保留，不改秤重、不压缩时间轴。
+- S2回归、误差/合格状态、后段均值/CV、固定指令证据、杯内学习覆盖率及机器执行窗口从该起点对齐；未检测出液时暂不计算流量合格，而非给一个假的MISS或HIT。出液开始后，后面的低流量/断流仍完整计入，不能只截取好看的稳定段。
+- 启动延迟单独显示，诊断区列出S2有效称流起点及被排除的等待时间。原启动响应分析仍保留完整原始时间线，用于分析延迟，不能与出液后的流量误差混为一谈。
+- 数值学习仍匹配实际指令窗口、保留补水瞬态/返回后的稳定性要求；并非把不同指令下的数据都配成同一稳态指令。旧杯记录和LUT不清除，缺少原始数据的旧统计不凭空重算。
+
+1.73的滑块、上次修改/上一杯窗口、萃取图排除泄压等功能保留，S1/S3、主动泄压/GHC/skip拓扑及温度指令不改。本版是算法实现与模拟验证，不能声称已在真机证明回落后稳定5g/s。
+
+**499/499 Node模拟/回归检查通过**。验证见tests/RESULTS_v0174.txt：延迟2/10/20秒的出液后回归一致、完全无流/噪声/重复/归零、慢流正确MISS、出液后断流仍MISS、短暂6后稳定5可纳入学习、完整目标接管/50ms恢复/回落趋势/过高继续纠偏、接管期结束解除750ms限制、可靠/不可靠历史接管估计、压力返回基础、实际流量佐证及旧有回归。没有1.74真机或完整浏览器验证。
+
+## Historical release notes — 1.73
 
 ## 1.73 · 萃取图排除泄压尖峰，标注补水收回原因
 
@@ -30,7 +58,7 @@ Based on delivered/GitHub1.70. Install over the same plugin; retain LUT/history 
 
 **控制不再额外放宽**：继承1.72基础泵指令默认160%、最高8ml/s、无＋2限幅；仅此补水幅度按泵指令，其他目标/学习按杯中g/s。85%称流收回、最长4秒请求返回、压力/新鲜度/ACK保护、原skip拓扑、S3设置全部保持。此用户截图为1.71，不是1.72的160%实测。
 
-**476/476 Node模拟/回归检查通过**。验证结果见本包tests/RESULTS_v0173.txt；包括泄压双尖峰、截止事件、旧记录、连续模式、校准模式、断线和RAW斜率重置、原始CSV不变、空图清除、实际收回原因及旧有控制回归。没有1.73真机或完整浏览器验证。
+**476/476 Node模拟/回归检查通过**。验证结果见本包tests/RESULTS_v0174.txt；包括泄压双尖峰、截止事件、旧记录、连续模式、校准模式、断线和RAW斜率重置、原始CSV不变、空图清除、实际收回原因及旧有控制回归。没有1.73真机或完整浏览器验证。
 
 ## Historical release notes — 1.72
 
@@ -47,7 +75,7 @@ Based on delivered/GitHub1.70. Install over the same plugin; retain LUT/history 
 
 注意：取消＋2后，不再有原先“额外指令积分≤8个指令ml”的界限；4秒只是计划请求收回时点，不是实测额外水量上限。8 ml/s是软件指令上限，不代表所有粉饼/机器条件下均已实测无过冲或无温度瞬态。
 
-**455/455 Node模拟/回归检查通过**。验证结果见本包`tests/RESULTS_v0173.txt`；Node模拟覆盖新倍率、超过旧＋2边界、8封顶、驱动实际编码/收回、旧值迁移与新值保留、运行中稳温状态禁止派发、界面预览、S3/称流目标/温度保持及既有回归。没有1.72真机或完整浏览器验证。
+**455/455 Node模拟/回归检查通过**。验证结果见本包`tests/RESULTS_v0174.txt`；Node模拟覆盖新倍率、超过旧＋2边界、8封顶、驱动实际编码/收回、旧值迁移与新值保留、运行中稳温状态禁止派发、界面预览、S3/称流目标/温度保持及既有回归。没有1.72真机或完整浏览器验证。
 
 ## Historical release notes — 1.71
 
@@ -293,4 +321,4 @@ Live trim defaults ON at level3; diagnostic slider/native dropdown. Saved explic
 
 Full browser visual/touch rendering was unavailable (Chromium/Firefox and SVG raster delegate not installed); simulated DOM/pointer checks are not hardware or full WebView validation. Existing handheld/tablet screenshots remain the actual1.60 evidence. No1.65 device results yet.
 
-Run node --check plugin.js and node tests/verify_v0173.cjs. Current HANDOFF_v0173.md and tests/RESULTS_v0173.txt accompany this package. LICENSE and original calibration JSON are unchanged. Delivered older ZIPs remain immutable; old remote files retained for history.
+Run node --check plugin.js and node tests/verify_v0174.cjs. Current HANDOFF_v0174.md and tests/RESULTS_v0174.txt accompany this package. LICENSE and original calibration JSON are unchanged. Delivered older ZIPs remain immutable; old remote files retained for history.

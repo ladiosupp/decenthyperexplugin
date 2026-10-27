@@ -1,6 +1,41 @@
-# HyperEx Pulse Filter 0.1.69
+# HyperEx Pulse Filter 0.1.70
 
-Based on delivered/GitHub1.68. Install over the same plugin; retain LUT/history and valid starting commands. No new calibration or dedicated coffee tests. No1.68 hardware validation yet.
+Based on delivered/GitHub1.69. Install over the same plugin; retain LUT/history and valid starting commands. No new calibration or dedicated coffee tests. No1.68 hardware validation yet.
+
+## 1.70 · S2提早补水至85%；S3投影偏置与实测方向保护
+
+用户1.69截图/run1793099785070-1显示：S2启动指令3.651ml/s，整段RAW3.821g/s，后段误差-12.32%、CV2.78%；回显缺失导致“补水后的基础值恢复尚未确认”，S2尚未纳入数值学习。S3启动三段0.813/0.813/0.813，实际整体1.619g/s、后段误差+11.62%，但归一化整体约1.513g/s，下一杯三段建议0.853。用户要求S2更早补水、估算120%目标流量、实测称流速85%时收回；同时调查S3为何由低转高、三段相同是否错误关闭shape。没有这杯完整CSV，以下确认的是源码机制与模拟，不声称已精确重放全部实机原因。
+
+### S2：提早准备与120%目标估算
+
+- 浸泡开始便准备RAW控制通道；此阶段没有泵写入、不消耗检查预算，不缩短浸泡或代替物理GHC按键。S2确认帧1且通道就绪后，首次检查使用一次0ms调度，不额外等250/944ms档位周期；随后的检查恢复原档位频率。去重定时器与一次kick标记防止回调风暴。1.69去掉的350ms切换等待保持；最多一次有帧预检的重启skip、一次S2重量切换，不增加skip或曲线帧。
+- 补水目标为 **1.20×目标称流速**，例如5g/s→估算6g/s。g/s不会直接填入ml/s指令。若可靠上一杯尾段实测与最后指令有机器实际流量佐证，使用其局部比例模型；否则按可用LUT的相对变化换算，超出LUT包络时仅使用明确标记的有界局部比例估计，不伪称精确外推。示例：可靠4g/s对应2.5ml/s时，6g/s估算3.75ml/s；这是模型，不保证实际一定达到6g/s。
+- 来源仅取可学习的同物理LUT/模式上下文上一杯；需尾段稳定、实测0.5–1.5倍当前目标、至少8条且≥80%的尾段机器记录新鲜、实际流量在参考指令±15%内且压力<90%原限压。排除杯、模式/LUT不符或缺乏佐证不使用此模型。模型只计算本杯补水指令，不自动视作已验证S2杯间稳态证据。
+- 临时补水指令上限为 **基础值1.6倍、基础值+2ml/s、8ml/s** 三者最小，向下量化1/16。它比1.69的40%/+1上限宽，原压力、驱动ACK、数据新鲜度、共享检查/写入预算和4s最长增强保护保留；达到机器指令上限会标记commandLimited，不保证达到估算称流速。
+- 正常收回改为 **实测RAW回归达到85%**；预测值不再单独触发提前收回。压力余量、秤失鲜、最长4s仍可提前返回。预测继续用于返回后的渐进阶段，防止响应正在上升时重复上调。恢复基础值并响应等待后仍在3s内由85%渐进100%，上调至少750ms，称重量阶段出口与最终目标重量不变。
+
+### S3：等值三段确实是平直，但没有关闭三段模式
+
+源码没有发现1.69修复时将已启用shape强制关闭的路径；0.813×8s→0.813×14s→0.813是**三段计时、相同流量**。原模式标签仅说明三段功能启用，不能代表数值有起伏。现在已应用与启动快照表格明确显示“平直（三段计时）”，真正不同值仍显示形状；保留其时长与5帧结构，不盲目恢复旧的递增曲线。
+
+发现一个可造成偏高/压平的机制：单杯S3每段修正后，旧代码为保证非递减，向前取最大值；前段一旦上调，可能机械地把中、后段一起抬高，即使它们原建议保持/下降。1.68引入更敏捷单杯修正后，这个偏置更值得注意；不声称它独自解释用户所有杯差。
+
+1.70将正常单杯和双杯LEVEL+SHAPE调整改为带每段时长权重的有界单调投影，保留非递减、相邻变化与四档逐段上限。冲突的三段共同让步，而不是用前段的新最大值覆盖后两段。为最终投影保留原始逐段建议，避免提前丢失后段下降意图。专门的停滞恢复规则保持。
+
+对于杯内运行的S3，如果真实RAW尾段超出所选学习带，而归一化模型建议相反方向变化，高尾段阻止上调，低尾段阻止下调；仍可保留同向的限幅修正。模型冲突造成HOLD时显示“实测与模型方向冲突，保持”，不会冒称“在容差内”。投影后不足0.005ml/s的变化不会被当成新的数值应用。模型未被当成实际测量；RAW曲线/误差继续独立展示。该规则不保证根除所有杯差，也不会人为制造非平直命令；受当前非递减形状约束时，合理结果仍可能为平直。
+
+
+### S3指令历史追溯
+
+用户随后询问何时全段变为约0.819。1.67–1.69源码中没有写死0.819；它与0.813在杯内A010驱动中均编码为0.8125这一档，但不据此推断用户记错或具体修改时间。新增学习历史里的“S3指令变化时间线”，只读列出现存启动快照和已校验的下一杯应用，显示时间、来源杯、插件版本、三段数值、来源、平直/三段模式和学习排除状态。保留被排除杯用于溯源，不重新纳入学习。只有前后都已校验、同物理上下文且中间快照未缺失时才列出非平直到平直的观测转变；提案和失败应用不能当已执行。仅能报告现存最早证据，缺失旧记录不能宣称第一次修改。当前尚未取得用户设备历史文件，因此未声称准确是哪一杯。
+
+### 验证与保留事项
+
+**408/408 Node模拟/回归检查**：继承1.69的388项，调整新120%流量包络与实测85%收回期望；新增20项覆盖g/s→ml/s区别、LUT插值/超界回退、可信实测来源与排除/模式保护、浸泡预热通道、一次立即kick、S3时长加权投影、800组四档边界、实测高/低与模型相反方向、等值shape5帧上传及UI状态。包含plugin语法、生成HTML脚本语法、双语/HTML结构验证。996翻译条目。无1.70真机或完整浏览器执行验证；构造数据不等于用户该杯原始数据重放。
+
+原LUT、历史及人工排除、温度设定、主动泄压/连续模式区分和四档强度保留，不需重校准。1.69的“S2返回目标回显缺失时暂不学习”仍是限制：本版没有把写入ACK直接冒充机器目标确认，也没有声称已解决底层全部缺失反馈。原LICENSE和校准JSON不变，旧安装包保持。
+
+## Historical release notes — 1.69
 
 ## 1.69 · S2 先补水，85%收回，再渐进到目标
 
@@ -163,4 +198,4 @@ Live trim defaults ON at level3; diagnostic slider/native dropdown. Saved explic
 
 Full browser visual/touch rendering was unavailable (Chromium/Firefox and SVG raster delegate not installed); simulated DOM/pointer checks are not hardware or full WebView validation. Existing handheld/tablet screenshots remain the actual1.60 evidence. No1.65 device results yet.
 
-Run node --check plugin.js and node tests/verify_v0169.cjs. Current HANDOFF_v0169.md and tests/RESULTS_v0169.txt accompany this package. LICENSE and original calibration JSON are unchanged. Delivered older ZIPs remain immutable; old remote files retained for history.
+Run node --check plugin.js and node tests/verify_v0170.cjs. Current HANDOFF_v0170.md and tests/RESULTS_v0170.txt accompany this package. LICENSE and original calibration JSON are unchanged. Delivered older ZIPs remain immutable; old remote files retained for history.

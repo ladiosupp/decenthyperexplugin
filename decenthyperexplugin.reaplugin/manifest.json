@@ -3,7 +3,7 @@
   "author": "ladiosupp",
   "name": "HyperEx Pulse Filter",
   "description": "HyperEx three-stage controller with verified workflow-profile truth, persistent cross-version adaptive history with storage self-test, first-run RAW-scale flow calibration, automatic S1/S2/S3 next-shot adaptation, S3 LEVEL/SHAPE separation, real-scale diagnostics, manual engineering tools, CSV export, full plugin settings, idempotent profile installation, and scoped DE1 flowMultiplier handling.",
-  "version": "0.1.69",
+  "version": "0.1.70",
   "apiVersion": 1,
   "permissions": [
     "log",
@@ -291,7 +291,7 @@
     "S2StartupAssist": {
       "type": "boolean",
       "label": "S2 起步响应补偿 · Startup assist",
-      "description": "主动泄压模式：确认S2帧后立即有界补水，不等待历史合格杯或泵追上基础值；补水指令最多基础值的1.4倍且增加不超过1 ml/s，原限压不变。RAW称流速达到或预测即将达到目标85%时收回，最长4秒；确认恢复基础值并等待响应后，控制目标在3秒内由85%渐进至100%，上调写入至少间隔750ms，检查继续。补水瞬态不参与稳态流量学习。关闭主动泄压时保留旧短脉冲策略。 Active-release refill: same-frame bounded fill,85% predicted cutoff,4s maximum; after verified base return and settle, approach100% over3s. No extra skips; pressure/freshness/ACK/shared budgets retained. Continuous mode retains legacy startup pulse.",
+      "description": "主动泄压后：浸泡时仅预备控制通道；确认S2帧后立即检查补水，不等下一档周期。以120%目标称流速估算补水指令：优先可靠上一杯实测尾段与机器流量佐证的局部模型，其次LUT相对换算或有界比例估计；不是把g/s直接当ml/s。临时指令最多基础值1.6倍、基础值+2ml/s、原8ml/s三者最小，保持原限压。实测RAW称流速达到85%时收回；预测不再单独触发提前收回。压力/失鲜/最长4秒仍可提前返回。恢复后渐进至100%。关闭主动泄压时沿用旧短脉冲。 Active-release: prewarm transport during soak, immediate confirmed-frame check, estimated120%real-flow refill target and measured85%cutoff; unchanged pressure/ACK/deadline guards.",
       "default": true
     }
   },

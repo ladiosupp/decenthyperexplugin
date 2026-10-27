@@ -1,3 +1,13 @@
+# HyperEx Pulse Filter 0.1.76
+
+修复 1.75 独立补水保存按钮报错 `endpoint refill-settings-save not available`：1.75 已实现按钮和处理函数，但漏在 manifest 注册 HTTP 接口，宿主会提前拒绝请求。本版补齐注册。
+
+增加宿主接口声明与 HTTP 保存/重新读取测试，保存渐进 1.5s、收回80%可持久化。1.75 的 S3 策略、图形补零以及 1.74 的 S2 策略均不改。覆盖安装后由宿主重新载入插件；仅刷新诊断页可能不足以更新 manifest。
+
+模拟验证见 tests/RESULTS_v0176.txt；无 1.76 真机验证。
+
+## Previous release
+
 # HyperEx Pulse Filter 0.1.75
 
 基线 1.74。保留 LUT、历史和 S3 手动曲线，不重新校准。

@@ -1,6 +1,52 @@
-# HyperEx Pulse Filter 0.1.70
+# HyperEx Pulse Filter 0.1.71
 
-Based on delivered/GitHub1.69. Install over the same plugin; retain LUT/history and valid starting commands. No new calibration or dedicated coffee tests. No1.68 hardware validation yet.
+Based on delivered/GitHub1.70. Install over the same plugin; retain LUT/history and valid starting commands. No new calibration or dedicated coffee tests. No1.68 hardware validation yet.
+
+## 1.71 · 可视化S2补水设置与自由数值曲线编辑
+
+用户先要求恢复S3旧递增值，随后明确取消源码恢复、选择在真机手动填写。**本版没有S3重置/迁移**；保留现存S3值、来源、时长，尤其是用户已手动恢复的0.698→0.720→0.778。新需求是把S2补水参数放在现有可视化曲线编辑区，并允许原曲线控制点自由输入数字。
+
+### 同一编辑区，统一应用到下一杯
+
+“下一杯·曲线编辑”增加S2提前补水滑块、机器指令预览、估算目标称流速及软件指令上限。滑块修改草稿，点击原有“应用到下一杯”才保存；“恢复补水默认值”只恢复补水参数，不重置S1/S2/S3曲线。现有S3手动值与算法来源保留。补水参数独立存储，不随杯间学习覆盖。
+
+| 参数 | 默认 | 可调范围 | 步长 |
+|---|---:|---:|---:|
+| 启动延时 | 0秒 | 0–1.5秒 | 0.05秒 |
+| 补水目标 | 目标称流速120% | 100%–140% | 1% |
+| 实测称流速收回阈值 | 85% | 70%–90% | 1% |
+| 最长补水 | 4秒 | 0.5–4秒 | 0.1秒 |
+| 恢复后渐进至100%的时间 | 3秒 | 1–6秒 | 0.1秒 |
+
+启动延时从确认进入S2帧后计算，不能设负值或在GHC确认/浸泡结束前补水。当前0秒默认仍尽早执行。正常收回阈值与渐进起点使用同一个配置值；压力/数据/最长时限保护仍可更早请求返回。最长补水设定是计划请求返回的时点，实际执行还取决于驱动与反馈，不能声称毫秒级硬件响应保证。
+
+### 边界的计算与不能调的保护
+
+可调范围以1.70已有限幅为工程边界，不作为所有机器/滤具环境的实测安全认证。设置→读取恢复→生成补水计划→驱动派发均有检查；伪造请求、超界、非有限值和非法步长不被接受。持续提早或增强都不能突破：
+
+- 临时机器指令≤min(8ml/s，基础指令×1.6，基础指令+2ml/s)，按原生1/16向下量化。百分比是称流速目标，仍经LUT/可靠实测局部模型换算，不直接把g/s当ml/s。
+- 因此计划额外指令流量最多2ml/s；计划最长4s时，计划增量积分≤8个“指令ml”。这不是实测进水体积、杯中增重或热/压力安全保证；机器标定、流动滞后和保护退出仍影响结果。
+- 收回阈值最高90%，保留目标前至少10%的名义流速余量；不能保证所有惯性过冲被消除。0–1.5s延时只允许在确认S2后等待，最少0.5s持续时间覆盖多次常用档位检查，最长4s不放宽原增强期限。渐进时间最少1s，避免恢复后立刻一步把内部目标推至100%。
+- 原压力<90%限压的增强准入/收回、600ms新鲜度、驱动ACK、返回截止保护、50ms最小发送间隔、渐进上调750ms、检查/写入预算、重量出口不开放修改。无新增skip、帧或GHC自动启动。
+- 主动泄压关闭时仍使用既有连续模式短脉冲，新滑块显示当前不执行补水；保存的设置可供以后开启使用。开关状态不会因调整参数而改变。
+
+### 参数保存与当前杯冻结
+
+新独立KV键`s2RefillSettingsV1`，等待初次读取后才能完成曲线武装/应用；旧安装没有值则使用默认。坏JSON或非法保存值使用默认并提示，不悄悄接受危险值。曲线与补水草稿使用同一版本校验、空闲检查、保存事务和失败回滚；保存失败或上传/回读失败不能报告成功。参数只影响后续杯，当前杯使用冻结的计划。修改补水参数不改变物理LUT指纹、历史准入或原始校准表。
+
+预览明确是估算，显示最大时限示意；达到称流速阈值或保护条件可以更早返回。更改S2基础值时预览同步跟随；应用后以服务器重新换算、限幅和校验结果为准。未把1.70的“返回目标回显缺失仍限制稳态学习”问题冒充为已解决。
+
+### 曲线控制点可直接输入
+
+选中S1/S2/S3控制点后可在数字框输入最多四位小数，也可精细拖动；例如0.698、0.720、0.778不再被界面强行吸附到1/16网格。上下按钮及键盘箭头仍移动一个**实际原生驱动档位**，从最接近当前值的原生量化档计算，触及边界停止；不会用表面小数变化假装实际下降一档。
+
+输入值与对应驱动量化档位分别显示。软件允许保存精细小数，不代表机器具备0.0001ml/s控制分辨率；0.819/0.813仍可能落到同一个0.8125档位。保留0.10–8.00ml/s、S3前≤中≤后与相邻变化限制；非法输入不修改草稿，显示原因并阻止应用。不会因新数字输入而关闭S3三段或重置学习档位。
+
+### 验证
+
+**443/443 Node模拟/回归检查**，包含1.70的408项和35项新检查：默认/边界/步长、延时、70/90%收回、500ms计时、计划二次检查、6s渐进、持久化恢复/坏值回退、旧客户端、版本冲突、保存/上传失败回滚、当前杯冻结、所有硬保护保持、S3保留、滑块逻辑/双语、自由数字精确恢复旧递增值、非法输入、实际档位按钮与下边界。plugin及最终生成HTML脚本语法、HTML结构和1032翻译条目通过检查。没有1.71真机或完整浏览器运行验证；不能把模拟视作硬件过冲/响应已验证。原LICENSE/校准JSON/旧ZIP保持。
+
+## Historical release notes — 1.70
 
 ## 1.70 · S2提早补水至85%；S3投影偏置与实测方向保护
 
@@ -198,4 +244,4 @@ Live trim defaults ON at level3; diagnostic slider/native dropdown. Saved explic
 
 Full browser visual/touch rendering was unavailable (Chromium/Firefox and SVG raster delegate not installed); simulated DOM/pointer checks are not hardware or full WebView validation. Existing handheld/tablet screenshots remain the actual1.60 evidence. No1.65 device results yet.
 
-Run node --check plugin.js and node tests/verify_v0170.cjs. Current HANDOFF_v0170.md and tests/RESULTS_v0170.txt accompany this package. LICENSE and original calibration JSON are unchanged. Delivered older ZIPs remain immutable; old remote files retained for history.
+Run node --check plugin.js and node tests/verify_v0171.cjs. Current HANDOFF_v0171.md and tests/RESULTS_v0171.txt accompany this package. LICENSE and original calibration JSON are unchanged. Delivered older ZIPs remain immutable; old remote files retained for history.

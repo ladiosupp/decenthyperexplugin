@@ -1,6 +1,23 @@
-# HyperEx Pulse Filter 0.1.71
+# HyperEx Pulse Filter 0.1.72
 
 Based on delivered/GitHub1.70. Install over the same plugin; retain LUT/history and valid starting commands. No new calibration or dedicated coffee tests. No1.68 hardware validation yet.
+
+## 1.72 · S2补水按基础泵指令160%，取消＋2限制
+
+本次仅修改S2临时增强幅度的单位和边界。用户明确：百分比按基础泵流量指令ml/s计算，其他阶段目标、杯内控流、杯间学习与补水收回仍按真实杯中称流g/s。
+
+- 默认倍率160%，可调100%–160%；基础指令先按原生1/16 ml/s量化，增强指令为`floor(min(8, base × percent / 100) × 16) / 16`。取消基础指令＋2 ml/s限制；计划与驱动派发均校验倍率和8 ml/s上限。LUT/杯间学习仍决定基础指令，但不再额外换算增强倍率。
+- 例：基础4 ml/s，160%理论6.4 ml/s，实际档位6.375 ml/s，允许超过旧的6 ml/s上限；基础6 ml/s时理论9.6，封顶8 ml/s。100%不需要增强，不强制多写一档。
+- 其余补水参数保留：默认确认S2后0秒启动、实际称流达到S2目标85%收回、最长4秒请求收回、恢复后3秒渐进。用户已有的启动延时、收回阈值、最长时间和渐进时间保留；现有可调范围不变。
+- 原压力保护保持：默认S2限压6 bar；增强在达到90%限压即5.4 bar时请求收回。600ms数据新鲜度、ACK/返回截止保护、帧确认、正式出水子状态、检查及写入预算、重量出口均保持。不在机器加热/混水稳温子状态执行增强，不增加skip或曲线帧。
+- 原1.71存储百分比含义是称流目标，不能静默当作泵倍率。读取无`basis`的旧补水设置时，只迁移倍率为160%，保留其他有效参数并显示说明；新存储带`basis: pump-command`，用户后续设置的倍率跨重启保留。坏值仍回退默认并提示。旧页面含补水字段但没有新单位标记的应用请求会被拒绝，要求重新载入；完全没有补水字段的旧客户端仍保留当前参数。
+- 同一曲线编辑器改为“基础泵流量倍率”，预览显示实际量化后的ml/s；85%收回另显示对应g/s。恢复默认、草稿版本、当前杯冻结、空闲应用和失败回滚保留。S3曲线、时长、手动/学习来源不重置。
+
+注意：取消＋2后，不再有原先“额外指令积分≤8个指令ml”的界限；4秒只是计划请求收回时点，不是实测额外水量上限。8 ml/s是软件指令上限，不代表所有粉饼/机器条件下均已实测无过冲或无温度瞬态。
+
+**455/455 Node模拟/回归检查通过**。验证结果见本包`tests/RESULTS_v0172.txt`；Node模拟覆盖新倍率、超过旧＋2边界、8封顶、驱动实际编码/收回、旧值迁移与新值保留、运行中稳温状态禁止派发、界面预览、S3/称流目标/温度保持及既有回归。没有1.72真机或完整浏览器验证。
+
+## Historical release notes — 1.71
 
 ## 1.71 · 可视化S2补水设置与自由数值曲线编辑
 
@@ -244,4 +261,4 @@ Live trim defaults ON at level3; diagnostic slider/native dropdown. Saved explic
 
 Full browser visual/touch rendering was unavailable (Chromium/Firefox and SVG raster delegate not installed); simulated DOM/pointer checks are not hardware or full WebView validation. Existing handheld/tablet screenshots remain the actual1.60 evidence. No1.65 device results yet.
 
-Run node --check plugin.js and node tests/verify_v0171.cjs. Current HANDOFF_v0171.md and tests/RESULTS_v0171.txt accompany this package. LICENSE and original calibration JSON are unchanged. Delivered older ZIPs remain immutable; old remote files retained for history.
+Run node --check plugin.js and node tests/verify_v0172.cjs. Current HANDOFF_v0172.md and tests/RESULTS_v0172.txt accompany this package. LICENSE and original calibration JSON are unchanged. Delivered older ZIPs remain immutable; old remote files retained for history.

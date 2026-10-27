@@ -1,8 +1,53 @@
-# HyperEx Pulse Filter 0.1.67
+# HyperEx Pulse Filter 0.1.68
 
-Based on delivered/GitHub1.66. Install over the same plugin; retain LUT/history and valid starting commands. No new calibration or dedicated coffee tests. No1.67 hardware validation yet.
+Based on delivered/GitHub1.67. Install over the same plugin; retain LUT/history and valid starting commands. No new calibration or dedicated coffee tests. No1.68 hardware validation yet.
 
-## Active release switch and continuous brewing (1.67)
+## 1.68 · 动态学习与来源标记
+
+默认杯间学习档位改为 **正常**：一杯合格证据发现超出学习容差，下一杯即可生成、上传并校验一次限幅调整。无需再等一杯完全相同的指令。该设置与杯内控流的1–4档独立；已有杯内开关/档位和主动泄压选择保持。
+
+| 档位 | 启动数值调整 | 学习误差带 | S1 每杯上限 | S2 每杯上限 | S3 每段上限 |
+|---|---|---|---|---|---|
+| 保守 | 两杯可比证据 | ±8% | ±4%且0.04ml/s | ±5%且0.10ml/s | ±4%且0.04ml/s |
+| 温和 | 小偏差两杯；明显偏差允许单杯 | ±8% | ±5%且0.04ml/s | ±8%且0.20ml/s | ±5%且0.05ml/s |
+| 正常（默认） | 一杯合格证据 | ±8% | ±10%且0.08ml/s | ±12%且0.35ml/s | ±8%且0.075ml/s |
+| 激进 | 一杯合格证据，更高增益 | ±5% | ±15%且0.12ml/s | ±20%且0.60ml/s | ±12%且0.125ml/s |
+
+百分比与绝对值同时限幅，并保留机器流量、S3顺序/相邻变化限制、压力与执行保护；不是承诺实际杯流按同比例改变。基础增益0.18/0.25/0.35/0.55。历史同向一致时作为约20%参考；当前与历史冲突时正常/激进缩小本次步幅而非一律REPEAT。保守保留两杯一致性检查；已确认S3停滞仍使用较保守的专门恢复规则。
+
+**激进的统计学习准入范围为正常的1.3倍**。例如S2稳态与起步波动CV上限12%→15.6%，拟合未解释误差上限0.10→0.13，即R²0.90→0.87；固定S2回归R²0.97→0.961。最少统计时长/覆盖率按1.3折算，样本数向上取整；归一化窗口离散度25%→32.5%、历史参考一致范围35%→45.5%。它扩大可用证据，不把错误杯算正确，也不扩大实际出液目标或驱动安全边界。原始HIT/NEAR/MISS仍是出液诊断，与数据准入/学习误差带分别显示。
+
+### Same curve, dynamic evidence
+
+Normal/Aggressive use current clean S1 startup, S2 level and S3 frame evidence without requiring an identical-command repeat. Near-target current evidence holds; a pressure/actuator limit, unavailable RAW evidence, excluded fault or numeric response outside0.2–3×target still withholds correction. Missing evidence is never invented. Gentle permits a clean large scalar error(≥20%, with stable matching tail forS2) or largeS3frame error; Conservative requires comparable repeats. S3 single-shot LEVEL+SHAPE changes retain the monotonic/adjacent bounds. An explicit user OFF for autoapply still requires manual application.
+
+For this single fixed HyperEx curve, numeric history no longer hard-matches targets, weight exits, soak time, temperature or pressure-setting microchanges. PhysicalLUT/multiplier, coffee/empty context and ActiveReleaseON/OFF remain separated. Existing coffee qualification and valid learned command seeds survive microchanges without resetting to empty calibration. Existing qualification-marker strings migrate by normalizing their original fingerprint. Learned override goal bindings accept bounded goal changes instead of discarding every small change; physicalLUT and mode guards remain.
+
+Nearby scalar commands are compared through an explicitly labelled local proportional reference; S3 maps old frame commands/timings into a reference for current frames. The model has a bounded0.5–2 command/target ratio envelope; more distant history remains retained but is not forced into that model. The newest comparable contradictory observation is retained as conflicting evidence; Normal/Aggressive damp against it rather than searching for an older agreeing cup. Numeric extreme responses are excluded from numeric reference, independently of operator/fault annotations. Legacy version numbers are not an exclusion and the same adaptiveHistoryFileV2 storage key is retained.
+
+Fixed-command S2 LEVEL uses a clean settled last60% RAW regression when available, preventing initial delay/ramp from being mistaken for a persistent plateau deficit. Whole-phase actual validation and plots remain unmodified. In-shot normalized target-window learning remains explicitly modelled; actual RAW output remains separate. Selected statistical thresholds/rejection reasons and learning policy appear in diagnostics.
+
+### Startup assist without a prerequisite plateau HIT
+
+Startupmetrics schema2 stores both target-referenced20–80% rise and observed-plateau-relative rise, with the displayed basis. A stable below-target plateau can qualify: Normal allows0.5–1.08×target, CV≤12%, targetovershoot≤8%; Aggressive widens these statistical ranges by1.3. Valid onset/continuous unique source timestamps, execution integrity and fresh machine coverage/headroom are still required. Machineheadroom statistics require≥80%coverage/8rows, <10%samples near≥95%pressurelimiter and≥90%post1s samples with actualflow≥85%observedtarget. No hard pressure limits are raised.
+
+Normal/Aggressive can trial one native1/16ml/s quantum for400ms from one clean slow-rise cup (>1.2s/>1s). Gentle permits a very slow single cup(≥2.5s,CV≤8%); Conservative needs two compatible observations. Small S1/S2 starting-command changes no longer reset this evidence. Legacy schema1 metrics whose explicit rejection was only baseline-off may be reused, because that reason followed their strict headroom checks; absent raw metrics are not reconstructed. Normal/Aggressive do not require an identical preceding S1write signature; other policies retain bounded trajectory compatibility.
+
+Runtime still requires sameframe1, verified original base target, fresh machine+scale, no pending/priorS2write, pressure<90%configuredlimiter, actualflow≥85%base, and reserved return/check budget. The dispatch window is2s; if a usable RAW estimate is already≥80%target, skip a late boost. One-quantum amplitude≤8%/8ml/s is unchanged. Existing independent base-return deadline, earlypressure return,2.5s total driver-ACK guard, missing-target-only degradation/retry, cooldown, same-frame checks and shared budgets remain. Continued assist needs an observed≥10%rise improvement against a consistent reference basis; this is not proof of individual-action causality. The UI separates NOTPLANNED/ARMED/ISSUED/RETURNING/SKIPPED and the actual reason, plus current next-shot eligibility, instead of an unexplainedNO.
+
+### Original / Adaptive / Manual
+
+Applied-profile and shot-start tables now show **ORIGINAL/LUT**, **ADAPTIVE**, or **MANUAL** independently of internal execution-override type and S3shape. Stageorigin is frozen atshotstart and persisted perstage/shape. Auto changes mark only changedstages adaptive; editingS2 does not relabel untouchedS1/S3 as manual. Numeric editor Keep retains adaptive provenance; actual user edits/selectingmanual create manual provenance. Visual editing, successful applies, persistence/reload and failure rollbacks preserve origins. Legacy adaptiveSource is an aggregate learned-source migration; unattributed legacy overrides show RETAINED/UNKNOWN rather than inventing user authorship. The saved LUT is unchanged.
+
+### Storage and export diagnostics
+
+The user confirmed the three reported cups were saved. This release does NOT claim they were lost: code inspection found exact-command and startup gates that can cause repeated waiting. A new per-run persistence audit reports current record/evidence presence, write/readback pending/verified status, lastreadback time and actualUTF8 bytes. A small successful probe alone does not claim the current cup was saved. Transient storage errors get atmosttwo idle retry/probes, and require whole-file readback before restoring verified status. Unload/shutdown clears retrytimers; failures remain visible.
+
+New compact history records keep every action/ACK/target/fault but replace routine check rows with reason counts. Current full trace/CSV stays intact and older records are not rewritten. CSV now has the full current live trace despite the separate300event ring, a previously missingS2next-shot row, and origin/policy/history metadata. An independent flatS3 analysis null-dereference was found by the new reload integration test and fixed; it is not asserted as the user's reported cause.
+
+Validation: **361/361 syntheticNodechecks**, plugin syntax, generated browser scripts and HTML/locale checks. The legacy regression harness explicitly selects Conservative and is supplemented by Normal/Aggressive cases: three-cup synthetic response→verifiedupload→diskreadback→reload→next-cup improvement; one-cupS1/S2/S3; conflictinghistorydamping; mixedmanual/adaptiveprovenance; exact1.3statisticalwidth and same-waveformCV admission; pressure/freshness/ACK/budgets unchanged; old-version/microsetting reuse; fullCSV/flatS3/storage recovery. These are simulations, not replay of the user's unseen3cups. No1.68 hardware/fullbrowser validation yet. OriginalLICENSE/calibrationJSON stay byteidentical. No new calibration or dedicated coffee tests are requested.
+
+## Historical: Active release switch and continuous brewing (1.67)
 
 ActiveRelease defaultsON, preserving the original S1weight→Idle/active release→soak→GHC restart→S2→S3 sequence. The switch is immediately after Enable in native plugin settings and the first highlighted control in the quick-settings editor. The diagnostics top banner always states ON/release-soak-restart or OFF/continuousS1→S2→S3, including before settings fetch. Dashboard DIAGheader text also identifies the mode. Chinese/English labels and reasons remain reversible. The active-shot UI now shows the runningstage instead of HYPEREXIDLE. Quick settings use the existing native settings endpoint, preflight idle/availability and reload once; no second switch store. Native host settings remain host-controlled: change between cups because saving reloads the plugin.
 
@@ -101,4 +146,4 @@ Live trim defaults ON at level3; diagnostic slider/native dropdown. Saved explic
 
 Full browser visual/touch rendering was unavailable (Chromium/Firefox and SVG raster delegate not installed); simulated DOM/pointer checks are not hardware or full WebView validation. Existing handheld/tablet screenshots remain the actual1.60 evidence. No1.65 device results yet.
 
-Run node --check plugin.js and node tests/verify_v0167.cjs. Current HANDOFF_v0167.md and tests/RESULTS_v0167.txt accompany this package. LICENSE and original calibration JSON are unchanged. Delivered older ZIPs remain immutable; old remote files retained for history.
+Run node --check plugin.js and node tests/verify_v0168.cjs. Current HANDOFF_v0168.md and tests/RESULTS_v0168.txt accompany this package. LICENSE and original calibration JSON are unchanged. Delivered older ZIPs remain immutable; old remote files retained for history.

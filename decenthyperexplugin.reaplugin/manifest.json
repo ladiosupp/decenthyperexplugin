@@ -3,7 +3,7 @@
   "author": "ladiosupp",
   "name": "HyperEx Pulse Filter",
   "description": "HyperEx three-stage controller with verified workflow-profile truth, persistent cross-version adaptive history with storage self-test, first-run RAW-scale flow calibration, automatic S1/S2/S3 next-shot adaptation, S3 LEVEL/SHAPE separation, real-scale diagnostics, manual engineering tools, CSV export, full plugin settings, idempotent profile installation, and scoped DE1 flowMultiplier handling.",
-  "version": "0.1.67",
+  "version": "0.1.68",
   "apiVersion": 1,
   "permissions": [
     "log",
@@ -26,6 +26,18 @@
       "label": "主动泄压 · Active pressure release",
       "description": "Default ON: original release/soak and GHC restart. OFF: a single continuous S1→S2→S3 extraction with no intermediate Idle/soak/restart. Both modes learn independently; continuous mode supports S1/S2/S3 live trim. Change only while idle; saving reloads the plugin. Safety pressure/final-weight stops remain active.",
       "default": true
+    },
+    "AdaptiveLearningLevel": {
+      "type": "enum",
+      "label": "杯间学习强度 · Learning strength",
+      "values": [
+        "保守",
+        "温和",
+        "正常",
+        "激进"
+      ],
+      "default": "正常",
+      "description": "Default 正常: one clean completed shot can adjust the next. 保守 requires two comparable cups; 温和 permits a single clean large error; 正常 uses bounded single-cup correction; 激进 uses higher gains and bounds. History is a command-normalized reference across small parameter changes, never mixed across active-release modes or physical LUT/basket contexts. Pressure, execution, scale quality and shape limits remain active. Independent of live trim level. 激进的统计学习准入范围为正常档1.3倍：S2稳态及起步CV上限12%→15.6%，拟合残差容差0.10→0.13即R²0.90→0.87；最少统计窗口/样本按1.3折算（样本向上取整）。出液目标与压力、反馈新鲜度、驱动ACK、错杯排除和写入预算保护不随之放宽。"
     },
     "ProfileTitle": {
       "type": "string",
@@ -261,7 +273,7 @@
     "LiveFlowTrimTest": {
       "type": "boolean",
       "label": "TEST: live flow trim · 杯内控流",
-      "description": "Default ON at level3 (250ms/200writes). Saved explicit preferences are retained. Up to2000 checks per shot across S2+S3; separate write limits50/150/200/250 by level, including retries. Keep fresh regression, pressure/command limits, ACK/target feedback and ACK+matching target releases waiting after50ms; next level tick plus new scale data required. Missing-response timeout2s. After3 consecutive missing targets, continue observation and retry the SAME unresolved target no sooner than3s after dispatch; matching feedback recovers automatically. Normal next-shot learning retained. Cup-flow target band±2%; next-shot deadband±8%. Native1/16ml/s quantization and lag mean2% is a target, not guaranteed accuracy. Verified command windows can now feed next-shot learning through explicitly labelled local-model normalization. In continuous mode the same shot budget also covers S1 live control; corrected S1 startup learning uses observed-target exposure normalization with original quality gates.",
+      "description": "Default ON at level3 (250ms/200writes). Saved explicit preferences are retained. Up to2000 checks per shot across S2+S3; separate write limits50/150/200/250 by level, including retries. Keep fresh regression, pressure/command limits, ACK/target feedback and ACK+matching target releases waiting after50ms; next level tick plus new scale data required. Missing-response timeout2s. After3 consecutive missing targets, continue observation and retry the SAME unresolved target no sooner than3s after dispatch; matching feedback recovers automatically. Normal next-shot learning retained. Cup-flow target band±2%; next-shot learning band follows the learning policy (Normal±8%, Aggressive±5%). Native1/16ml/s quantization and lag mean2% is a target, not guaranteed accuracy. Verified command windows can now feed next-shot learning through explicitly labelled local-model normalization. In continuous mode the same shot budget also covers S1 live control; corrected S1 startup learning uses observed-target exposure normalization with original quality gates.",
       "default": true
     },
     "LiveFlowTrimLevel": {
@@ -279,7 +291,7 @@
     "S2StartupAssist": {
       "type": "boolean",
       "label": "S2 起步响应补偿 · Startup assist",
-      "description": "Default ON with live trim. Learn delay/rise separately from level. Only two comparable clean near-target low-ripple slow-rise shots with machine/pressure headroom can enable one native quantum of startup boost for400–800ms. Same-frame base return is reserved and must be ACK+target confirmed within2.5s or Idle safety stop. No added skip/profile frames. Explicit live trim OFF disables assist.",
+      "description": "Default ON with live trim. Startup delay and plateau-relative rise are learned separately from steady level; a plateau HIT is not required. Normal/Aggressive can trial one native1/16 ml/s boost for400ms from one clean slow-rise cup; Conservative needs two compatible observations, Gentle allows a very slow single cup. Same-frame base return retains its independent deadline and driver-ACK safety, while missing target echo alone degrades to same-base retries. Existing physical pressure/flow bounds and shared budgets remain. Actual issued/skipped reason is displayed.",
       "default": true
     }
   },

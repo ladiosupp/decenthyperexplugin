@@ -1,3 +1,16 @@
+# HyperEx Pulse Filter 0.1.75
+
+基线 1.74。保留 LUT、历史和 S3 手动曲线，不重新校准。
+
+- 补水面板增加独立“保存补水参数”：保存五项参数及修改前后记录，下一杯采用；不改动 S1/S2/S3 曲线或覆盖学习来源。草稿与保存状态分开，失败保留草稿。运行中及版本冲突拒绝保存。
+- S3 杯内上调增加 1.6 秒响应等待，并用同帧 RAW 短窗趋势检查正在回升/预计达标时停止继续加档。低流量不再只看较慢的整窗回归连续追涨。保留压力、反馈、指令范围和下降纠偏，不重置用户 S3 曲线。本杯具体过冲原因不能由照片确定，仍需真机反馈。
+- 日常流量/重量/写入线在 S1 与第二段之间补零连接，保留实际时间长度；仅渲染点补零，原 RAW/回归/学习/CSV 不改。其他遥测缺口仍不冒充测量。
+- 1.74 S2 全目标接管与持续出液起点逻辑保留。
+
+模拟结果见 tests/RESULTS_v0175.txt。尚无 1.75 真机验证。
+
+## Previous release
+
 # HyperEx Pulse Filter 0.1.74
 
 Based on delivered/GitHub1.70. Install over the same plugin; retain LUT/history and valid starting commands. No new calibration or dedicated coffee tests. No1.68 hardware validation yet.

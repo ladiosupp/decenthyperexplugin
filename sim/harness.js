@@ -31,7 +31,7 @@ function round(v, n) { const p = 10 ** (n || 2); return Math.round(v * p) / p; }
 
 function createEnv(logs) {
   const handles = new Map();
-  const machine = { state: 'idle', substate: 'idle', frame: 0, command: 0, requested: 0, flow: 0, pressure: 0, baseCommand: 0, writeCommand: null, baseFrame: -1 };
+  const machine = { state: 'idle', substate: 'idle', frame: 0, command: 0, requested: 0, flow: 0, pressure: 0, baseCommand: 0, writeCommand: null, baseFrame: -1, machineFlow: 0 };
   let nowMs = 0;
   let seq = 0;
   const timers = new Map();
@@ -86,7 +86,7 @@ function createEnv(logs) {
     if (pathOnly.startsWith('/machine/state/')) {
       const cmd = pathOnly.split('/').pop();
       if (cmd === 'idle') { machine.state = 'idle'; machine.substate = 'idle'; }
-      else if (cmd === 'espresso') { machine.state = 'espresso'; machine.substate = 'preinfusion'; machine.frame = 0; machine.writeCommand = null; }
+      else if (cmd === 'espresso') { machine.state = 'espresso'; machine.substate = 'preinfusion'; machine.frame = 0; machine.writeCommand = null; machine.machineFlow = 0; }
       else if (cmd === 'skipStep') { machine.frame = Math.min(4, machine.frame + 1); machine.substate = 'pouring'; }
       return { status: 200, body: { ok: true } };
     }
@@ -153,7 +153,7 @@ function createEnv(logs) {
 }
 
 function plantDefaults() {
-  return { efficiency: 1.0, tau: 1.2, deadTime: 0.8, noise: 0.015, pressureK: 1.05, pressureB: 0.6 };
+  return { efficiency: 1.0, pumpResponse: 0.35, deadTime: 0.2, noise: 0.015, pressureK: 2.2, pressureB: 0.4 };
 }
 
 // Steady-state cup flow for a pump command, interpolated from the calibrated
@@ -240,7 +240,7 @@ async function runShot(params) {
   await env.drain();
 
   const series = [];
-  const dt = 0.05;
+  const dt = 0.1;
   let t = 0, weight = 0, cupFlow = 0, lastSample = -1, lastState = -1;
   const dead = [];
   const profile = h.profileObject();
@@ -270,15 +270,34 @@ async function runShot(params) {
     if (frame !== autoFrame) { autoFrame = frame; frameEnteredAt = t; }
     if (frame !== m.baseFrame) { m.baseFrame = frame; m.writeCommand = null; m.baseCommand = Number(stepAt(frame).flow) || 0; }
 
-    // Hydraulic plant.
+    // Hydraulic plant modelled on Decaid's mock DE1: 100 ms ticks, first-order
+    // flow response, puck pressure and the current frame's pressure limiter.
+    const step = stepAt(frame);
     const cmd = m.state === 'espresso' ? (m.writeCommand == null ? m.baseCommand : m.writeCommand) : 0;
     dead.push({ t, cmd });
     while (dead.length && dead[0].t < t - p.plant.deadTime) dead.shift();
-    const delayed = dead.length ? dead[0].cmd : 0;
-    const target = cupFlowForCommand(delayed, anchors) * p.plant.efficiency;
-    cupFlow += (target - cupFlow) * Math.min(1, dt / Math.max(0.05, p.plant.tau));
+    const targetMlS = dead.length ? dead[0].cmd : 0;
+    const limiter = Number(step.limiter && step.limiter.value) || 11;
+    if (m.state === 'espresso') {
+      const rate = Math.min(1, Math.max(0.01, p.plant.pumpResponse));
+      m.machineFlow += (targetMlS - m.machineFlow) * rate;
+      let pressure = p.plant.pressureB + p.plant.pressureK * m.machineFlow;
+      if (pressure > limiter) {
+        pressure = limiter;
+        m.machineFlow = Math.max(0, (limiter - p.plant.pressureB) / p.plant.pressureK);
+      }
+      if (pressure > 11) {
+        pressure = 11;
+        m.machineFlow = Math.min(m.machineFlow, Math.max(0, (11 - p.plant.pressureB) / p.plant.pressureK));
+      }
+      m.pressure = pressure;
+    } else {
+      m.machineFlow += (0 - m.machineFlow) * 0.35;
+      m.pressure = 0.2;
+    }
+    cupFlow = cupFlowForCommand(m.machineFlow, anchors) * p.plant.efficiency;
     weight += cupFlow * dt;
-    const pressure = m.state === 'espresso' ? Math.max(0, p.plant.pressureB + p.plant.pressureK * cupFlow) : 0.2;
+    const pressure = m.pressure;
 
     t += dt;
 
@@ -291,9 +310,10 @@ async function runShot(params) {
     if (t - lastState >= 0.2) {
       lastState = t;
       h.handleStateUpdate({
-        machineState: m.state, substate: m.substate, pressure: round(pressure, 3),
-        flow: round(m.state === 'espresso' ? (m.requested || 0) : 0, 3),
-        targetFlow: round(m.state === 'espresso' ? (m.requested || 0) : 0, 3),
+        state: { state: m.state, substate: m.substate },
+        pressure: round(pressure, 3),
+        flow: round(m.machineFlow, 3),
+        targetFlow: round(m.state === 'espresso' ? cmd : 0, 3),
         profileFrame: m.frame,
       });
       await env.drain();
@@ -301,7 +321,7 @@ async function runShot(params) {
 
     series.push({
       t: round(t, 2), weight: round(weight, 2), cupFlow: round(cupFlow, 3),
-      command: round(m.state === 'espresso' ? (m.requested || 0) : 0, 4),
+      command: round(cmd, 4), machineFlow: round(m.machineFlow, 3),
       pressure: round(pressure, 2), frame: m.frame, phase: s.phase,
     });
 

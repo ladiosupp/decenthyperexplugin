@@ -72,10 +72,10 @@ canvas{width:100%;height:180px;display:block}
   </fieldset>
   <fieldset><legend>植物模型</legend>
     <label>効率 %<input id="pEff" type="number" step="1" value="100"></label>
-    <label>时间常数 s<input id="pTau" type="number" step="0.1" value="1.2"></label>
-    <label>纯滞后 s<input id="pDead" type="number" step="0.1" value="0.8"></label>
+    <label>泵响应 /100ms<input id="pResp" type="number" step="0.05" value="0.35"></label>
+    <label>纯滞后 s<input id="pDead" type="number" step="0.1" value="0.2"></label>
     <label>称重噪声 g<input id="pNoise" type="number" step="0.005" value="0.015"></label>
-    <label>压力系数 bar/(g/s)<input id="pK" type="number" step="0.05" value="1.05"></label>
+    <label>压力系数 bar/(ml/s)<input id="pK" type="number" step="0.05" value="2.2"></label>
     <label>最长时长 s<input id="maxS" type="number" step="5" value="90"></label>
   </fieldset>
   <button class="primary" id="run">运行仿真</button>

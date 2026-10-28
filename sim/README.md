@@ -31,20 +31,23 @@ node sim/smoke.js
 - **机器**：状态机由插件自己推（重量触发、skipStep、idle），仿真只回应命令并推进 profile 帧时间。
 - **秤**：每 100 ms 一个样本，时间戳用虚拟秒，带可选高斯噪声。
 
-## 植物模型
+## 植物模型（对齐 Decaid 的 mock DE1）
 
-稳态杯流按标定锚点插值（0.569→1.5、0.719→2.0、2.507→5.0 g/s），再乘「效率」，然后过一阶滞后和纯滞后：
+机器侧取自 Decaid 仓库的 `lib/src/models/device/impl/mock_de1/mock_de1.dart`：100 ms tick、流量按 0.35/tick 一阶逼近目标、压力线性于机器流量、到当前帧的 limiter（或 11 bar）时反向限制流量。杯流再把机器流量按标定锚点换算成 g/s：
 
 ```
-target = interp_LUT(command) * efficiency
-flow   = 一阶滞后(target, tau) + 纯滞后(deadTime)
-weight = ∫ flow dt + 称重噪声
-pressure = B + K * flow
+machineFlow = 一阶逼近(command, 0.35/100ms)，经纯滞后
+pressure    = B + K * machineFlow，超过当前帧 limiter 就压回流量
+cupFlow     = interp_LUT(machineFlow) * efficiency
+weight      = ∫ cupFlow dt + 称重噪声
 ```
 
-- **效率**：100% 表示和标定一致；90% 模拟粉饼阻力变化、泵衰减或豆子差异。这是最常用的一个旋钮。
-- **时间常数 / 纯滞后**：模拟液压惯性。滞后越大，实时调流越容易过冲。
-- **压力系数**：只影响压力曲线和限压保护是否触发，不参与杯流计算。
+- **效率**：100% 表示与标定一致；90% 模拟粉饼/泵/豆子导致的杯流产率下降。最常用的旋钮。
+- **泵响应**：每 100 ms 向目标推进的比例，对应 Decaid mock 的 `flowResponseRate = 0.35`；调小更迟钝。
+- **纯滞后**：命令到出流的传输延迟。
+- **压力系数**：bar per ml/s。调大更容易先撞 limiter，从「能调」变成「压力受限」。
+
+Decaid 的 `skipStep` 语义（推进一个 profile step、重置计时）、`espresso` 重置、`pouringDone → idle` 与 `state/substate` 字段名都按它的实现对齐。
 
 ## 页面能做什么
 

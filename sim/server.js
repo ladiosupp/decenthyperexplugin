@@ -7,7 +7,10 @@ const PORT = Number(process.env.SIM_PORT || 4780);
 const PUB = path.join(__dirname, 'public');
 
 function send(res, status, body, type) {
-  res.writeHead(status, { 'Content-Type': type || 'application/json; charset=utf-8' });
+  res.writeHead(status, {
+    'Content-Type': type || 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+  });
   res.end(body);
 }
 

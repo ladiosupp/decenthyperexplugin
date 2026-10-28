@@ -12,6 +12,7 @@ header{display:flex;align-items:baseline;gap:14px;padding:14px 20px;border-botto
 h1{font-size:17px;margin:0;letter-spacing:.02em}
 header .meta{color:#8b93a1;font-size:12px}
 header .status{margin-left:auto;font-size:12px;color:#9fd4a8}
+header .status.busy{color:#e9c276}
 main{display:grid;grid-template-columns:330px minmax(0,1fr);gap:0;min-height:calc(100vh - 53px)}
 aside{border-right:1px solid #262a31;padding:16px;overflow-y:auto;max-height:calc(100vh - 53px)}
 section.view{padding:16px 20px;overflow-y:auto;max-height:calc(100vh - 53px)}
@@ -83,7 +84,7 @@ canvas{width:100%;height:180px;display:block}
   <button class="primary" id="run">运行仿真</button>
   <button class="ghost" id="pin">保存为对照</button>
   <button class="ghost" id="export">导出本次 JSON</button>
-  <p class="note">植物按标定 LUT 定点插值；效率 90% 模拟粉饼/泵漂移。参数全部只影响仿真。</p>
+  <p class="note">杯流曲线用你 0.1.77 历史的 20 个稳态点拟合。相同参数重复运行结果一致（固定噪声种子），改一个参数再跑就能看出差别。</p>
 </aside>
 <section class="view">
   <div class="cards" id="cards"></div>

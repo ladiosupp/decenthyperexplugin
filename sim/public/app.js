@@ -2,6 +2,7 @@ const $ = (id) => document.getElementById(id);
 const STAGE_COLOR = { stage1: 'rgba(110,168,254,.10)', stage2: 'rgba(245,164,66,.10)', stage3: 'rgba(99,216,155,.10)' };
 const PHASE_LABEL = { stage1: 'S1', stage2: 'S2', stage3: 'S3', dumping: '泄压', soak: '浸泡', restart_wait: '等 GHC', finishing: '收尾', idle: 'IDLE', aborted: '中止' };
 let pinned = null;
+let runCount = 0;
 
 function num(id) { return Number($(id).value); }
 
@@ -28,8 +29,12 @@ function readParams() {
 
 async function run() {
   const btn = $('run');
+  const started = performance.now();
   btn.disabled = true;
+  btn.textContent = '仿真中…';
   $('status').textContent = '仿真中…';
+  $('status').classList.add('busy');
+  $('cards').style.opacity = '.45';
   try {
     const res = await fetch('/api/run', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -38,11 +43,15 @@ async function run() {
     const data = await res.json();
     if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status));
     render(data, readParams());
-    $('status').textContent = '完成 · ' + data.ended.seconds + 's';
+    runCount += 1;
+    $('status').textContent = '完成 · 第 ' + runCount + ' 次 · 仿真 ' + data.ended.seconds + 's / 计算 ' + Math.round(performance.now() - started) + 'ms';
   } catch (e) {
     $('status').textContent = '失败：' + e.message;
   } finally {
     btn.disabled = false;
+    btn.textContent = '运行仿真';
+    $('status').classList.remove('busy');
+    $('cards').style.opacity = '1';
   }
 }
 

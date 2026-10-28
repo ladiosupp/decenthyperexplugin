@@ -18,7 +18,7 @@ function setup(options={}) {
  compactPersistentShotRecord,persistHistoryFile,appendPersistentHistoryShot,startPersistentHistoryProbe,setPersistentHistoryUnavailable,
  startDiagnostics,finalizeCalibrationRun,clearAllTimers,abortSequence,calibrationStatusPayload,stage1StartupMetrics,stage3StabilityDiagnostics,diagnosticSummary,scalarConsensusSuggestion,stage1AdaptiveEvidence,stage2AdaptiveEvidence,stage3AdaptiveEvidence,
  testOverrideBinding,recordNextShotApplied,buildSkinSurfaceAnswer,refreshLearningStage,commandFlowSummary,baselineFeedForwardPayload,buildGhcOverlayHtml,stageActuatorEvidence,adaptiveAuditPayload,autoApplyNextShotIfEligible,testOverrideStatus,resetSequence,startSequence,stage3ShapeOnlyConsensus,applyNextShotAdaptiveSuggestion,extractMachine,profilesEquivalent,profileExecutionEquivalent,profileExecutionDifferences,
- workflowBrewTemperature,adoptWorkflowBrewTemperature,controlRunReview,controlLearningAssessment,initializeLiveTrim,startLiveTrim,liveTrimTick,stopLiveTrim,observeLiveTrimMachine,encodeLiveFlowFrame,liveTrimLearningView,liveTrimRegression,diagnosticCsv,
+ workflowBrewTemperature,adoptWorkflowBrewTemperature,controlRunReview,controlLearningAssessment,stageGainEstimate,initializeLiveTrim,startLiveTrim,liveTrimTick,stopLiveTrim,observeLiveTrimMachine,encodeLiveFlowFrame,liveTrimLearningView,liveTrimRegression,diagnosticCsv,
  beginSoak,beginDirectStartTest,restartPourConfirmed,startRestartPoll,manualRearmSecondStage,directStartTestPayload,advancedSettingsFromCfg,uiStatusPayload,
  enterHyperExScopedMultiplier,restoreHyperExScopedMultiplier,setApi(fn){api=fn;}};\n`;
  const token='  return {\n    id: ID,';assert(source.includes(token));
@@ -1082,6 +1082,20 @@ test('cup-target basis dispatches a boost above the base-pump 1.6 ceiling',async
  await trimTick(e);assert.equal(rawWrites(e).length,1);const w=e.s.liveTrim.report.trace.find(x=>x.kind==='write'&&x.startupAction==='boost');assert.equal(w.commandMlS,p.boostCommandMlS);
 });
 
+test('steady-gain estimate uses median cup/command from recent S2 evidence',()=>{
+ const e=setup();e.s.persistentHistoryFile={shots:[
+  {runId:'ga',evidence:{s2:{runId:'ga',targetGS:5,command:3.6,measured:4.0}}},
+  {runId:'gb',evidence:{s2:{runId:'gb',targetGS:5,command:3.7,measured:4.1}}},
+  {runId:'gc',evidence:{s2:{runId:'gc',targetGS:5,command:3.8,measured:4.2}}}
+ ]};
+ const g=e.h.stageGainEstimate('s2',null,null);assert(g);assert.equal(g.samples,3);assert(Math.abs(g.k-1.111)<.01);assert(g.spread<.02);assert.deepEqual(copy(g.sources),['ga','gb','gc']);
+});
+test('steady-gain estimate uses duration-weighted S3 frames and needs three shots',()=>{
+ const rows=[];for(let i=0;i<3;i++)rows.push({runId:'s'+i,evidence:{s3:{runId:'s'+i,targetGS:1.5,overallGS:1.6,source:[{command:.6,measured:1.6,seconds:10},{command:.72,measured:1.7,seconds:14},{command:.78,measured:1.8,seconds:12}]}}});
+ const e=setup();e.s.persistentHistoryFile={shots:rows};const g=e.h.stageGainEstimate('s3',null,null);assert(g);assert.equal(g.samples,3);assert(Math.abs(g.k-1.6/.7)<.15);assert(g.command>.65&&g.command<.75);
+ const e2=setup();e2.s.persistentHistoryFile={shots:rows.slice(0,2)};assert.equal(e2.h.stageGainEstimate('s3',null,null),null);
+});
+test('steady-gain UI exposes S2 and S3 feed-forward values',()=>{const e=setup(),html=e.h.buildGhcOverlayHtml();assert.match(html,/增益前馈/);assert.match(html,/targetCommandMlS/);});
 test('refill basis slider edits the draft and persists cup-target across apply',async()=>{
  const e=await editorReady(),draft=editedRefill(e,{basis:'cup-target'});await e.h.applyCurveEditorDraft(draft);
  assert.equal(e.h.currentS2RefillSettings().basis,'cup-target');assert.equal(JSON.parse(e.storage.s2RefillSettingsV1).basis,'cup-target');

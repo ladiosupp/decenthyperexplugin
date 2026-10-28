@@ -11,7 +11,7 @@
 - 诊断曲线箭头：方向 = 绝对方向（command 相对 previous 升则向上、降则向下），长度 = |command − previous|×48；与目标背离时如实显示；↻ 表示趋势未响应时的重新决策（不是重发同值）。
 - 状态/事件/文案语义：monitoring-unresponsive-trend、vector-unresponsive、feedbackPolicy trend-vector-response；i18n 同步新状态翻译。
 
-S2 补水算法、S3 投影、杯间学习与 1.77ds 一致；S1 走 LUT 直给，不做精细活调。无真机验证。另附本地离线仿真台 sim/（加载真实 plugin.js，自带植物模型和网页曲线），用法见 sim/README.md。
+S2 补水算法、S3 投影、杯间学习与 1.77ds 一致；历史数据全点记录与 STEP 4 CSV 导出保留（1.68 起：每杯持久历史保存全部 action/ACK/target/fault，常规 check 行压缩为原因计数，CSV 导出完整实时轨迹，旧记录不改写）；S1 走 LUT 直给，不做精细活调。无真机验证。另附本地离线仿真台 sim/（加载真实 plugin.js，自带植物模型和网页曲线），用法见 sim/README.md。
 
 验证见 tests/RESULTS_v0178ds.txt（527/527）。
 

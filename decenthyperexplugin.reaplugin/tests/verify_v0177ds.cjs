@@ -1046,6 +1046,46 @@ test('return deadline survives unknown frame and writes baseline once same S2 fr
 test('S2 refill uses160percent pump command and keeps cup cutoff in gpersecond',()=>{
  const e=normalEnv();e.s.cfg.liveFlowTrimTest=true;const p=e.h.stage2StartupPlan();assert.equal(p.refillTargetGS,undefined);assert.equal(p.cutoffFraction,.85);assert.equal(p.boostCommandMlS,4);assert.equal(p.refillTargetFraction,1.6);assert.equal(e.s.cfg.stage2Flow,5);assert.match(p.commandBasis,/base-pump-command/);
 });
+
+test('cup-target basis estimates the refill base from the last clean S2 tail',()=>{
+ const e=normalEnv();e.s.cfg.liveFlowTrimTest=true;e.s.s2RefillSettings={...refillDefaults,basis:'cup-target'};
+ const r=startupRun(e,'cup-tail',1,2,3.9);r.config.adaptiveFingerprint=copy(e.h.adaptiveHistoryFingerprint());e.s.diagnosticLast=r;
+ const p=e.h.stage2StartupPlan();
+ assert.equal(p.commandBasis,'target-cup-flow observed-tail local model');
+ assert(Math.abs(p.refillPumpBaseMlS-2.507*5/3.9)<.02);
+ assert(p.refillPumpBaseMlS>p.baseCommandMlS);
+ assert.equal(p.refillTargetGS,5);
+ assert.deepEqual(copy(p.sourceRunIds),[r.runId]);
+ assert(p.referenceTailGS>3.8&&p.referenceTailGS<4);
+ assert.equal(p.boostCommandMlS,5.125);
+ assert(p.boostCommandMlS>p.baseCommandMlS*1.6);
+});
+
+test('cup-target basis without a clean observed tail falls back to the profile base command',()=>{
+ const e=normalEnv();e.s.cfg.liveFlowTrimTest=true;e.s.s2RefillSettings={...refillDefaults,basis:'cup-target'};
+ const p=e.h.stage2StartupPlan();
+ assert.equal(p.commandBasis,'target-cup-flow base fallback (no observed tail)');
+ assert.equal(p.refillPumpBaseMlS,p.baseCommandMlS);
+ assert.equal(p.boostCommandMlS,4);
+ assert.equal(p.refillTargetGS,5);
+ assert.deepEqual(copy(p.sourceRunIds),[]);
+});
+
+test('cup-target basis dispatches a boost above the base-pump 1.6 ceiling',async()=>{
+ const e=await refillFixture();
+ e.s.s2RefillSettings={...refillDefaults,basis:'cup-target'};
+ const r=startupRun(e,'cup-tail',1,2,3.9);r.config.adaptiveFingerprint=copy(e.h.adaptiveHistoryFingerprint());e.s.diagnosticLast=r;
+ const p=e.h.stage2StartupPlan(),t=e.s.liveTrim;
+ assert(p.boostCommandMlS>p.baseCommandMlS*1.6+1e-6);assert(p.boostCommandMlS<=8);
+ t.startup={status:'armed',plan:p};t.run.config.s2StartupPlan=copy(p);pulseTarget(e,p.baseCommandMlS);
+ await trimTick(e);assert.equal(rawWrites(e).length,1);const w=e.s.liveTrim.report.trace.find(x=>x.kind==='write'&&x.startupAction==='boost');assert.equal(w.commandMlS,p.boostCommandMlS);
+});
+
+test('refill basis slider edits the draft and persists cup-target across apply',async()=>{
+ const e=await editorReady(),draft=editedRefill(e,{basis:'cup-target'});await e.h.applyCurveEditorDraft(draft);
+ assert.equal(e.h.currentS2RefillSettings().basis,'cup-target');assert.equal(JSON.parse(e.storage.s2RefillSettingsV1).basis,'cup-target');
+ const html=e.h.buildGhcOverlayHtml();assert.match(html,/data-refill-basis/);assert.match(html,/curveRefillBasisChange/);
+});
 test('S2 refill multiplier is independent of upper LUT interpolation',()=>{
  const e=normalEnv();e.s.cfg.liveFlowTrimTest=true;e.s.calibrationMap.points.push({actualFlow:6,commandFlow:3.5});e.h.recomputeCalibrationUsability();const p=e.h.stage2StartupPlan();assert.equal(p.boostCommandMlS,4);assert.match(p.commandBasis,/base-pump-command/);
 });
@@ -1196,7 +1236,7 @@ test('legacy cup-percent settings migrate only multiplier retaining cutoff and t
  const e=normalEnv(),old={startDelayMs:350,targetPercent:125,cutoffPercent:80,maxDurationMs:2500,approachMs:5000};e.event('s2RefillSettingsV1',JSON.stringify(old));const r=e.h.currentS2RefillSettings();assert.equal(r.basis,'pump-command');assert.equal(r.targetPercent,160);for(const k of ['startDelayMs','cutoffPercent','maxDurationMs','approachMs'])assert.equal(r[k],old[k]);assert.match(e.s.s2RefillLoadWarning,/migrated/);
 });
 test('new pump-percent settings retain user choice across reload rather than remigrate',()=>{
- const e=normalEnv();e.event('s2RefillSettingsV1',JSON.stringify({...refillDefaults,targetPercent:135}));assert.equal(e.h.currentS2RefillSettings().targetPercent,135);assert.equal(e.s.s2RefillLoadWarning,null);assert.throws(()=>e.h.validatedS2RefillSettings({...refillDefaults,basis:'cup-target'}),/basis invalid/);
+ const e=normalEnv();e.event('s2RefillSettingsV1',JSON.stringify({...refillDefaults,targetPercent:135}));assert.equal(e.h.currentS2RefillSettings().targetPercent,135);assert.equal(e.s.s2RefillLoadWarning,null);assert.equal(e.h.validatedS2RefillSettings({...refillDefaults,basis:'cup-target'}).basis,'cup-target');assert.throws(()=>e.h.validatedS2RefillSettings({...refillDefaults,basis:'legacy-cup-target'}),/basis invalid/);
 });
 test('old editor refill with no basis cannot silently apply old cup-percent semantics',async()=>{
  const e=await editorReady(),d=editedRefill(e,{targetPercent:130});delete d.refill.basis;await assert.rejects(e.h.applyCurveEditorDraft(d),/basis changed/);assert.equal(e.h.currentS2RefillSettings().targetPercent,160);
@@ -1214,7 +1254,7 @@ test('only refill amplitude uses pump ratio and original phase cup targets and t
  const e=normalEnv(),before=copy(e.h.profileObject());e.s.cfg.liveFlowTrimTest=true;e.s.s2RefillSettings={...refillDefaults,targetPercent:160};const after=copy(e.h.profileObject());assert.deepEqual(after,before);assert.deepEqual([e.s.cfg.stage1Flow,e.s.cfg.stage2Flow,e.s.cfg.stage3Flow],[2,5,1.5]);const p=e.h.stage2StartupPlan();assert.equal(p.cutoffFraction,.85);assert.equal(p.holdMs,4000);
 });
 test('refill frontend uses pump multiplier preview and labels gpersecond only for cup cutoff',()=>{
- const e=normalEnv(),html=e.h.buildGhcOverlayHtml();assert.match(html,/request=baseCommand\*r.targetPercent\/100/);assert.match(html,/基础泵流量倍率/);assert.doesNotMatch(html,/baseCommand\+2|goal\*r.targetPercent\/100/);assert.equal(e.h.translateUiText('基础泵流量倍率','en'),'Base pump flow multiplier');assert.equal(e.h.curveEditorSnapshot().refillLimits.targetPercent[1],160);
+ const e=normalEnv(),html=e.h.buildGhcOverlayHtml();assert.match(html,/request=refillBase\*r.targetPercent\/100/);assert.match(html,/基础泵流量倍率/);assert.doesNotMatch(html,/baseCommand\+2|goal\*r.targetPercent\/100/);assert.equal(e.h.translateUiText('基础泵流量倍率','en'),'Base pump flow multiplier');assert.equal(e.h.curveEditorSnapshot().refillLimits.targetPercent[1],160);
 });
 
 test('driver dispatch accepts greater-than-plus2 pump boost and returns original base',async()=>{

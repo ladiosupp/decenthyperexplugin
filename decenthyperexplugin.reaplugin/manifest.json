@@ -291,7 +291,7 @@
     "S2StartupAssist": {
       "type": "boolean",
       "label": "S2 起步响应补偿 · Startup assist",
-      "description": "主动泄压后提前补水；启动延时、目标比例、称流速收回阈值、最长补水与渐进时间可在诊断页的下一杯可视化曲线编辑区用滑块设置并保存。默认0ms、120%、85%、4s、3s，沿用1.70名义参数。机器指令仍受min(8ml/s,基础值1.6倍,基础值+2ml/s)、原限压90%、数据新鲜度、驱动ACK和预算保护；g/s经LUT/局部模型换算，不直接当ml/s。连续模式仍用旧短脉冲策略。 Configure refill in Next-shot curve editor; defaults0ms/120%/85%/4s/3s. Hardware-response accuracy is not guaranteed by editable software limits.",
+      "description": "主动泄压后提前补水；启动延时、目标比例（基准可选：基础泵倍率 / 目标折算）、称流速收回阈值、最长补水与渐进时间可在诊断页的下一杯可视化曲线编辑区用滑块设置并保存。默认0ms、160%、85%、4s、3s。目标折算是把S2目标杯流按上一杯实测尾段折算成泵指令，无合格实测时退回曲线基础指令。机器指令仍受min(8ml/s,基准×1.6)、原限压90%、数据新鲜度、驱动ACK和预算保护；g/s经LUT/局部模型换算，不直接当ml/s。连续模式仍用旧短脉冲策略。 Configure refill in Next-shot curve editor; defaults0ms/160%/85%/4s/3s. Basis: base pump multiplier or target cup-flow (observed-tail model, profile-base fallback). Hardware-response accuracy is not guaranteed by editable software limits.",
       "default": true
     }
   },

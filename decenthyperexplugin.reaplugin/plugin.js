@@ -2770,8 +2770,25 @@ function createPlugin(host) {
       if(!(Number.isFinite(ff)&&ff>0))return;
       const [frac,abs]=limits;
       const bounded=Math.max(cmd*(1-frac),cmd-abs,Math.min(cmd*(1+frac),cmd+abs,ff));
-      const node=stageKey==="s2"?s2:s3;
-      node.gainFeedForward={stage:stageKey,samples:gain.samples,k:round(gain.k,3),spread:round(gain.spread,3),targetGS:round(target,3),currentCommandMlS:round(cmd,3),targetCommandMlS:round(ff,3),boundedCommandMlS:round(bounded,3),sources:gain.sources};
+      const node=stageKey==="s2"?s2:s3,ok=gain.samples>=3&&gain.spread<=.10;
+      const info={stage:stageKey,samples:gain.samples,k:round(gain.k,3),spread:round(gain.spread,3),targetGS:round(target,3),currentCommandMlS:round(cmd,3),targetCommandMlS:round(ff,3),boundedCommandMlS:round(bounded,3),sources:gain.sources,applied:false};
+      node.gainFeedForward=info;
+      if(!ok)return;
+      if(stageKey==="s2"){
+        if(node.usable!==false&&Math.abs(bounded-cmd)>=.005){
+          node.suggestedCommandMlS=round(bounded,3);node.action=node.action==="HOLD"?"ADJUST":node.action;
+          node.gainFeedForward.applied=true;node.reason+=`; steady-gain feed-forward: k=${round(gain.k,3)}, bounded command ${round(bounded,3)} ml/s`;
+        }
+        return;
+      }
+      if(stageKey==="s3"&&node.suggestedShape&&s3ev&&Array.isArray(s3ev.source)){
+        const old=s3ev.source.map(x=>Number(x.command)),ratio=bounded/cmd;
+        const projected=projectS3Commands(old.map(v=>v*ratio),old,policy,s3ev.source.map(x=>x.seconds));
+        if(projected.some((v,i)=>Math.abs(v-old[i])>=.005)){
+          node.suggestedShape={...node.suggestedShape,earlyCommand:round(projected[0],3),midCommand:round(projected[1],3),lateCommand:round(projected[2],3)};
+          node.action="LEVEL + SHAPE";node.gainFeedForward.applied=true;node.reason+=`; steady-gain feed-forward: k=${round(gain.k,3)}, bounded command ${round(bounded,3)} ml/s`;
+        }
+      }
     };
     addGain(s2ev,gainS2,"s2",policy.s2);addGain(s3ev,gainS3,"s3",policy.s3);
     s1.evidenceBasis=s1ev&&s1ev.measurementBasis||"startup 20–80%";

@@ -1096,6 +1096,21 @@ test('steady-gain estimate uses duration-weighted S3 frames and needs three shot
  const e2=setup();e2.s.persistentHistoryFile={shots:rows.slice(0,2)};assert.equal(e2.h.stageGainEstimate('s3',null,null),null);
 });
 test('steady-gain UI exposes S2 and S3 feed-forward values',()=>{const e=setup(),html=e.h.buildGhcOverlayHtml();assert.match(html,/增益前馈/);assert.match(html,/targetCommandMlS/);});
+test('steady-gain feed-forward rewrites the S2 suggestion only with three agreeing shots',()=>{
+ const e=setup(),run=controlledRun(e,'ff-apply');run.config.adaptiveLearningLevel='正常';
+ const row=(id)=>({runId:id,evidence:{s2:{runId:id,targetGS:5,command:2.5,measured:3.5}}});
+ e.s.persistentHistoryFile={shots:[row('g1'),row('g2'),row('g3')]};
+ const q=e.h.nextShotAdaptiveSuggestion(run);
+ assert(q.s2.gainFeedForward);assert.equal(q.s2.gainFeedForward.applied,true);assert(q.s2.suggestedCommandMlS>run.config.stage2CommandMlS);
+ assert.match(q.s2.reason,/steady-gain feed-forward/);
+});
+test('steady-gain feed-forward stays inactive when recent ratios disagree',()=>{
+ const e=setup(),run=controlledRun(e,'ff-noisy');
+ const row=(id,m)=>({runId:id,evidence:{s2:{runId:id,targetGS:5,command:2.5,measured:m}}});
+ e.s.persistentHistoryFile={shots:[row('n1',2.5),row('n2',4.5),row('n3',3.0)]};
+ const q=e.h.nextShotAdaptiveSuggestion(run);
+ assert(q.s2.gainFeedForward);assert.equal(q.s2.gainFeedForward.applied,false);
+});
 test('refill basis slider edits the draft and persists cup-target across apply',async()=>{
  const e=await editorReady(),draft=editedRefill(e,{basis:'cup-target'});await e.h.applyCurveEditorDraft(draft);
  assert.equal(e.h.currentS2RefillSettings().basis,'cup-target');assert.equal(JSON.parse(e.storage.s2RefillSettingsV1).basis,'cup-target');

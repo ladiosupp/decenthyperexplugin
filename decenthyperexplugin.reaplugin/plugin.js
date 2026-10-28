@@ -2629,7 +2629,7 @@ function createPlugin(host) {
     const saved=(state.persistentHistoryFile&&state.persistentHistoryFile.shots||[]).slice(-8);
     for(const s of saved)stage==="s3"?addS3(s.evidence&&s.evidence.s3):addSingle(s.evidence&&s.evidence[stage]);
     stage==="s3"?addS3(current):addSingle(current);
-    if(rows.length<3)return null;
+    if(rows.length<2)return null;
     const ks=rows.map(x=>x.k).sort((a,b)=>a-b),k=median(ks);
     if(!(k>0))return null;
     const spread=Math.sqrt(rows.reduce((a,x)=>a+(x.k-k)**2,0)/rows.length)/k;
@@ -2770,7 +2770,9 @@ function createPlugin(host) {
       if(!(Number.isFinite(ff)&&ff>0))return;
       const [frac,abs]=limits;
       const bounded=Math.max(cmd*(1-frac),cmd-abs,Math.min(cmd*(1+frac),cmd+abs,ff));
-      const node=stageKey==="s2"?s2:s3,ok=gain.samples>=3&&gain.spread<=.10;
+      // Two agreeing shots are enough once their spread is <=5% (a <=10%
+      // relative difference); three or more shots may use the wider 10% band.
+      const node=stageKey==="s2"?s2:s3,ok=gain.samples>=3?gain.spread<=.10:gain.samples===2&&gain.spread<=.05;
       const info={stage:stageKey,samples:gain.samples,k:round(gain.k,3),spread:round(gain.spread,3),targetGS:round(target,3),currentCommandMlS:round(cmd,3),targetCommandMlS:round(ff,3),boundedCommandMlS:round(bounded,3),sources:gain.sources,applied:false};
       node.gainFeedForward=info;
       if(!ok)return;

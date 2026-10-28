@@ -1090,10 +1090,10 @@ test('steady-gain estimate uses median cup/command from recent S2 evidence',()=>
  ]};
  const g=e.h.stageGainEstimate('s2',null,null);assert(g);assert.equal(g.samples,3);assert(Math.abs(g.k-1.111)<.01);assert(g.spread<.02);assert.deepEqual(copy(g.sources),['ga','gb','gc']);
 });
-test('steady-gain estimate uses duration-weighted S3 frames and needs three shots',()=>{
+test('steady-gain estimate uses duration-weighted S3 frames and acts from two shots',()=>{
  const rows=[];for(let i=0;i<3;i++)rows.push({runId:'s'+i,evidence:{s3:{runId:'s'+i,targetGS:1.5,overallGS:1.6,source:[{command:.6,measured:1.6,seconds:10},{command:.72,measured:1.7,seconds:14},{command:.78,measured:1.8,seconds:12}]}}});
  const e=setup();e.s.persistentHistoryFile={shots:rows};const g=e.h.stageGainEstimate('s3',null,null);assert(g);assert.equal(g.samples,3);assert(Math.abs(g.k-1.6/.7)<.15);assert(g.command>.65&&g.command<.75);
- const e2=setup();e2.s.persistentHistoryFile={shots:rows.slice(0,2)};assert.equal(e2.h.stageGainEstimate('s3',null,null),null);
+ const e2=setup();e2.s.persistentHistoryFile={shots:rows.slice(0,2)};const g2=e2.h.stageGainEstimate('s3',null,null);assert(g2);assert.equal(g2.samples,2);
 });
 test('steady-gain UI exposes S2 and S3 feed-forward values',()=>{const e=setup(),html=e.h.buildGhcOverlayHtml();assert.match(html,/增益前馈/);assert.match(html,/targetCommandMlS/);});
 test('steady-gain feed-forward rewrites the S2 suggestion only with three agreeing shots',()=>{
@@ -1110,6 +1110,18 @@ test('steady-gain feed-forward stays inactive when recent ratios disagree',()=>{
  e.s.persistentHistoryFile={shots:[row('n1',2.5),row('n2',4.5),row('n3',3.0)]};
  const q=e.h.nextShotAdaptiveSuggestion(run);
  assert(q.s2.gainFeedForward);assert.equal(q.s2.gainFeedForward.applied,false);
+});
+test('steady-gain feed-forward can act on two agreeing shots',()=>{
+ const e=setup(),run=controlledRun(e,'ff-two');run.config.adaptiveLearningLevel='正常';
+ e.s.persistentHistoryFile={shots:[{runId:'t1',evidence:{s2:{runId:'t1',targetGS:5,command:2.5,measured:3.5}}}]};
+ const q=e.h.nextShotAdaptiveSuggestion(run);
+ assert.equal(q.s2.gainFeedForward.samples,2);assert.equal(q.s2.gainFeedForward.applied,true);
+});
+test('two disagreeing shots keep feed-forward off',()=>{
+ const e=setup(),run=controlledRun(e,'ff-two-bad');run.config.adaptiveLearningLevel='正常';
+ e.s.persistentHistoryFile={shots:[{runId:'t1',evidence:{s2:{runId:'t1',targetGS:5,command:2.5,measured:3.0}}}]};
+ const q=e.h.nextShotAdaptiveSuggestion(run);
+ assert.equal(q.s2.gainFeedForward.samples,2);assert.equal(q.s2.gainFeedForward.applied,false);
 });
 test('refill basis slider edits the draft and persists cup-target across apply',async()=>{
  const e=await editorReady(),draft=editedRefill(e,{basis:'cup-target'});await e.h.applyCurveEditorDraft(draft);

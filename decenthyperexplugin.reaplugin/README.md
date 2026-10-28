@@ -1,3 +1,16 @@
+# HyperEx Pulse Filter 1.79ds
+
+本地开发版（版本号 1.79ds，非严格 semver）。1.79ds 修复真机发现的 restart skipStep 双发竞态，并把补水基准做成明确开关：
+
+- 修复主动泄压后自动 skipStep 双发：scheduleRestartSkip 的防重变量 restartSkipTimer 原先在 setTimeout 回调第一行就置空，而 guardedSingleSkip 的机器快照 preflight 是异步的；这段 await 期间状态更新每帧都会再次触发 restartPourConfirmed，排上第二条 skipStep，帧号 0→1→2 跳过 S2 的 frame 1，导致补水等不到帧确认、S2 活调全部 frame-not-confirmed、全杯无写入。现在 restartSkipTimer 保持到整个 skip 流程结束的 finally 才置空，原防重在整个异步流程内有效；自动 skipStep 进 S2 的机制不变。
+- 补水基准改为明确双选开关：基础泵倍率（按当前 S2 指令）或目标折算（按设置值 S2 目标动态估算）。UI 同时显示两种基准各自的增强结果，保存时写入 basis；恢复补水默认值同样带基准。
+- 1.78ds 的活调趋势/矢量语义（趋势确认、PD 矢量幅度、同向加码、角度统计、绝对方向箭头）保留。
+- 历史数据全点记录与 STEP 4 CSV 导出保留（1.68 起：每杯持久历史保存全部 action/ACK/target/fault，常规 check 行压缩为原因计数，CSV 导出完整实时轨迹，旧记录不改写）。
+- 验证见 tests/RESULTS_v0179ds.txt（528/528，含 restart 双触发只发一条 skipStep 的回归测试）。
+- 无 1.79ds 真机验证；skip 修复与补水 UI 待真机复核。
+
+## Previous release
+
 # HyperEx Pulse Filter 1.78ds
 
 本地开发版（版本号 1.78ds，非严格 semver）。1.78ds 将活调整体重写为趋势 / 矢量语义（用户 2026-10-28/29 定案）：

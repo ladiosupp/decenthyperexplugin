@@ -814,8 +814,8 @@ test('beneficial S2 pulse is retained bounded; ineffective pulse returns to base
 test('S2 pulse uses fast same frame one quantum and no skip, profile or LUT changes',async()=>{const e=await pulseFixture(),lut=JSON.stringify(e.s.calibrationMap);await trimTick(e);assert.equal(rawWrites(e).length,1);const w=e.s.liveTrim.report.trace.find(x=>x.kind==='write');assert.equal(w.startupAction,'boost');assert.equal(w.commandMlS,2.5625);assert.equal(e.s.liveTrim.report.maxWrites,200);assert.equal(e.s.liveTrim.startup.status,'boosting');assert.equal(JSON.stringify(e.s.calibrationMap),lut);assert.equal(e.writes().length,0);assert.equal(e.h.profileObject().steps.length,3);});
 test('S2 pulse returns on independent deadline with ACK but no target echo or usable regression',async()=>{const e=await pulseFixture();await trimTick(e);trimAck(e);e.s.liveTrim.run.rawScaleSamples=[];e.advance(500);e.s.lastMachineAtMs=e.now();await e.run(e.s.liveTrim.startupReturnTimer);assert.equal(rawWrites(e).length,2);const w=e.s.liveTrim.report.trace.filter(x=>x.kind==='write')[1];assert.equal(w.commandMlS,2.5);assert.equal(w.startupAction,'return');assert.equal(e.s.liveTrim.pending.targetSeen,false);});
 test('S2 base return confirmation resumes regular trim only after response settle',async()=>{const e=await pulseFixture();await trimTick(e);trimAck(e);pulseTarget(e,2.5625);e.advance(500);e.s.lastMachineAtMs=e.now();await e.run(e.s.liveTrim.startupReturnTimer);trimAck(e);pulseTarget(e,2.5);e.advance(60);await trimTick(e);assert.equal(e.s.liveTrim.startup.status,'complete');assert.equal(rawWrites(e).length,2);assert.equal(e.s.liveTrim.startupWatchdog,null);e.advance(1700);trimSamples(e,4);await trimTick(e);assert.equal(rawWrites(e).length,3);});
-test('S2 missing base target with driver ACK degrades without abort or accumulating upward writes',async()=>{const e=await pulseFixture();await trimTick(e);trimAck(e);e.advance(500);e.s.lastMachineAtMs=e.now();await e.run(e.s.liveTrim.startupReturnTimer);trimAck(e);e.advance(2000);e.run(e.s.liveTrim.startupWatchdog);assert.equal(e.s.phase,'stage2');assert.equal(e.s.liveTrim.startup.status,'return-unconfirmed');e.advance(1000);trimSamples(e,3);await trimTick(e);assert.equal(rawWrites(e).length,3);assert.equal(e.s.liveTrim.pending.command,2.5);assert.equal(e.s.liveTrim.report.retries,1);});
-test('S2 unconfirmed base echo can recover after a delayed return',async()=>{const e=await pulseFixture();await trimTick(e);trimAck(e);e.advance(500);e.s.lastMachineAtMs=e.now();await e.run(e.s.liveTrim.startupReturnTimer);trimAck(e);e.advance(2000);e.run(e.s.liveTrim.startupWatchdog);pulseTarget(e,2.5);e.advance(60);await trimTick(e);assert.equal(e.s.liveTrim.startup.status,'complete');assert.equal(e.s.phase,'stage2');});
+test('S2 return driver ACK completes the refill immediately without waiting for base echo',async()=>{const e=await pulseFixture();await trimTick(e);trimAck(e);e.advance(500);e.s.lastMachineAtMs=e.now();await e.run(e.s.liveTrim.startupReturnTimer);trimAck(e);assert.equal(e.s.liveTrim.startup.status,'complete');assert.equal(e.s.liveTrim.report.startupExecution.confirmation,'driver-ack');assert.equal(e.s.phase,'stage2');});
+test('S2 return ACK clears the watchdog so no degraded retry follows',async()=>{const e=await pulseFixture();await trimTick(e);trimAck(e);e.advance(500);e.s.lastMachineAtMs=e.now();await e.run(e.s.liveTrim.startupReturnTimer);trimAck(e);assert.equal(e.s.liveTrim.startupWatchdog,null);assert.equal(e.s.liveTrim.startup.status,'complete');pulseTarget(e,2.5);e.advance(60);await trimTick(e);assert.equal(e.s.liveTrim.startup.status,'complete');});
 test('S2 missing driver ACK keeps existing safety stop rather than leaving boost active',async()=>{const e=await pulseFixture();await trimTick(e);e.advance(2500);e.run(e.s.liveTrim.startupWatchdog);assert.equal(e.s.phase,'aborted');assert(e.calls.some(x=>x.path==='/machine/state/idle'));});
 test('S2 transition cancels pulse timers and cannot return into the old frame',async()=>{const e=await pulseFixture();await trimTick(e);trimAck(e);const timer=e.s.liveTrim.startupReturnTimer;e.s.phase='stage3';e.s.lastFrame=2;e.h.observeLiveTrimMachine({profileFrame:2});assert(!e.timers.has(timer));assert.equal(await e.h.dispatchS2Startup(e.s.liveTrim,'return'),false);assert.equal(rawWrites(e).length,1);});
 test('S2 startup never launches with pressure cap, stale telemetry, unresolved write or late frame',async()=>{for(const kind of ['pressure','stale','pending','late','target','budget','truth']){const e=await pulseFixture();if(kind==='pressure')e.s.lastPressure=5.5;if(kind==='stale')e.advance(1300);if(kind==='pending')e.s.liveTrim.pending={};if(kind==='late')e.s.liveTrim.frameAt=e.now()-2200;if(kind==='target')e.s.liveTrim.observedTarget=2.0;if(kind==='budget')e.s.liveTrim.report.maxWrites=1;if(kind==='truth')e.s.runtimeProfileVerified=false;assert.equal(await e.h.dispatchS2Startup(e.s.liveTrim,'boost'),false,kind);assert.equal(rawWrites(e).length,0);}});
@@ -825,7 +825,7 @@ test('S2 startup diagnostics distinguish delay rise tail plan and actual issued 
 
 test('S2 startup tolerates initial reset marker but rejects later reset',()=>{const e=setup(),r=startupRun(e);r.rawScaleSamples[0].tareReset=true;assert(e.h.stage2StartupMetrics(r).eligible);r.rawScaleSamples[50].tareReset=true;assert.equal(e.h.stage2StartupMetrics(r).eligible,false);});
 test('S2 pulse returns early when pressure headroom disappears',async()=>{const e=await pulseFixture();await trimTick(e);trimAck(e);e.advance(250);e.s.lastPressure=5.9;e.s.lastMachineAtMs=e.now();await trimTick(e);assert.equal(rawWrites(e).length,2);assert.equal(e.s.liveTrim.pending.command,2.5);assert.equal(e.s.phase,'stage2');});
-test('S2 missing base feedback respects both check and write limits',async()=>{const e=await pulseFixture();await trimTick(e);trimAck(e);e.advance(500);e.s.lastMachineAtMs=e.now();await e.run(e.s.liveTrim.startupReturnTimer);trimAck(e);e.advance(2000);e.run(e.s.liveTrim.startupWatchdog);e.s.liveTrim.report.checks=2000;await trimTick(e);assert.equal(e.s.liveTrim.report.checks,2000);assert.equal(rawWrites(e).length,2);assert.equal(e.s.liveTrim.active,false);assert.equal(e.s.phase,'stage2');});
+test('S2 return ACK completes with exactly two writes and leaves the shot armed',async()=>{const e=await pulseFixture();await trimTick(e);trimAck(e);e.advance(500);e.s.lastMachineAtMs=e.now();await e.run(e.s.liveTrim.startupReturnTimer);trimAck(e);assert.equal(e.s.liveTrim.report.writes,2);assert.equal(e.s.liveTrim.startup.status,'complete');assert.equal(e.s.phase,'stage2');});
 function continuousSetup(live=false){const e=setup();e.s.cfg.activeRelease=false;e.s.cfg.liveFlowTrimTest=live;e.s.cfg.liveFlowTrimLevel=3;e.s.runtimeProfileVerified=true;e.mock.workflow=copy(e.h.profileObject());e.s.workflowProfile=copy(e.mock.workflow);return e;}
 async function continuousPour(live=false){const e=continuousSetup(live);e.h.startSequence(0);for(let i=0;i<12;i++)await Promise.resolve();e.s.lastFrame=0;return e;}
 async function settlePromises(){for(let i=0;i<25;i++)await Promise.resolve();}
@@ -981,10 +981,11 @@ test('refill missing boost driver ACK stops within2seconds',async()=>{
 test('refill return driver ACK has its own2second deadline after early cutoff',async()=>{
  const e=await refillFixture();await trimTick(e);trimAck(e);e.advance(1300);refillSamples(e,4.3);await trimTick(e);e.advance(2000);await e.run(e.s.liveTrim.startupAckTimer);assert.equal(e.s.phase,'aborted');
 });
-test('refill base echo absent after ACK degrades and never stacks another boost',async()=>{
+test('refill return ACK completes the refill and never stacks another boost',async()=>{
  const e=await refillFixture();await trimTick(e);trimAck(e);e.advance(1500);refillSamples(e,4.3);await trimTick(e);trimAck(e);
- e.advance(5000);e.s.lastMachineAtMs=e.now();e.s.latestScaleAtMs=e.now();e.run(e.s.liveTrim.startupWatchdog);
- assert.equal(e.s.phase,'stage2');assert.equal(e.s.liveTrim.startup.status,'return-unconfirmed');await trimTick(e);assert(rawWrites(e).every(x=>{const b=JSON.parse(x.payload.data).payload;return b.slice(4,6)==='40'||b.slice(4,6)==='28';}));
+ assert.equal(e.s.liveTrim.startup.status,'complete');
+ e.advance(5000);e.s.lastMachineAtMs=e.now();e.s.latestScaleAtMs=e.now();await trimTick(e);
+ assert.equal(rawWrites(e).length,2);
 });
 test('refill S3 transition clears all deadlines and cannot write the former frame',async()=>{
  const e=await refillFixture();await trimTick(e);trimAck(e);const t=e.s.liveTrim,ids=[t.startupReturnTimer,t.startupWatchdog,t.startupAckTimer];
@@ -998,19 +999,19 @@ test('refill cannot launch without pressure freshness truth or reserved return b
 });
 test('after85percent cutoff cup target stays100percent while handover pacing ramps',async()=>{
  const e=await refillFixture();await returnedRefill(e);e.advance(1700);trimSamples(e,4.4);await trimTick(e);
- let row=e.s.liveTrim.report.trace.filter(x=>x.kind==='check').slice(-1)[0];assert.equal(row.approachFraction,1);assert(row.handoverProgress>0&&row.handoverProgress<1);assert.equal(row.targetGS,5);assert.equal(row.finalTargetGS,5);
+ let row=e.s.liveTrim.report.trace.filter(x=>x.kind==='check').slice(-1)[0];assert.equal(row.approachFraction,1);assert.equal(row.handoverProgress,1);assert.equal(row.targetGS,5);assert.equal(row.finalTargetGS,5);
  if(e.s.liveTrim.pending){trimAck(e);pulseTarget(e,e.s.liveTrim.pending.command);e.advance(60);await trimTick(e);}
  e.advance(4000);trimSamples(e,4.4);await trimTick(e);row=e.s.liveTrim.report.trace.filter(x=>x.kind==='check').slice(-1)[0];assert.equal(row.approachFraction,1);
 });
-test('upward approach writes observe750ms spacing while checks keep running',async()=>{
- const e=await refillFixture();await returnedRefill(e);e.advance(1800);trimSamples(e,3.9);await trimTick(e);assert(e.s.liveTrim.pending);const command=e.s.liveTrim.pending.command;trimAck(e);pulseTarget(e,command);e.advance(60);await trimTick(e);
- const n=rawWrites(e).length,checks=e.s.liveTrim.report.checks;e.advance(250);trimSamples(e,3.9);await trimTick(e);assert.equal(rawWrites(e).length,n);assert(e.s.liveTrim.report.checks>checks);assert.match(e.s.liveTrim.report.trace.slice(-1)[0].reason,/spacing/);
+test('200ms approach hands control back before the next trim write',async()=>{
+ const e=await refillFixture();await returnedRefill(e);trimAck(e);e.advance(400);trimSamples(e,3.9);await trimTick(e);
+ const row=e.s.liveTrim.report.trace.filter(x=>x.kind==='check').slice(-1)[0];assert.equal(row.approachFraction,1);
 });
 test('S2 refill transient does not enter steady-level machine coverage or normalization',()=>{
  const e=normalEnv(),r=startupRun(e,'refill-learning',.5,2,4);r.config.experimentalLiveTrim=true;r.config.adaptiveLearningLevel='正常';r.config.s2StartupPlan={strategy:'refill-85'};
  r.liveFlowTrim={trace:[{kind:'write',frame:1,tMs:0,commandMlS:3.5,startupAction:'boost'},{kind:'write',frame:1,tMs:2500,commandMlS:2.5,startupAction:'return'},{kind:'startup-complete',frame:1,tMs:2700,strategy:'refill-85'}]};
  r.samples.forEach(x=>{x.targetFlowMlS=x.tMs<2500?3.5:2.5;x.machineFlowMlS=x.targetFlowMlS;});
- const q=e.h.controlLearningAssessment(r,'stage2');assert.equal(q.refillExcludedUntilMs,4300);assert(q.eligible,q.reason);assert(q.frames.every(x=>x.windows.every(w=>w.startMs>=4300)));
+ const q=e.h.controlLearningAssessment(r,'stage2');assert.equal(q.refillExcludedUntilMs,2900);assert(q.eligible,q.reason);assert(q.frames.every(x=>x.windows.every(w=>w.startMs>=4300)));
  r.liveFlowTrim.trace=r.liveFlowTrim.trace.filter(x=>x.kind!=='startup-complete');const bad=e.h.controlLearningAssessment(r,'stage2');assert.equal(bad.eligible,false);assert.match(bad.reason,/return unconfirmed/);
 });
 test('GHC pouring schedules a zero-delay single guarded transition and preopens raw transport',async()=>{
@@ -1157,12 +1158,23 @@ test('S3 history UI exposes saved shot snapshots and verified applications separ
  const e=normalEnv(),html=e.h.buildGhcOverlayHtml();assert.match(html,/S3 command timeline/);assert.match(html,/Verified next-shot application/);assert.match(html,/earliestRetainedFlat/);
 });
 test('0.819 and0.813 are the same native1over16 driver flow quantum',()=>{const e=normalEnv(),step=e.h.profileObject().steps[2];assert.equal(e.h.encodeLiveFlowFrame(step,2,.819),e.h.encodeLiveFlowFrame(step,2,.813));assert.equal(e.h.encodeLiveFlowFrame(step,2,.819),e.h.encodeLiveFlowFrame(step,2,.8125));});
-const refillDefaults={basis:"pump-command",startDelayMs:0,targetPercent:160,cutoffPercent:85,maxDurationMs:4000,approachMs:3000};
+const refillDefaults={basis:"pump-command",startDelayMs:0,targetPercent:160,cutoffPercent:85,maxDurationMs:4000,approachMs:200};
 async function editorReady(){const e=normalEnv();await e.h.syncHyperExProfile(true);return e;}
 function editedRefill(e,patch){const d=copy(e.h.curveEditorSnapshot());d.refill={...d.refill,...patch};return d;}
 async function configurableRefill(patch){const e=await refillFixture();e.s.s2RefillSettings={...refillDefaults,...patch};const t=e.s.liveTrim,plan=e.h.stage2StartupPlan();t.startup={status:'armed',plan};t.run.config.s2StartupPlan=copy(plan);pulseTarget(e,plan.baseCommandMlS);return e;}
-test('S2 editable defaults use160percent pump with unchanged timing and cutoff',()=>{const e=normalEnv();assert.deepEqual(copy(e.h.currentS2RefillSettings()),refillDefaults);e.s.cfg.liveFlowTrimTest=true;const p=e.h.stage2StartupPlan();assert.deepEqual(copy(p.settings),refillDefaults);assert.equal(p.startDelayMs,0);assert.equal(p.refillTargetFraction,1.6);assert.equal(p.cutoffFraction,.85);assert.equal(p.holdMs,4000);assert.equal(p.approachMs,3000);});
-test('all S2 editor boundaries and steps are validated on server',()=>{const e=normalEnv(),ranges={startDelayMs:[0,1500,50],targetPercent:[100,160,1],cutoffPercent:[70,90,1],maxDurationMs:[500,4000,100],approachMs:[1000,6000,100]};for(const [key,[lo,hi,step]]of Object.entries(ranges)){for(const value of [lo,hi])assert.equal(e.h.validatedS2RefillSettings({...refillDefaults,[key]:value})[key],value);for(const value of [lo-step,hi+step,lo+step/2,NaN,Infinity,null,'120'])assert.throws(()=>e.h.validatedS2RefillSettings({...refillDefaults,[key]:value}),/allowed range/,key+':'+value);}assert.throws(()=>e.h.validatedS2RefillSettings([]));});
+test('S2 editable defaults use160percent pump with unchanged timing and cutoff',()=>{const e=normalEnv();assert.deepEqual(copy(e.h.currentS2RefillSettings()),refillDefaults);e.s.cfg.liveFlowTrimTest=true;const p=e.h.stage2StartupPlan();assert.deepEqual(copy(p.settings),refillDefaults);assert.equal(p.startDelayMs,0);assert.equal(p.refillTargetFraction,1.6);assert.equal(p.cutoffFraction,.85);assert.equal(p.holdMs,4000);assert.equal(p.approachMs,200);});
+test('S2 refill timeline reports frame, onset, return and the S2 overlap',()=>{
+ const e=normalEnv(),r=startupRun(e,'timeline',1,2,4);r.events=[{name:'stage2_start',tMs:0}];r.liveFlowTrim={trace:[{kind:'write',frame:1,tMs:600,startupAction:'boost',commandMlS:2.507},{kind:'startup-boost-ended',frame:1,tMs:4000}]};
+ e.s.cfg.liveFlowTrimTest=true;const tl=e.h.diagnosticSummary(r).s2RefillTimeline;
+ assert(tl.onsetMs>500);assert.equal(tl.relative.onsetS,Math.round(tl.onsetMs/10)/100);assert.equal(tl.relative.returnS,4);assert(tl.overlap&&Math.abs(tl.overlap.seconds-(4000-tl.onsetMs)/1000)<.01);
+});
+test('cup-flow cutoff accepts50to99percent bounds',()=>{
+ const e=normalEnv();assert.equal(e.h.validatedS2RefillSettings({...refillDefaults,cutoffPercent:50}).cutoffPercent,50);assert.equal(e.h.validatedS2RefillSettings({...refillDefaults,cutoffPercent:99}).cutoffPercent,99);assert.throws(()=>e.h.validatedS2RefillSettings({...refillDefaults,cutoffPercent:49}),/allowed range/);assert.throws(()=>e.h.validatedS2RefillSettings({...refillDefaults,cutoffPercent:100}),/allowed range/);
+});
+test('refill UI lists the S2/refill node timeline and overlap',()=>{
+ const e=normalEnv(),html=e.h.buildGhcOverlayHtml();assert.match(html,/S2 补水节点/);assert.match(html,/S2 与补水重叠/);assert.match(html,/id="refillnodes"/);assert.match(html,/data-refill-basis/);
+});
+test('all S2 editor boundaries and steps are validated on server',()=>{const e=normalEnv(),ranges={startDelayMs:[0,1500,50],targetPercent:[100,160,1],cutoffPercent:[50,99,1],maxDurationMs:[500,4000,100],approachMs:[200,6000,100]};for(const [key,[lo,hi,step]]of Object.entries(ranges)){for(const value of [lo,hi])assert.equal(e.h.validatedS2RefillSettings({...refillDefaults,[key]:value})[key],value);for(const value of [lo-step,hi+step,lo+step/2,NaN,Infinity,null,'120'])assert.throws(()=>e.h.validatedS2RefillSettings({...refillDefaults,[key]:value}),/allowed range/,key+':'+value);}assert.throws(()=>e.h.validatedS2RefillSettings([]));});
 test('configured target changes estimated refill command but retains hard limits',()=>{const e=normalEnv();e.s.cfg.liveFlowTrimTest=true;e.s.s2RefillSettings={...refillDefaults,targetPercent:140};const p=e.h.stage2StartupPlan();assert.equal(p.refillTargetGS,undefined);assert.equal(p.boostCommandMlS,3.5);assert(p.boostCommandMlS<=Math.min(8,p.baseCommandMlS*1.6));assert(p.maximumExtraCommandMl<=8);});
 test('100percent refill target does not force an unnecessary extra flow quantum',()=>{const e=normalEnv();e.s.cfg.liveFlowTrimTest=true;e.s.s2RefillSettings={...refillDefaults,targetPercent:100};const p=e.h.stage2StartupPlan();assert.equal(p.enabled,false);assert.match(p.reason,/no extra command/);});
 test('configurable start delay is relative to confirmed S2 frame and sends no earlier write',async()=>{const e=await configurableRefill({startDelayMs:1000}),t=e.s.liveTrim;await trimTick(e);assert.equal(rawWrites(e).length,0);e.advance(750);refillSamples(e,1);await trimTick(e);assert.equal(rawWrites(e).length,0);e.advance(250);refillSamples(e,1);await trimTick(e);assert.equal(rawWrites(e).length,1);assert.equal(t.startup.status,'boosting');});
@@ -1186,7 +1198,7 @@ test('continuous mode keeps the legacy startup policy while allowing saved futur
 test('refill editor contains sliders a command preview and common apply payload',()=>{const e=normalEnv(),html=e.h.buildGhcOverlayHtml();assert.match(html,/id="curverefill"/);assert.match(html,/type="range"/);assert.match(html,/data-refill-key/);assert.match(html,/refillpreview/);assert.match(html,/refill:JSON.parse\(JSON.stringify\(curveDraft.refill\)\)/);assert.match(html,/JSON.stringify\(a.refill\)===JSON.stringify\(b.refill\)/);});
 
 test('invalid refill HTTP payload cannot mutate either curve or stored settings',async()=>{
- const e=await editorReady(),d=editedRefill(e,{cutoffPercent:99}),before=JSON.stringify(e.s.testOverrides);await assert.rejects(e.h.applyCurveEditorDraft(d),/allowed range/);assert.equal(JSON.stringify(e.s.testOverrides),before);assert.equal(e.storage.s2RefillSettingsV1,undefined);
+ const e=await editorReady(),d=editedRefill(e,{cutoffPercent:100}),before=JSON.stringify(e.s.testOverrides);await assert.rejects(e.h.applyCurveEditorDraft(d),/allowed range/);assert.equal(JSON.stringify(e.s.testOverrides),before);assert.equal(e.storage.s2RefillSettingsV1,undefined);
 });
 test('active shot keeps the frozen refill plan when next-shot local configuration changes',async()=>{
  const e=await configurableRefill({targetPercent:120}),frozen=e.s.liveTrim.startup.plan;e.s.s2RefillSettings={...refillDefaults,targetPercent:140,cutoffPercent:70};await trimTick(e);assert.equal(frozen.refillTargetFraction,1.2);assert.equal(frozen.cutoffFraction,.85);assert.equal(e.s.liveTrim.pending.command,3);
@@ -1377,7 +1389,7 @@ test('S2 handover below5gpersecond never lowers pump command merely because flow
  const e=await refillFixture();await returnedRefill(e);e.advance(800);trimSamples(e,4.6);await trimTick(e);const row=e.s.liveTrim.report.trace.filter(x=>x.kind==='check').slice(-1)[0];assert.equal(row.targetGS,5);assert(e.s.liveTrim.pending);assert(e.s.liveTrim.pending.command>2.5);
 });
 test('falling delayed RAW estimate does not trigger an extra down-write during handover',async()=>{
- const e=await refillFixture();await returnedRefill(e);e.advance(800);trimSamples(e,5.4);const t=e.s.liveTrim;t.startup.lastEstimate={slope:6,stamp:100+ (e.now()-t.run.startedAtMs)/1000-.2};const before=rawWrites(e).length;await trimTick(e);const row=t.report.trace.filter(x=>x.kind==='check').slice(-1)[0];assert.equal(rawWrites(e).length,before);assert.match(row.reason,/falling response/);
+ const e=await refillFixture();await returnedRefill(e);trimAck(e);e.advance(100);trimSamples(e,5.4);const t=e.s.liveTrim;t.startup.lastEstimate={slope:6,stamp:100+ (e.now()-t.run.startedAtMs)/1000-.2};const before=rawWrites(e).length;await trimTick(e);const row=t.report.trace.filter(x=>x.kind==='check').slice(-1)[0];assert.equal(rawWrites(e).length,before);assert.match(row.reason,/falling response/);
 });
 test('handover pacing expires so750ms upward spacing does not restrict the rest of S2',async()=>{
  const e=await refillFixture();await returnedRefill(e);e.advance(4000);trimSamples(e,4.4);await trimTick(e);assert(e.s.liveTrim.pending);const cmd=e.s.liveTrim.pending.command;trimAck(e);pulseTarget(e,cmd);e.advance(250);trimSamples(e,4.4);await trimTick(e);const row=e.s.liveTrim.report.trace.filter(x=>x.kind==='check').slice(-1)[0];assert.equal(row.handoverActive,false);assert.notEqual(row.reason,'S2 approach upward-write spacing');
@@ -1405,17 +1417,6 @@ test('partial holding reference never increases by more than20percent or exceeds
  const e=normalEnv();e.s.cfg.liveFlowTrimTest=true;for(const plateau of [2.6,3,4,5,6]){e.s.diagnosticLast=startupRun(e,'reference-'+plateau,1,2,plateau);const p=e.h.stage2StartupPlan();assert(p.returnCommandMlS>=p.baseCommandMlS);assert(p.returnCommandMlS<=p.baseCommandMlS*1.2+1e-9);assert(p.returnCommandMlS<=p.boostCommandMlS);assert.equal(p.returnCommandMlS*16,Math.round(p.returnCommandMlS*16));}
 });
 
-async function ackedReturnWithoutEcho(){const e=await refillFixture();await trimTick(e);trimAck(e);e.advance(1500);refillSamples(e,4.3);await trimTick(e);trimAck(e);return e;}
-function actualReturnObservation(e,extra={}){e.h.observeLiveTrimMachine({machineState:'espresso',substate:'pouring',telemetryValid:true,profileFrame:1,flow:2.5,pressure:1,targetFlow:4,...extra});}
-test('three fresh actual-flow observations can release a driver-ACKed holding return without fake target ACK',async()=>{
- const e=await ackedReturnWithoutEcho(),t=e.s.liveTrim,echoes=t.report.targetConfirmations;e.advance(600);actualReturnObservation(e);e.advance(250);actualReturnObservation(e);e.advance(250);actualReturnObservation(e);assert.equal(t.startup.status,'complete');assert.equal(t.report.targetConfirmations,echoes);assert.equal(t.report.returnFlowCorroborations,1);assert.equal(t.commands[1],2.5);assert.equal(t.pending,null);assert.equal(t.retry,null);assert.equal(t.report.startupExecution.confirmation,'actual-flow-corroborated');
-});
-test('actual-flow return corroboration requires driver ACK distinct fresh observations and pressure headroom',async()=>{
- for(const kind of ['no-ack','duplicate','pressure','stale','wrong-flow']){const e=await ackedReturnWithoutEcho(),t=e.s.liveTrim;if(kind==='no-ack')t.pending.ack=false;e.advance(600);for(let i=0;i<3;i++){if(kind!=='duplicate'&&i)e.advance(250);actualReturnObservation(e,kind==='pressure'?{pressure:5.6}:kind==='stale'?{telemetryValid:false}:kind==='wrong-flow'?{flow:4}:{});}assert.notEqual(t.startup.status,'complete',kind);assert.equal(t.report.returnFlowCorroborations||0,0,kind);}
-});
-test('corroborated return can recover from degraded retry without leaving an unresolved old command',async()=>{
- const e=await ackedReturnWithoutEcho(),t=e.s.liveTrim;t.retry=t.pending;t.pending=null;t.startup.status='return-unconfirmed';e.advance(600);actualReturnObservation(e);e.advance(250);actualReturnObservation(e);e.advance(250);actualReturnObservation(e);assert.equal(t.startup.status,'complete');assert.equal(t.retry,null);
-});
 test('S2 UI exposes effective outflow origin and full-target handover instead of an85percent target ramp',()=>{
  const e=normalEnv(),html=e.h.buildGhcOverlayHtml();assert.match(html,/S2有效称流起点/);assert.match(html,/出液前等待/);assert.match(html,/接管渐进时间/);assert.equal(e.h.translateUiText('接管渐进时间','en'),'Control handover duration');
 });
@@ -1434,10 +1435,10 @@ test('independent refill save persists 1.5s and preserves profile overrides and 
  const reload=normalEnv();reload.event('s2RefillSettingsV1',e.storage.s2RefillSettingsV1);assert.equal(reload.h.currentS2RefillSettings().approachMs,1500);assert.equal(reload.s.s2RefillPrevious.after.approachMs,1500);
 });
 test('independent refill save rejects stale revision running and invalid settings',async()=>{
- const e=await editorReady(),d=editedRefill(e,{approachMs:1500});await assert.rejects(e.h.saveS2RefillSettings({...d,revision:'stale'}));await assert.rejects(e.h.saveS2RefillSettings({...d,refill:{...d.refill,approachMs:1234}}));e.s.phase='stage2';await assert.rejects(e.h.saveS2RefillSettings(d));assert.equal(e.h.currentS2RefillSettings().approachMs,3000);
+ const e=await editorReady(),d=editedRefill(e,{approachMs:1500});await assert.rejects(e.h.saveS2RefillSettings({...d,revision:'stale'}));await assert.rejects(e.h.saveS2RefillSettings({...d,refill:{...d.refill,approachMs:1234}}));e.s.phase='stage2';await assert.rejects(e.h.saveS2RefillSettings(d));assert.equal(e.h.currentS2RefillSettings().approachMs,200);
 });
 test('independent refill write failure keeps current settings and history',async()=>{
- const e=setup({failRefillSave:true});await e.h.syncHyperExProfile(true);const d=editedRefill(e,{approachMs:1500}),before=JSON.stringify(e.s.s2RefillPrevious);await assert.rejects(e.h.saveS2RefillSettings(d));assert.equal(e.h.currentS2RefillSettings().approachMs,3000);assert.equal(JSON.stringify(e.s.s2RefillPrevious),before);assert.equal(e.s.curveApplyBusy,false);
+ const e=setup({failRefillSave:true});await e.h.syncHyperExProfile(true);const d=editedRefill(e,{approachMs:1500}),before=JSON.stringify(e.s.s2RefillPrevious);await assert.rejects(e.h.saveS2RefillSettings(d));assert.equal(e.h.currentS2RefillSettings().approachMs,200);assert.equal(JSON.stringify(e.s.s2RefillPrevious),before);assert.equal(e.s.curveApplyBusy,false);
 });
 test('S3 rising tail forecast precedes slower full-window regression',()=>{
  const e=normalEnv(),now=Date.now(),r={startedAtMs:now-3000,rawScaleSamples:[]};e.s.phase='stage3';

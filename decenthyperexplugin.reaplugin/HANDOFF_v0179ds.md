@@ -15,10 +15,11 @@ Development build on top of 1.78ds (commit ea6a8d9). Branch v1.79ds (local + Git
 ## 验证
 
 - tests/verify_v0179ds.cjs：528/528 通过，含新增回归测试「restart pour poll+stateUpdate double trigger issues exactly one skipStep」。
-- 无 1.79ds 真机验证；skip 修复与补水 UI 待真机复核。
+- 真机验证（2026-10-29）：用户确认**萃取步骤正常**——主动泄压后自动 skipStep 只跳一次，S2 进入后帧确认与补水不再卡住，萃取主流程恢复正常。
+- 补水基准双选开关的界面操作与诊断曲线箭头显示尚未逐项真机复核。
 
 ## 待办
 
-1. 真机复核：S2 帧 1 正常停留、补水按 frame 1 启动、S2 活调恢复写入、箭头出现。
-2. 若修复后仍有写入却看不到矢量箭头，取该杯 CSV 核对 liveFlowTrim.trace 的 write 行（方向来自 command−previous，retry=true 时画 ↻）。
+1. 真机复核补水基准双选（基础泵倍率 / 目标折算）的切换与保存，以及有写入时诊断曲线矢量箭头是否出现。
+2. 若仍有写入却看不到矢量箭头，取该杯 CSV 核对 liveFlowTrim.trace 的 write 行（方向来自 command−previous，retry=true 时画 ↻）。
 

@@ -23,6 +23,7 @@ function staticFile(res, name) {
 }
 
 const server = http.createServer((req, res) => {
+  console.log(new Date().toISOString(), req.method, req.url.slice(0, 120));
   if (req.method === 'POST' && req.url === '/api/run') {
     let body = '';
     req.on('data', c => { body += c; if (body.length > 2e6) req.destroy(); });
@@ -32,7 +33,8 @@ const server = http.createServer((req, res) => {
         const result = await runShot(params);
         send(res, 200, JSON.stringify(result));
       } catch (e) {
-        send(res, 500, JSON.stringify({ ok: false, error: String((e && e.stack) || e) }));
+        console.error(e);
+        send(res, 500, JSON.stringify({ ok: false, error: String((e && e.message) || e) }));
       }
     });
     return;

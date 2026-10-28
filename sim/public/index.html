@@ -48,13 +48,13 @@ canvas{width:100%;height:180px;display:block}
 <aside>
   <fieldset><legend>出杯</legend>
     <label>模式<select id="mode"><option value="active">主动泄压 ON</option><option value="continuous">连续出杯 OFF</option></select></label>
-    <label>S1 目标 g/s<input id="t1" type="number" step="0.1" value="2"></label>
-    <label>S2 目标 g/s<input id="t2" type="number" step="0.1" value="5"></label>
-    <label>S3 目标 g/s<input id="t3" type="number" step="0.1" value="1.5"></label>
-    <label>S1 触发 g<input id="w1" type="number" step="1" value="4"></label>
-    <label>S2 触发 g<input id="w2" type="number" step="1" value="40"></label>
-    <label>结束 g<input id="wf" type="number" step="1" value="100"></label>
-    <label>浸泡 s<input id="soak" type="number" step="1" value="10"></label>
+    <label>S1 目标 g/s<input id="t1" type="number" step="0.1" min="0.3" max="6.5" value="2"></label>
+    <label>S2 目标 g/s<input id="t2" type="number" step="0.1" min="0.3" max="6.5" value="5"></label>
+    <label>S3 目标 g/s<input id="t3" type="number" step="0.1" min="0.3" max="6.5" value="1.5"></label>
+    <label>S1 触发 g<input id="w1" type="number" step="1" min="1" max="80" value="4"></label>
+    <label>S2 触发 g<input id="w2" type="number" step="1" min="5" max="150" value="40"></label>
+    <label>结束 g<input id="wf" type="number" step="1" min="10" max="250" value="100"></label>
+    <label>浸泡 s<input id="soak" type="number" step="1" min="0" max="60" value="10"></label>
   </fieldset>
   <fieldset><legend>杯内调流</legend>
     <label>开启<input id="ltOn" type="checkbox" checked></label>
@@ -62,11 +62,11 @@ canvas{width:100%;height:180px;display:block}
   </fieldset>
   <fieldset><legend>S2 提前补水</legend>
     <label>开启<input id="rfOn" type="checkbox" checked></label>
-    <label>启动延时 ms<input id="rfDelay" type="number" step="50" value="0"></label>
-    <label>基础泵倍率 %<input id="rfPct" type="number" step="1" value="160"></label>
-    <label>收回阈值 %<input id="rfCut" type="number" step="1" value="85"></label>
-    <label>最长 ms<input id="rfMax" type="number" step="100" value="4000"></label>
-    <label>渐进 ms<input id="rfAppr" type="number" step="100" value="3000"></label>
+    <label>启动延时 ms<input id="rfDelay" type="number" step="50" min="0" max="1500" value="0"></label>
+    <label>基础泵倍率 % <span class="small">100–160</span><input id="rfPct" type="number" step="1" min="100" max="160" value="160"></label>
+    <label>收回阈值 % <span class="small">70–90</span><input id="rfCut" type="number" step="1" min="70" max="90" value="85"></label>
+    <label>最长 ms<input id="rfMax" type="number" step="100" min="500" max="4000" value="4000"></label>
+    <label>渐进 ms<input id="rfAppr" type="number" step="100" min="1000" max="6000" value="3000"></label>
   </fieldset>
   <fieldset><legend>学习策略</legend>
     <label>档位<select id="policy"><option>保守</option><option>温和</option><option selected>正常</option><option>激进</option></select></label>
@@ -84,7 +84,7 @@ canvas{width:100%;height:180px;display:block}
   <button class="primary" id="run">运行仿真</button>
   <button class="ghost" id="pin">保存为对照</button>
   <button class="ghost" id="export">导出本次 JSON</button>
-  <p class="note">杯流曲线用你 0.1.77 历史的 20 个稳态点拟合。相同参数重复运行结果一致（固定噪声种子），改一个参数再跑就能看出差别。</p>
+  <p class="note">机器包线取自 Decaid mock_de1：泵 ≤8 ml/s、物理压力 ≤11 bar；超出时由机器侧限幅并记录，插件内限不参与钳制。杯流曲线用你 0.1.77 历史的 20 个稳态点拟合；相同参数重复运行结果一致（固定噪声种子）。</p>
 </aside>
 <section class="view">
   <div class="cards" id="cards"></div>

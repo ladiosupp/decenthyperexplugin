@@ -7,6 +7,12 @@ const vm = require('vm');
 
 const PLUGIN_FILE = path.join(__dirname, '..', 'decenthyperexplugin.reaplugin', 'plugin.js');
 
+// Machine envelope, taken from Decaid's mock DE1 (lib/src/models/device/impl/
+// mock_de1/mock_de1.dart): pumpMaxFlow = 8.0 ml/s, physicalMaxPressure = 11.0 bar.
+// The simulator enforces these as machine behaviour; the plugin's own limits are
+// deliberately not used here, so an over-asking plugin gets clamped by the machine.
+const MACHINE = Object.freeze({ maxFlowMlS: 8.0, maxPressureBar: 11.0 });
+
 const HOOKS = [
   'startSequence', 'resetSequence', 'handleStateUpdate', 'onScaleSnapshot',
   'liveTrimTick', 'initializeLiveTrim', 'startLiveTrim', 'stopLiveTrim',
@@ -32,6 +38,13 @@ function round(v, n) { const p = 10 ** (n || 2); return Math.round(v * p) / p; }
 function createEnv(logs) {
   const handles = new Map();
   const machine = { state: 'idle', substate: 'idle', frame: 0, command: 0, requested: 0, flow: 0, pressure: 0, baseCommand: 0, writeCommand: null, baseFrame: -1, machineFlow: 0 };
+  const violations = [];
+  const lastViolation = {};
+  const noteViolation = (kind, t, requested, applied) => {
+    if (lastViolation[kind] != null && t - lastViolation[kind] < 2) return;
+    lastViolation[kind] = t;
+    violations.push({ t: round(t, 2), kind, requested: round(requested, 3), applied: round(applied, 3) });
+  };
   let nowMs = 0;
   let seq = 0;
   const timers = new Map();
@@ -142,7 +155,7 @@ function createEnv(logs) {
 
   const source = inject(fs.readFileSync(PLUGIN_FILE, 'utf8'));
   vm.runInContext(source, context, { filename: 'plugin.js' });
-  const env = { host, context, machine, storage: {}, writes: [], logs, advance, drain, now: () => nowMs, press: null };
+  const env = { host, context, machine, storage: {}, writes: [], logs, advance, drain, now: () => nowMs, violations, noteViolation, press: null };
   const plugin = context.createPlugin(host);
   env.plugin = plugin;
   // Create a minimal API handler that the plugin's own api() can use.
@@ -264,8 +277,13 @@ async function runShot(params) {
     const cmd = m.state === 'espresso' ? (m.writeCommand == null ? m.baseCommand : m.writeCommand) : 0;
     dead.push({ t, cmd });
     while (dead.length && dead[0].t < t - p.plant.deadTime) dead.shift();
-    const targetMlS = dead.length ? dead[0].cmd : 0;
-    const limiter = Number(step.limiter && step.limiter.value) || 11;
+    const commandedMlS = dead.length ? dead[0].cmd : 0;
+    let targetMlS = commandedMlS;
+    if (targetMlS > MACHINE.maxFlowMlS) {
+      noteViolation('pump-flow', t, targetMlS, MACHINE.maxFlowMlS);
+      targetMlS = MACHINE.maxFlowMlS;
+    }
+    const limiter = Math.min(MACHINE.maxPressureBar, Number(step.limiter && step.limiter.value) || MACHINE.maxPressureBar);
     if (m.state === 'espresso') {
       const rate = Math.min(1, Math.max(0.01, p.plant.pumpResponse));
       m.machineFlow += (targetMlS - m.machineFlow) * rate;
@@ -274,9 +292,10 @@ async function runShot(params) {
         pressure = limiter;
         m.machineFlow = Math.max(0, (limiter - p.plant.pressureB) / p.plant.pressureK);
       }
-      if (pressure > 11) {
-        pressure = 11;
-        m.machineFlow = Math.min(m.machineFlow, Math.max(0, (11 - p.plant.pressureB) / p.plant.pressureK));
+      if (pressure > MACHINE.maxPressureBar) {
+        noteViolation('pressure', t, pressure, MACHINE.maxPressureBar);
+        pressure = MACHINE.maxPressureBar;
+        m.machineFlow = Math.min(m.machineFlow, Math.max(0, (MACHINE.maxPressureBar - p.plant.pressureB) / p.plant.pressureK));
       }
       m.pressure = pressure;
     } else {
@@ -329,6 +348,8 @@ async function runShot(params) {
     trace: trace.map(x => ({ t: round(x.tMs / 1000, 2), kind: x.kind, frame: x.frame, reason: x.reason || '', commandMlS: x.commandMlS })),
     summary: run ? h.diagnosticSummary(run) : null,
     plan: run && run.config ? run.config.s2StartupPlan : null,
+    machineLimits: MACHINE,
+    violations: env.violations.slice(0, 40),
     startup: run && run.liveFlowTrim ? run.liveFlowTrim.startupExecution : null,
     report: run && run.liveFlowTrim ? { checks: run.liveFlowTrim.checks, writes: run.liveFlowTrim.writes, retries: run.liveFlowTrim.retries, misses: run.liveFlowTrim.targetMisses, status: run.liveFlowTrim.status } : null,
     ended: { phase: s.phase, weight: round(weight, 2), seconds: round(t, 2), liveTrimStatus: run && run.liveFlowTrim && run.liveFlowTrim.status },

@@ -5,25 +5,39 @@ let pinned = null;
 let runCount = 0;
 
 function num(id) { return Number($(id).value); }
+// No silent clamping: the plugin and the machine each enforce their own limits.
+// We only substitute a default when a field is empty or not a number.
+function val(id, fallback) {
+  const v = Number($(id).value);
+  return Number.isFinite(v) ? v : fallback;
+}
 
 function readParams() {
   return {
     mode: $('mode').value,
-    targets: { s1: num('t1'), s2: num('t2'), s3: num('t3') },
-    weights: { s1: num('w1'), s2: num('w2'), final: num('wf') },
-    soakSeconds: num('soak'),
+    targets: { s1: val('t1', 2), s2: val('t2', 5), s3: val('t3', 1.5) },
+    weights: { s1: val('w1', 4), s2: val('w2', 40), final: val('wf', 100) },
+    soakSeconds: val('soak', 10),
     liveTrim: { enabled: $('ltOn').checked, level: num('ltLevel') },
     refill: {
-      enabled: $('rfOn').checked, startDelayMs: num('rfDelay'), targetPercent: num('rfPct'),
-      cutoffPercent: num('rfCut'), maxDurationMs: num('rfMax'), approachMs: num('rfAppr'),
+      enabled: $('rfOn').checked,
+      startDelayMs: val('rfDelay', 0),
+      targetPercent: val('rfPct', 160),
+      cutoffPercent: val('rfCut', 85),
+      maxDurationMs: val('rfMax', 4000),
+      approachMs: val('rfAppr', 3000),
     },
     policy: $('policy').value,
     plant: {
-      efficiency: num('pEff') / 100, cupGain: num('pGain'), cupExp: num('pExp'),
-      pumpResponse: num('pResp'), deadTime: num('pDead'),
-      noise: num('pNoise'), pressureK: num('pK'),
+      efficiency: val('pEff', 100) / 100,
+      cupGain: val('pGain', 1.883),
+      cupExp: val('pExp', 0.564),
+      pumpResponse: val('pResp', 0.35),
+      deadTime: val('pDead', 0.2),
+      noise: val('pNoise', 0.015),
+      pressureK: val('pK', 0.22),
     },
-    maxSeconds: num('maxS'),
+    maxSeconds: val('maxS', 90),
   };
 }
 
@@ -46,7 +60,16 @@ async function run() {
     runCount += 1;
     $('status').textContent = '完成 · 第 ' + runCount + ' 次 · 仿真 ' + data.ended.seconds + 's / 计算 ' + Math.round(performance.now() - started) + 'ms';
   } catch (e) {
-    $('status').textContent = '失败：' + e.message;
+    let msg = String(e.message || e);
+    const hint = [
+      ['targetPercent', '基础泵倍率需在 100–160%（插件限定）'],
+      ['cutoffPercent', '收回阈值需在 70–90%'],
+      ['startDelayMs', '启动延时需在 0–1500 ms'],
+      ['maxDurationMs', '最长补水需在 500–4000 ms'],
+      ['approachMs', '渐进时间需在 1000–6000 ms'],
+    ].find(([key]) => msg.includes(key));
+    if (hint) msg = hint[1];
+    $('status').textContent = '失败：' + msg;
   } finally {
     btn.disabled = false;
     btn.textContent = '运行仿真';
@@ -88,6 +111,11 @@ function render(r, params) {
     const fmt = (x) => (x && x.rawRegressionGS != null ? x.rawRegressionGS.toFixed(2) : '—');
     cards += card('对照', 'S2 ' + fmt(ps.stage2) + ' → ' + fmt(s.stage2), 'S3 ' + fmt(ps.stage3) + ' → ' + fmt(s.stage3));
   }
+  if (r.violations && r.violations.length) {
+    cards += card('机器限幅', r.violations.length + ' 次', '泵 ≤' + r.machineLimits.maxFlowMlS + ' ml/s · 压力 ≤' + r.machineLimits.maxPressureBar + ' bar', 'warn');
+  } else {
+    cards += card('机器限幅', '0 次', '泵 ≤' + r.machineLimits.maxFlowMlS + ' ml/s · 压力 ≤' + r.machineLimits.maxPressureBar + ' bar');
+  }
   $('cards').innerHTML = cards;
 
   const targetFor = (p) => p.phase === 'stage1' ? targets.s1 : p.phase === 'stage2' ? targets.s2 : p.phase === 'stage3' ? targets.s3 : null;
@@ -107,7 +135,8 @@ function render(r, params) {
 
   const ev = r.trace.filter((x) => x.kind !== 'check').slice(-40)
     .map((x) => x.t.toFixed(2) + 's  ' + x.kind + '  f' + x.frame + (x.commandMlS != null ? '  ' + Number(x.commandMlS).toFixed(3) + ' ml/s' : '') + (x.reason ? '  ' + x.reason : ''));
-  $('events').textContent = ev.length ? ev.join('\n') : '没有写入事件。';
+  const caps = (r.violations || []).map((v) => v.t.toFixed(2) + 's  机器限幅 ' + v.kind + '  请求 ' + v.requested + ' → 实际 ' + v.applied);
+  $('events').textContent = ev.concat(caps).join('\n') || '没有写入事件。';
 }
 
 function stageBands(ctx, series, x, y0, y1) {

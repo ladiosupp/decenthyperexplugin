@@ -1319,7 +1319,7 @@ test('driver dispatch accepts greater-than-plus2 pump boost and returns original
 test('rendered pump preview matches server command while cutoff stays4point25gpersecond',()=>{
  const e=normalEnv(),html=e.h.buildGhcOverlayHtml(),a=html.indexOf('function renderRefillEditor()'),b=html.indexOf('function renderCurveEditor(',a),elements={},inputs={};
  const get=id=>elements[id]||(elements[id]={textContent:'',innerHTML:'',disabled:false});
- const box=get('curverefill');box.querySelector=q=>inputs[q]||(inputs[q]={});
+ const box=get('curverefill');box.querySelector=q=>inputs[q]||(inputs[q]={});box.querySelectorAll=q=>[];
  const scope={$:get,curveDraft:{refill:copy(refillDefaults),values:{stage2:4}},curveLatest:{targetGS:{stage2:5},refillLimits:{targetPercent:[100,160,1]},canApply:true,refillActive:true},curveBusy:false,renderRefillHistory(){},refillControlFields:[['startDelayMs','启动延时','s'],['targetPercent','基础泵流量倍率','%'],['cutoffPercent','称流速收回阈值','%'],['maxDurationMs','最长补水','s'],['approachMs','渐进至100%时间','s']],Math,Number};
  vm.runInNewContext(html.slice(a,b)+';renderRefillEditor();',scope);assert.equal(get('refillvalue-targetPercent').textContent,'160% · 6.3750 ml/s');assert.equal(get('refillvalue-cutoffPercent').textContent,'85% · 4.25 g/s');assert.match(get('refillpreview').innerHTML,/6.3750 ml\/s · 160% 基础泵流量/);assert.doesNotMatch(get('refillpreview').innerHTML,/估算补水目标/);
 });

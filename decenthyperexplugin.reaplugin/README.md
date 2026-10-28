@@ -1,3 +1,22 @@
+# HyperEx Pulse Filter 1.78ds
+
+本地开发版（版本号 1.78ds，非严格 semver）。1.78ds 将活调整体重写为趋势 / 矢量语义（用户 2026-10-28/29 定案）：
+
+- 活调确认改为趋势确认：RAW 杯流斜率向目标收敛为主判据（写后 600ms 起，误差缩小 ≥0.015 g/s）；machineFlow 朝写入方向移动 ≥1/16 为辅助佐证；驱动 ACK 仍是硬闸但不推进命令。
+- 同值重试废弃：未响应矢量记 vector-unresponsive，下一次决策从当前趋势重算新矢量（加码/撤码），不再重发同值、不再有 3 次降级冷却。
+- PD 矢量写控制：写入幅度 = |target − slope|×8 档（1/16 量化，封顶 4 档）；先 clamp 进 base±20% 包络，无余量报 command-bound-vector，不空写。
+- 连续同向加码：sameSignStreak（RAW slope 相对目标连续同号）≥3 时步长上限 6 档、≥6 时 8 档；波幅由包络与趋势预测 hold 压住。
+- S3 固定 1600ms 防毛刺写间隔删除：写不写由统计闸（R²、新鲜度、预测 hold、2% 死区）决定。
+- 角度统计：zeroDegreeShare（|errorPct|≤2% 的 check 占比）、meanAngleDeg、sameSignStreak 进报告与诊断状态行；不设硬门槛。
+- 诊断曲线箭头：方向 = 绝对方向（command 相对 previous 升则向上、降则向下），长度 = |command − previous|×48；与目标背离时如实显示；↻ 表示趋势未响应时的重新决策（不是重发同值）。
+- 状态/事件/文案语义：monitoring-unresponsive-trend、vector-unresponsive、feedbackPolicy trend-vector-response；i18n 同步新状态翻译。
+
+S2 补水算法、S3 投影、杯间学习与 1.77ds 一致；S1 走 LUT 直给，不做精细活调。无真机验证。另附本地离线仿真台 sim/（加载真实 plugin.js，自带植物模型和网页曲线），用法见 sim/README.md。
+
+验证见 tests/RESULTS_v0178ds.txt（527/527）。
+
+## Previous release
+
 # HyperEx Pulse Filter 1.77ds
 
 本地开发版（版本号 1.77ds，非严格 semver）。在 1.76 基础上修掉复核发现的三处问题：
@@ -334,7 +353,7 @@ Editing S1/S2 preserves other stage modes and current commands. Editing S3 enabl
 ## Curve and decision output audit
 
 - Real-scale flow chart has independent visibility checkboxes for cup target, RAW cup flow, Decaid cup flow, machine target, machine actual and issued flow commands. Units remain visible; original raw weight chart unchanged.
-- Issued writes use small upward/downward arrows according to command change. SAME-target retries use↻, rather than falsely counting another increment. Historical writes without a recorded previous command have an unknown-direction dot. ACK is not a cup-output confirmation; matching machine target remains a separate square.
+- Issued writes use ↑/↓ arrows with absolute direction (command increase vs previous = up, decrease = down; divergence from the target line is shown as-is) and length = |command − previous|×48 (1 level ≈3px). ↻ marks a fresh vector decided on an unresponsive trend, never a same-value resend. Historical writes without a recorded previous command have an unknown-direction dot. ACK is not a cup-output confirmation; matching machine target remains a separate square.
 - Validation now has an adjacent 下一杯决策 panel explaining each stage's output error, whether an adjustment is proposed/applied/failed/held/waiting, and the exact learning blocker. Manual application marks the old cup analysis as superseded. An available proposal is not described as already applied before successful readback.
 - Fixed-target learning previously tried dynamic exposure only when fixed-window seconds were too short. It now tries the dynamic path if ANY fixed-window admission gate fails, including temporal coverage or consistent-cohort share. Prefer an eligible dynamic analysis. RAW/machine/pressure gates, ≥1.2s and6unique source samples,R²≥.90, S2≥2.4s,25% temporal coverage,60% consistent-window share, matching two-cup consensus and correction bounds remain unchanged.
 - Learning reports structured actual/required seconds, temporal coverage, consistent-window share and precise failures. It no longer says merely “need2.4s” when2.84s has already passed that condition. This repairs a skipped analysis path; it does not guarantee every MISS should cause an automatic adjustment.
@@ -350,7 +369,7 @@ Original LUT unchanged. S1 startup quality gates unchanged; normal next-shot S1/
 |3|250ms|2000|200|
 |4|200ms|2000|250|
 
-Live trim defaults ON at level3; diagnostic slider/native dropdown. Saved explicit choices are retained. Success waits at least50ms for BOTH ACK and matching target, then next level tick/new source sample. Missing target alone does not end trim: after3misses, retry SAME unresolved target at least3s after prior send while continuing checks. Matching target recovers automatically; no unconfirmed accumulation. Missing driver ACK retains original abort path. Budgets never reset on recovery. Original pressure/no-scale/total-time/final-weight safeguards and post-shot profile restoration remain.
+Live trim defaults ON at level3; diagnostic slider/native dropdown. Saved explicit choices and the per-level check cadence / write budgets in the table above are retained. Confirmation is trend-based, not value-equal: the RAW cup-flow slope converging on target (from 600ms after the write, error shrinking ≥0.015 g/s) is primary; machineFlow moving ≥1/16 toward the written vector corroborates; driver ACK stays a hard gate but does not by itself advance the command. Same-value retries are abolished: an unresponsive vector is recorded as vector-unresponsive and the next decision recomputes a fresh vector (add/remove) from the current trend, with no 3-miss downgrade cooldown and no 3s same-target resend. Write amplitude = |target − slope|×8 levels (1/16 quantized, capped at 4 levels), clamped into the base±20% envelope; no headroom reports command-bound-vector and no empty write is issued. Consecutive same-sign streaks raise the step cap (sameSignStreak ≥3 → 6 levels, ≥6 → 8 levels) so convergence needs fewer writes; the envelope plus trend-prediction hold limits amplitude. The fixed 1600ms S3 anti-jitter write interval is removed; whether to write is decided by the statistical gates (R², freshness, prediction hold, 2% deadband). Angle statistics (zeroDegreeShare of checks within |errorPct|≤2%, meanAngleDeg, sameSignStreak) are reported and shown in the diagnostic status line without a hard threshold. Missing driver ACK retains original abort path. Budgets never reset on recovery. Original pressure/no-scale/total-time/final-weight safeguards and post-shot profile restoration remain.
 
 ## Validation
 

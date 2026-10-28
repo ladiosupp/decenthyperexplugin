@@ -156,6 +156,7 @@ PASS live trim keeps trusted shot-to-shot eligibility and skips unverified corre
 PASS verified stable learning window uses actual changed command, preserving raw run and LUT
 PASS experimental trace survives summary/CSV with check, write, ACK and target response separately
 PASS generated chart renders directional arrows, retry marks and separate target squares
+PASS live trim vector arrows carry direction and amplitude length
 PASS live-trim completed shot still queues the normal next-shot evaluator
 PASS original profile is actually re-uploaded after raw edits before next shot
 PASS live trim forces required diagnostics even when regular diagnostic logging is OFF
@@ -209,8 +210,8 @@ PASS observed RAW output quality stays available when driver command attribution
 PASS plugin self-review reports stage outcome and learning without requiring external exports
 PASS review never turns overlapping actions into individual causal success claims
 PASS self-review panel is present in final generated script and summary export
-PASS fourth target miss enters recoverable cooldown while checks continue
-PASS late exact target during degraded cooldown automatically recovers normal control
+PASS unresponsive trend keeps redispatching a bounded vector while checks continue
+PASS fresh trend feedback during unresponsive resumes normal control
 PASS degraded target retry holds after cup error reverses
 PASS degraded target retries require fresh scale and machine telemetry
 PASS degraded retry cannot spend beyond write cap; checks and late recovery remain active
@@ -292,8 +293,8 @@ PASS beneficial S2 pulse is retained bounded; ineffective pulse returns to basel
 PASS S2 pulse uses fast same frame one quantum and no skip, profile or LUT changes
 PASS S2 pulse returns on independent deadline with ACK but no target echo or usable regression
 PASS S2 base return confirmation resumes regular trim only after response settle
-PASS S2 missing base target with driver ACK degrades without abort or accumulating upward writes
-PASS S2 unconfirmed base echo can recover after a delayed return
+PASS S2 return driver ACK completes the refill immediately without waiting for base echo
+PASS S2 return ACK clears the watchdog so no degraded retry follows
 PASS S2 missing driver ACK keeps existing safety stop rather than leaving boost active
 PASS S2 transition cancels pulse timers and cannot return into the old frame
 PASS S2 startup never launches with pressure cap, stale telemetry, unresolved write or late frame
@@ -302,7 +303,7 @@ PASS S2 startup native settings default ON and live OFF preserves fixed profile 
 PASS S2 startup diagnostics distinguish delay rise tail plan and actual issued boost
 PASS S2 startup tolerates initial reset marker but rejects later reset
 PASS S2 pulse returns early when pressure headroom disappears
-PASS S2 missing base feedback respects both check and write limits
+PASS S2 return ACK completes with exactly two writes and leaves the shot armed
 PASS active release defaults ON in cfg manifest and visible settings order
 PASS continuous mode skips S1 directly to S2 exactly once with no intermediate Idle Espresso soak or GHC
 PASS continuous full sequence has two skips, one final Idle and preserves cumulative weight
@@ -375,11 +376,11 @@ PASS refill stale scale triggers baseline return rather than continuing blind fi
 PASS refill independent4second return works with missing boost echo and no raw curve
 PASS refill missing boost driver ACK stops within2seconds
 PASS refill return driver ACK has its own2second deadline after early cutoff
-PASS refill base echo absent after ACK degrades and never stacks another boost
+PASS refill return ACK completes the refill and never stacks another boost
 PASS refill S3 transition clears all deadlines and cannot write the former frame
 PASS refill cannot launch without pressure freshness truth or reserved return budget
 PASS after85percent cutoff cup target stays100percent while handover pacing ramps
-PASS upward approach writes observe750ms spacing while checks keep running
+PASS 200ms approach hands control back before the next trim write
 PASS S2 refill transient does not enter steady-level machine coverage or normalization
 PASS GHC pouring schedules a zero-delay single guarded transition and preopens raw transport
 PASS already-at-S2 restart sends no redundant skip and unexpected frame never skips
@@ -387,6 +388,17 @@ PASS refill UI includes actual bounded commands85percent cutoff and executed rea
 PASS missing frame telemetry cannot cancel refill return deadline or ACK protection
 PASS return deadline survives unknown frame and writes baseline once same S2 frame is recovered
 PASS S2 refill uses160percent pump command and keeps cup cutoff in gpersecond
+PASS cup-target basis estimates the refill base from the last clean S2 tail
+PASS cup-target basis without a clean observed tail falls back to the profile base command
+PASS cup-target basis dispatches a boost above the base-pump 1.6 ceiling
+PASS steady-gain estimate uses median cup/command from recent S2 evidence
+PASS steady-gain estimate uses duration-weighted S3 frames and acts from two shots
+PASS steady-gain UI exposes S2 and S3 feed-forward values
+PASS steady-gain feed-forward rewrites the S2 suggestion only with three agreeing shots
+PASS steady-gain feed-forward stays inactive when recent ratios disagree
+PASS steady-gain feed-forward can act on two agreeing shots
+PASS two disagreeing shots keep feed-forward off
+PASS refill basis slider edits the draft and persists cup-target across apply
 PASS S2 refill multiplier is independent of upper LUT interpolation
 PASS S2 refill multiplier is independent of historical cup-tail models
 PASS S2 refuses excluded or uncorroborated actual-tail models and keeps bounded fallback
@@ -407,6 +419,9 @@ PASS S3 audit separates physical modes and retains excluded runs as forensic evi
 PASS S3 history UI exposes saved shot snapshots and verified applications separately
 PASS 0.819 and0.813 are the same native1over16 driver flow quantum
 PASS S2 editable defaults use160percent pump with unchanged timing and cutoff
+PASS S2 refill timeline reports frame, onset, return and the S2 overlap
+PASS cup-flow cutoff accepts50to99percent bounds
+PASS refill UI lists the S2/refill node timeline and overlap
 PASS all S2 editor boundaries and steps are validated on server
 PASS configured target changes estimated refill command but retains hard limits
 PASS 100percent refill target does not force an unnecessary extra flow quantum
@@ -492,22 +507,22 @@ PASS tampered holding value cannot exceed normal20percent command envelope on re
 PASS after onset later low flow or stall remains in S2 evaluation instead of cherry-picking good flow
 PASS genuinely sustained oversupply can still down-trim during handover with no falling trend
 PASS partial holding reference never increases by more than20percent or exceeds the boost command
-PASS three fresh actual-flow observations can release a driver-ACKed holding return without fake target ACK
-PASS actual-flow return corroboration requires driver ACK distinct fresh observations and pressure headroom
-PASS corroborated return can recover from degraded retry without leaving an unresolved old command
 PASS S2 UI exposes effective outflow origin and full-target handover instead of an85percent target ramp
 PASS brief6gpersecond startup peak followed by steady5 remains valid S2 learning evidence
 PASS independent refill save persists 1.5s and preserves profile overrides and LUT
 PASS independent refill save rejects stale revision running and invalid settings
 PASS independent refill write failure keeps current settings and history
 PASS S3 rising tail forecast precedes slower full-window regression
-PASS S3 upward writes wait for the previous response interval
+PASS S3 upward writes wait for the previous trend response, not a fixed interval
+PASS live trim angle stats: zero-degree share and mean angle follow RAW check rows
+PASS live trim angle stats: learning assessment exposes angle quality per stage
+PASS sustained same-direction angles raise the vector step ceiling
 PASS S3 low stable flow can still receive bounded upward correction
 PASS save refill endpoint is registered in host manifest and persists after readback
 PASS refill save refuses success when the storage readback differs
 PASS manifest http endpoints match handlers and UI calls in both directions
-PASS 1.77ds version is consistent across manifest runtime and generated page
+PASS 1.78ds version is consistent across manifest runtime and generated page
 PASS abort reset timer is tracked and cleared by a new sequence
 PASS generated UI escaping covers attribute quotes
 
-511/511 checks passed
+526/526 checks passed

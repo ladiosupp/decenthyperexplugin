@@ -5434,7 +5434,10 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
         // Each command epoch settles briefly. Earlier good epochs survive a late unconfirmed write.
         if(Number(x.tMs)-epoch.at>=750)epoch.rows.push(x);
       }
-      const minSeconds=admission.seconds(phase==="stage2"?2.4:1.2);
+      // Refill builds leave ~1.5s of steady RAW evidence in S2 (02-10-28 field
+      // export); a 2.4s bar rejected a 1.52s r2=0.997 window every shot, so S2
+      // never moved. Quality gates (R2/slope/coverage/cohort) still bound it.
+      const minSeconds=admission.seconds(phase==="stage2"?1.5:1.2);
       const observedSpan=data.length?(Number(data[data.length-1].tMs)-Number(data[0].tMs))/1000:0;
       const assess=rows=>{
         const center=median(rows.map(x=>x.normalizedGS)),usable=rows.filter(x=>center>0&&Math.abs(x.normalizedGS/center-1)<=admission.spread(.25));

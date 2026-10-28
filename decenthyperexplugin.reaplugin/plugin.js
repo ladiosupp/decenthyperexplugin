@@ -6174,9 +6174,8 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
   function scheduleRestartSkip() {
     if (state.restartSkipTimer !== null || state.phase !== "restart_wait") return;
     state.restartSkipTimer = setTimeout(async () => {
-      state.restartSkipTimer = null;
-      if (state.phase !== "restart_wait") return;
       try {
+        if (state.phase !== "restart_wait") return;
         const token=state.sequenceStartedAtMs;
         await guardedSingleSkip(0, 1, "restart -> S2",()=>state.phase==="restart_wait"&&state.sequenceStartedAtMs===token);
         if(state.phase!=="restart_wait"||state.sequenceStartedAtMs!==token)return;
@@ -6187,6 +6186,8 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
         log(`START S2: skipped profile frame 0 -> 1; desired real ${state.cfg.stage2Flow.toFixed(2)} g/s, DE1 command ${resolvedStageCommandFlow("stage2", state.cfg.stage2Flow).toFixed(2)} ml/s until cumulative ${state.cfg.stage2Weight.toFixed(2)} g.`);
       } catch (error) {
         abortSequence(`Could not skip to 5 ml/s stage after restart: ${error.message || error}`, true);
+      } finally {
+        state.restartSkipTimer = null;
       }
     }, 0);
   }

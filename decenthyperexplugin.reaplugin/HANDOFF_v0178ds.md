@@ -10,7 +10,7 @@ Development build on top of 1.77ds. Branch: v1.78ds (local + GitHub). Version la
 4. 连续同向加码。sameSignStreak（RAW slope 相对目标的连续同号）≥3 时步长上限 6 档，≥6 时 8 档：更少写入次数、更短时间收敛；波幅由 base±20% 包络与趋势预测 hold 压住。
 5. S3 1600ms 固定防毛刺写间隔删除。写不写由统计闸（R²、新鲜度、预测 hold、2% 死区）决定，不再为减少毛刺而人为少写。
 6. 角度统计（杯内学习判据）。zeroDegreeShare = |errorPct| ≤ 2% 的 check 占比；meanAngleDeg = mean(atan(|errorPct|/100))；sameSignStreak 进报告。report 与 learningAssessment.angleStats 暴露，诊断状态行显示。不设硬门槛：收敛早期 0° 少属正常。
-7. 诊断曲线箭头带方向与长短。方向 = 对目标的真实方向（targetGS 相对 rawGS：目标在上则向上、在下则向下；缺测量值时退回指令增量符号），不是指令增量方向；长短 = |command − previous|×48（1 档≈3px、8 档≈24px）；renderChart 按 size 画箭头；图例中英文说明「箭头指向目标方向、长短＝指令幅度 ml/s」。
+7. 诊断曲线箭头带方向与长短。方向 = 绝对方向，与指令增/减一一对应（command 相对 previous 上升则向上、下降则向下；retry 画 ↻；方向未知画 ·）。当指令增加但杯流已高于目标时箭头与目标背离，如实显示（这是诊断信号，说明矢量当前背向目标）；长短 = |command − previous|×48（1 档≈3px、8 档≈24px）；renderChart 按 size 画箭头；图例中英文说明「上下＝指令增/减的绝对方向、长短＝指令幅度 ml/s」。
 8. 状态 / 事件 / 文案语义更新：monitoring-unresponsive-trend、vector-unresponsive、feedbackPolicy trend-vector-response、adaptiveMode trend-confirmed-window-and-dynamic-exposure-learning；i18n 增加新状态翻译。
 
 ## 用户定案的设计语义（2026-10-28，必须遵守）

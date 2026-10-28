@@ -25,7 +25,7 @@ I checked the two manifest entries I previously described as dead: `changed` and
 - `sim/public/` — parameter panel, flow/weight/pressure charts, A/B comparison, JSON export.
 - `sim/README.md` — model description and limits.
 
-The machine side follows Decaid's own `mock_de1.dart`: 100 ms ticks, a 0.35/tick first-order flow response, pressure proportional to machine flow, and the current frame's limiter (or 11 bar) feeding back to cap flow. Cup flow is then the plugin's calibration LUT applied to machine flow, times a user-set efficiency. `skipStep` advances one profile step and resets the step clock, matching Decaid's mock. Decaid ships no cup-scale model, so weight remains an integration of cup flow plus noise. It is a trend tool: it does not reproduce Decaid profile verification, GHC interaction, real pump/valve dynamics, firmware closed loops or host storage timing.
+The machine side follows Decaid's own `mock_de1.dart`: 100 ms ticks, a 0.35/tick first-order flow response, pressure proportional to machine flow, and the current frame's limiter (or 11 bar) feeding back to cap flow. Cup flow is fitted to the user's 0.1.77 export (20 steady points): `cup = 1.883 * machineFlow^0.564`, R2 0.984, times a user-set yield factor. `skipStep` advances one profile step and resets the step clock, matching Decaid's mock. Decaid ships no cup-scale model, so weight remains an integration of cup flow plus noise. It is a trend tool: it does not reproduce Decaid profile verification, GHC interaction, real pump/valve dynamics, firmware closed loops or host storage timing.
 
 ## Packaging
 

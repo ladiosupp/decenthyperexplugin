@@ -153,24 +153,14 @@ function createEnv(logs) {
 }
 
 function plantDefaults() {
-  return { efficiency: 1.0, pumpResponse: 0.35, deadTime: 0.2, noise: 0.015, pressureK: 2.2, pressureB: 0.4 };
+  return { efficiency: 1.0, cupGain: 1.883, cupExp: 0.564, pumpResponse: 0.35, deadTime: 0.2, noise: 0.015, pressureK: 0.22, pressureB: 0.1 };
 }
 
-// Steady-state cup flow for a pump command, interpolated from the calibrated
-// LUT anchors. This keeps the plant consistent with the calibration the plugin
-// believes in; efficiency < 1 simulates a drifting puck or worn pump.
-function cupFlowForCommand(command, anchors) {
-  const pts = anchors.slice().sort((a, b) => a.command - b.command);
-  if (!pts.length) return command;
-  if (command <= pts[0].command) return command / pts[0].command * pts[0].flow;
-  for (let i = 1; i < pts.length; i++) {
-    if (command <= pts[i].command) {
-      const a = pts[i - 1], b = pts[i];
-      return a.flow + (b.flow - a.flow) * (command - a.command) / (b.command - a.command);
-    }
-  }
-  const a = pts[pts.length - 2], b = pts[pts.length - 1];
-  return b.flow + (b.flow - a.flow) / (b.command - a.command) * (command - b.command);
+// Cup yield fitted to the user's 0.1.77 history (20 steady S2/S3 points):
+// cup = cupGain * machineFlow^cupExp, R2 = 0.984. The exponent below 1 is what
+// makes S2 saturate: more pump flow buys less and less cup flow.
+function cupFlowForMachineFlow(flow, plant) {
+  return plant.cupGain * Math.pow(Math.max(0, flow), plant.cupExp);
 }
 
 function applyState(env, p) {
@@ -245,8 +235,6 @@ async function runShot(params) {
   const dead = [];
   const profile = h.profileObject();
   const stepAt = (frame) => (profile.steps[frame] || profile.steps[profile.steps.length - 1]);
-  const anchors = (s.calibrationMap && s.calibrationMap.points || []).map(x => ({ command: Number(x.commandFlow), flow: Number(x.actualFlow) }));
-
   m.state = 'espresso';
   m.substate = 'pouring';
   m.baseCommand = Number(stepAt(0).flow) || 0;
@@ -295,7 +283,7 @@ async function runShot(params) {
       m.machineFlow += (0 - m.machineFlow) * 0.35;
       m.pressure = 0.2;
     }
-    cupFlow = cupFlowForCommand(m.machineFlow, anchors) * p.plant.efficiency;
+    cupFlow = cupFlowForMachineFlow(m.machineFlow, p.plant) * p.plant.efficiency;
     weight += cupFlow * dt;
     const pressure = m.pressure;
 

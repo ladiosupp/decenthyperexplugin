@@ -18,7 +18,8 @@ function readParams() {
     },
     policy: $('policy').value,
     plant: {
-      efficiency: num('pEff') / 100, pumpResponse: num('pResp'), deadTime: num('pDead'),
+      efficiency: num('pEff') / 100, cupGain: num('pGain'), cupExp: num('pExp'),
+      pumpResponse: num('pResp'), deadTime: num('pDead'),
       noise: num('pNoise'), pressureK: num('pK'),
     },
     maxSeconds: num('maxS'),

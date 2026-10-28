@@ -33,16 +33,17 @@ node sim/smoke.js
 
 ## 植物模型（对齐 Decaid 的 mock DE1）
 
-机器侧取自 Decaid 仓库的 `lib/src/models/device/impl/mock_de1/mock_de1.dart`：100 ms tick、流量按 0.35/tick 一阶逼近目标、压力线性于机器流量、到当前帧的 limiter（或 11 bar）时反向限制流量。杯流再把机器流量按标定锚点换算成 g/s：
+机器侧取自 Decaid 仓库的 `lib/src/models/device/impl/mock_de1/mock_de1.dart`：100 ms tick、流量按 0.35/tick 一阶逼近目标、压力线性于机器流量、到当前帧的 limiter（或 11 bar）时反向限制流量。杯流换算用用户 0.1.77 历史的 20 个稳态点拟合（杯流 ≈ 1.883 × 机器流量^0.564，R² 0.984）：
 
 ```
 machineFlow = 一阶逼近(command, 0.35/100ms)，经纯滞后
 pressure    = B + K * machineFlow，超过当前帧 limiter 就压回流量
-cupFlow     = interp_LUT(machineFlow) * efficiency
+cupFlow     = 1.883 * machineFlow^0.564 * efficiency
 weight      = ∫ cupFlow dt + 称重噪声
 ```
 
-- **效率**：100% 表示与标定一致；90% 模拟粉饼/泵/豆子导致的杯流产率下降。最常用的旋钮。
+- **杯流产率**：整体缩放杯流，100% 是拟合值；90% 模拟粉饼/豆子变化。
+- **杯流系数 / 饱和指数**：拟合曲线的两个参数。指数小于 1 是高流量饱和的原因，也是 S2 越推越不涨的根源。
 - **泵响应**：每 100 ms 向目标推进的比例，对应 Decaid mock 的 `flowResponseRate = 0.35`；调小更迟钝。
 - **纯滞后**：命令到出流的传输延迟。
 - **压力系数**：bar per ml/s。调大更容易先撞 limiter，从「能调」变成「压力受限」。

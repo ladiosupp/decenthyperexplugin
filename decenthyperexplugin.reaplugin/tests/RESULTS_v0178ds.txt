@@ -157,6 +157,7 @@ PASS verified stable learning window uses actual changed command, preserving raw
 PASS experimental trace survives summary/CSV with check, write, ACK and target response separately
 PASS generated chart renders directional arrows, retry marks and separate target squares
 PASS live trim vector arrows carry direction and amplitude length
+PASS vector arrow direction follows the target line, not the command delta
 PASS live-trim completed shot still queues the normal next-shot evaluator
 PASS original profile is actually re-uploaded after raw edits before next shot
 PASS live trim forces required diagnostics even when regular diagnostic logging is OFF
@@ -525,4 +526,4 @@ PASS 1.78ds version is consistent across manifest runtime and generated page
 PASS abort reset timer is tracked and cleared by a new sequence
 PASS generated UI escaping covers attribute quotes
 
-526/526 checks passed
+527/527 checks passed

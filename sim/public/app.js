@@ -18,9 +18,16 @@ function readParams() {
     targets: { s1: val('t1', 2), s2: val('t2', 5), s3: val('t3', 1.5) },
     weights: { s1: val('w1', 4), s2: val('w2', 40), final: val('wf', 100) },
     soakSeconds: val('soak', 10),
+    commands: {
+      enabled: $('cmdOn').checked,
+      s1: val('c1', 0.719),
+      s2: val('c2', 2.507),
+      s3: val('c3', 0.569),
+    },
     liveTrim: { enabled: $('ltOn').checked, level: num('ltLevel') },
     refill: {
       enabled: $('rfOn').checked,
+      basis: $('rfBasis').value,
       startDelayMs: val('rfDelay', 0),
       targetPercent: val('rfPct', 160),
       cutoffPercent: val('rfCut', 85),
@@ -99,10 +106,17 @@ function render(r, params) {
   const targets = r.params.targets;
   let cards = stageCard('S1', s.stage1, targets.s1) + stageCard('S2', s.stage2, targets.s2) + stageCard('S3', s.stage3, targets.s3);
   const rep = r.report || {};
+  if (r.applied) {
+    cards += card('实际指令 ml/s', Number(r.applied.s1).toFixed(3) + ' / ' + Number(r.applied.s2).toFixed(3) + ' / ' + Number(r.applied.s3).toFixed(3), 'S1 / S2 / S3' + (r.params.commands && r.params.commands.enabled ? ' · 手动覆盖' : ' · 跟随 LUT'));
+  }
   cards += card('写入 / 检查', (rep.writes || 0) + ' / ' + (rep.checks || 0), '档位 ' + r.params.liveTrim.level + ' · 重试 ' + (rep.retries || 0) + ' · 缺失目标 ' + (rep.misses || 0));
   cards += card('用时', r.ended.seconds + ' s', '结束 ' + r.ended.weight + ' g · ' + (PHASE_LABEL[r.ended.phase] || r.ended.phase));
-  if (r.plan && r.plan.enabled) {
-    cards += card('S2 补水', (r.plan.boostCommandMlS || 0).toFixed(2) + ' ml/s', '基础 ' + (r.plan.baseCommandMlS || 0).toFixed(2) + ' · 收回 ' + Math.round((r.plan.cutoffFraction || 0) * 100) + '% · ' + (r.startup && r.startup.status || 'armed'));
+  if (r.simRefill && r.simRefill.events && r.simRefill.events.length) {
+    const boost = r.simRefill.events.find((e) => e.kind === 'boost');
+    const ret = r.simRefill.events.find((e) => e.kind === 'return');
+    cards += card('S2 补水（目标基准）', boost ? boost.boostMlS.toFixed(2) + ' ml/s' : '—', '目标折算 ' + r.simRefill.targetPumpMlS + ' ml/s · ' + (ret ? ret.reason : '进行中'));
+  } else if (r.plan && r.plan.enabled) {
+    cards += card('S2 补水（插件基准）', (r.plan.boostCommandMlS || 0).toFixed(2) + ' ml/s', '基础 ' + (r.plan.baseCommandMlS || 0).toFixed(2) + ' · 收回 ' + Math.round((r.plan.cutoffFraction || 0) * 100) + '% · ' + (r.startup && r.startup.status || 'armed'));
   } else {
     cards += card('S2 补水', r.params.refill.enabled ? '未触发' : '关闭', r.plan && r.plan.reason || '');
   }
@@ -136,7 +150,8 @@ function render(r, params) {
   const ev = r.trace.filter((x) => x.kind !== 'check').slice(-40)
     .map((x) => x.t.toFixed(2) + 's  ' + x.kind + '  f' + x.frame + (x.commandMlS != null ? '  ' + Number(x.commandMlS).toFixed(3) + ' ml/s' : '') + (x.reason ? '  ' + x.reason : ''));
   const caps = (r.violations || []).map((v) => v.t.toFixed(2) + 's  机器限幅 ' + v.kind + '  请求 ' + v.requested + ' → 实际 ' + v.applied);
-  $('events').textContent = ev.concat(caps).join('\n') || '没有写入事件。';
+  const rf = ((r.simRefill && r.simRefill.events) || []).map((e) => e.t.toFixed(2) + 's  补水 ' + e.kind + (e.boostMlS != null ? '  ' + e.boostMlS + ' ml/s' : '') + (e.reason ? '  ' + e.reason : ''));
+  $('events').textContent = ev.concat(caps).concat(rf).join('\n') || '没有写入事件。';
 }
 
 function stageBands(ctx, series, x, y0, y1) {

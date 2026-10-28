@@ -187,6 +187,9 @@ function applyState(env, p) {
     DumpFallbackSeconds: 2, DumpTimeoutSeconds: 6, DumpFlowThreshold: 0.35,
   });
   s.cfg = cfg;
+  // Target-based refill is a simulator experiment: keep the plugin's own refill
+  // plan out of the way and let the machine-side controller below apply the boost.
+  if (p.refill.enabled && p.refill.basis === 'target') s.cfg.s2StartupAssist = false;
   s.basketContext = 'coffee';
   s.scopeMode = 'off';
   s.calibrationStorageLoaded = true;
@@ -204,6 +207,22 @@ function applyState(env, p) {
   s.workflowProfile = h.profileObject();
   s.runtimeProfileVerified = true;
   s.armed = true;
+  if (p.commands && p.commands.enabled) {
+    const binding = h.testOverrideBinding();
+    const at = new Date().toISOString();
+    s.testOverrides = {
+      schema: 3, writerVersion: env.plugin.version, savedAt: at, ...binding,
+      stages: {
+        stage1: { mode: 'manual', origin: 'manual', command: Number(p.commands.s1) },
+        stage2: { mode: 'manual', origin: 'manual', command: Number(p.commands.s2) },
+        stage3: { mode: 'manual', origin: 'manual', command: Number(p.commands.s3) },
+      },
+      s3Shape: { enabled: false },
+      manualCurveSource: { afterRunId: '', appliedAt: at, mode: 'sim-manual' },
+    };
+  } else {
+    s.testOverrides = null;
+  }
   s.s2RefillSettings = h.validatedS2RefillSettings({
     basis: 'pump-command',
     startDelayMs: p.refill.startDelayMs,
@@ -222,12 +241,13 @@ async function runShot(params) {
   const defaults = {
     mode: 'active', targets: { s1: 2, s2: 5, s3: 1.5 }, weights: { s1: 4, s2: 40, final: 100 },
     soakSeconds: 10, liveTrim: { enabled: true, level: 3 },
-    refill: { enabled: true, startDelayMs: 0, targetPercent: 160, cutoffPercent: 85, maxDurationMs: 4000, approachMs: 3000 },
+    commands: { enabled: false, s1: 0.719, s2: 2.507, s3: 0.569 },
+    refill: { enabled: true, basis: 'target', startDelayMs: 0, targetPercent: 160, cutoffPercent: 85, maxDurationMs: 4000, approachMs: 3000 },
     plant: plantDefaults(), policy: '正常', maxSeconds: 90,
   };
   const input = params || {};
   const p = { ...defaults, ...input };
-  for (const key of ['targets', 'weights', 'liveTrim', 'refill', 'plant']) {
+  for (const key of ['targets', 'weights', 'liveTrim', 'refill', 'plant', 'commands']) {
     p[key] = { ...defaults[key], ...(input[key] || {}) };
   }
 
@@ -248,6 +268,12 @@ async function runShot(params) {
   const dead = [];
   const profile = h.profileObject();
   const stepAt = (frame) => (profile.steps[frame] || profile.steps[profile.steps.length - 1]);
+  const targetPumpMlS = Math.pow(
+    Math.max(0.01, p.targets.s2) / Math.max(0.01, p.plant.cupGain * p.plant.efficiency),
+    1 / Math.max(0.05, p.plant.cupExp),
+  );
+  const simRefill = { active: false, enteredAt: null, startedAt: 0, boost: 0 };
+  const refillEvents = [];
   m.state = 'espresso';
   m.substate = 'pouring';
   m.baseCommand = Number(stepAt(0).flow) || 0;
@@ -274,7 +300,32 @@ async function runShot(params) {
     // Hydraulic plant modelled on Decaid's mock DE1: 100 ms ticks, first-order
     // flow response, puck pressure and the current frame's pressure limiter.
     const step = stepAt(frame);
-    const cmd = m.state === 'espresso' ? (m.writeCommand == null ? m.baseCommand : m.writeCommand) : 0;
+    // Simulator-side refill whose percentage applies to the S2 target instead of
+    // the plugin's base pump command. Enabled only when basis === 'target'.
+    const useSimRefill = p.refill.enabled && p.refill.basis === 'target';
+    if (useSimRefill && m.state === 'espresso' && s.phase === 'stage2' && m.frame === 1) {
+      if (simRefill.enteredAt == null) simRefill.enteredAt = t;
+      const age = t - simRefill.enteredAt;
+      if (!simRefill.started && age >= p.refill.startDelayMs / 1000) {
+        simRefill.started = true;
+        simRefill.startedAt = t;
+        simRefill.boost = Math.min(MACHINE.maxFlowMlS, targetPumpMlS * p.refill.targetPercent / 100);
+        simRefill.active = true;
+        refillEvents.push({ t: round(t, 2), kind: 'boost', boostMlS: round(simRefill.boost, 3), targetPumpMlS: round(targetPumpMlS, 3) });
+      }
+      if (simRefill.active) {
+        const cutoff = p.targets.s2 * p.refill.cutoffPercent / 100;
+        if (cupFlow >= cutoff || t - simRefill.startedAt >= p.refill.maxDurationMs / 1000) {
+          simRefill.active = false;
+          refillEvents.push({ t: round(t, 2), kind: 'return', reason: cupFlow >= cutoff ? 'cutoff' : 'timeout' });
+        }
+      }
+    } else if (simRefill.active) {
+      simRefill.active = false;
+      refillEvents.push({ t: round(t, 2), kind: 'return', reason: 'stage-ended' });
+    }
+    const pluginCmd = m.state === 'espresso' ? (m.writeCommand == null ? m.baseCommand : m.writeCommand) : 0;
+    const cmd = simRefill.active ? simRefill.boost : pluginCmd;
     dead.push({ t, cmd });
     while (dead.length && dead[0].t < t - p.plant.deadTime) dead.shift();
     const commandedMlS = dead.length ? dead[0].cmd : 0;
@@ -348,6 +399,8 @@ async function runShot(params) {
     trace: trace.map(x => ({ t: round(x.tMs / 1000, 2), kind: x.kind, frame: x.frame, reason: x.reason || '', commandMlS: x.commandMlS })),
     summary: run ? h.diagnosticSummary(run) : null,
     plan: run && run.config ? run.config.s2StartupPlan : null,
+    simRefill: { targetPumpMlS: round(targetPumpMlS, 3), events: refillEvents },
+    applied: run && run.config ? { s1: run.config.stage1CommandMlS, s2: run.config.stage2CommandMlS, s3: run.config.stage3CommandMlS } : null,
     machineLimits: MACHINE,
     violations: env.violations.slice(0, 40),
     startup: run && run.liveFlowTrim ? run.liveFlowTrim.startupExecution : null,

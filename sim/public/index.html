@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HyperEx 离线仿真台</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#121418;color:#e8eaee;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif}
+header{display:flex;align-items:baseline;gap:14px;padding:14px 20px;border-bottom:1px solid #262a31;background:#171a1f}
+h1{font-size:17px;margin:0;letter-spacing:.02em}
+header .meta{color:#8b93a1;font-size:12px}
+header .status{margin-left:auto;font-size:12px;color:#9fd4a8}
+main{display:grid;grid-template-columns:330px minmax(0,1fr);gap:0;min-height:calc(100vh - 53px)}
+aside{border-right:1px solid #262a31;padding:16px;overflow-y:auto;max-height:calc(100vh - 53px)}
+section.view{padding:16px 20px;overflow-y:auto;max-height:calc(100vh - 53px)}
+fieldset{border:1px solid #2b3038;border-radius:10px;margin:0 0 12px;padding:10px 12px}
+legend{font-size:11px;letter-spacing:.08em;color:#8b93a1;padding:0 4px}
+label{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:6px 0;font-size:12px;color:#c6ccd6}
+label input[type=number],label select{width:92px;background:#0e1116;color:#e8eaee;border:1px solid #333a44;border-radius:6px;padding:4px 6px;font:12px ui-monospace,monospace}
+label input[type=checkbox]{width:16px;height:16px}
+button{border:0;border-radius:8px;padding:9px 12px;font-size:13px;font-weight:700;cursor:pointer}
+button.primary{background:#e8833a;color:#1a1208;width:100%;margin-top:4px}
+button.ghost{background:#2a2f37;color:#cfd5de;width:100%;margin-top:8px}
+button:disabled{opacity:.5;cursor:default}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px}
+.card{background:#191d23;border:1px solid #2a2f38;border-radius:10px;padding:10px 12px}
+.card .k{font-size:11px;color:#8b93a1}
+.card .v{font-size:18px;font-weight:700;margin-top:3px;font-variant-numeric:tabular-nums}
+.card .s{font-size:11px;color:#8b93a1;margin-top:2px}
+.good{color:#7ed492}.warn{color:#e9c276}.bad{color:#f2909a}
+.chartbox{background:#171a1f;border:1px solid #262a31;border-radius:10px;padding:8px 10px 4px;margin-bottom:12px}
+.chartbox h3{margin:2px 0 4px;font-size:12px;color:#aab2bf;font-weight:600}
+canvas{width:100%;height:180px;display:block}
+.events{background:#171a1f;border:1px solid #262a31;border-radius:10px;padding:10px 12px;font:11px ui-monospace,monospace;color:#aeb6c2;max-height:220px;overflow:auto;white-space:pre-wrap}
+.note{font-size:11px;color:#8b93a1;margin:8px 0 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>HyperEx 离线仿真台</h1>
+  <span class="meta" id="meta">真实 plugin.js · 虚拟时钟 · 无机器</span>
+  <span class="status" id="status">就绪</span>
+</header>
+<main>
+<aside>
+  <fieldset><legend>出杯</legend>
+    <label>模式<select id="mode"><option value="active">主动泄压 ON</option><option value="continuous">连续出杯 OFF</option></select></label>
+    <label>S1 目标 g/s<input id="t1" type="number" step="0.1" value="2"></label>
+    <label>S2 目标 g/s<input id="t2" type="number" step="0.1" value="5"></label>
+    <label>S3 目标 g/s<input id="t3" type="number" step="0.1" value="1.5"></label>
+    <label>S1 触发 g<input id="w1" type="number" step="1" value="4"></label>
+    <label>S2 触发 g<input id="w2" type="number" step="1" value="40"></label>
+    <label>结束 g<input id="wf" type="number" step="1" value="100"></label>
+    <label>浸泡 s<input id="soak" type="number" step="1" value="10"></label>
+  </fieldset>
+  <fieldset><legend>杯内调流</legend>
+    <label>开启<input id="ltOn" type="checkbox" checked></label>
+    <label>档位<select id="ltLevel"><option value="1">1 · 944ms</option><option value="2">2 · 300ms</option><option value="3" selected>3 · 250ms</option><option value="4">4 · 200ms</option></select></label>
+  </fieldset>
+  <fieldset><legend>S2 提前补水</legend>
+    <label>开启<input id="rfOn" type="checkbox" checked></label>
+    <label>启动延时 ms<input id="rfDelay" type="number" step="50" value="0"></label>
+    <label>基础泵倍率 %<input id="rfPct" type="number" step="1" value="160"></label>
+    <label>收回阈值 %<input id="rfCut" type="number" step="1" value="85"></label>
+    <label>最长 ms<input id="rfMax" type="number" step="100" value="4000"></label>
+    <label>渐进 ms<input id="rfAppr" type="number" step="100" value="3000"></label>
+  </fieldset>
+  <fieldset><legend>学习策略</legend>
+    <label>档位<select id="policy"><option>保守</option><option>温和</option><option selected>正常</option><option>激进</option></select></label>
+  </fieldset>
+  <fieldset><legend>植物模型</legend>
+    <label>効率 %<input id="pEff" type="number" step="1" value="100"></label>
+    <label>时间常数 s<input id="pTau" type="number" step="0.1" value="1.2"></label>
+    <label>纯滞后 s<input id="pDead" type="number" step="0.1" value="0.8"></label>
+    <label>称重噪声 g<input id="pNoise" type="number" step="0.005" value="0.015"></label>
+    <label>压力系数 bar/(g/s)<input id="pK" type="number" step="0.05" value="1.05"></label>
+    <label>最长时长 s<input id="maxS" type="number" step="5" value="90"></label>
+  </fieldset>
+  <button class="primary" id="run">运行仿真</button>
+  <button class="ghost" id="pin">保存为对照</button>
+  <button class="ghost" id="export">导出本次 JSON</button>
+  <p class="note">植物按标定 LUT 定点插值；效率 90% 模拟粉饼/泵漂移。参数全部只影响仿真。</p>
+</aside>
+<section class="view">
+  <div class="cards" id="cards"></div>
+  <div class="chartbox"><h3>杯流量 vs 目标 (g/s)</h3><canvas id="cFlow"></canvas></div>
+  <div class="chartbox"><h3>累计重量 (g)</h3><canvas id="cWeight"></canvas></div>
+  <div class="chartbox"><h3>压力 (bar) · 指令 (ml/s)</h3><canvas id="cPress"></canvas></div>
+  <div class="events" id="events">尚未运行。点「运行仿真」。</div>
+</section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>
+

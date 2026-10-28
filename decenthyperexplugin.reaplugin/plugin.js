@@ -5,6 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
+  const PLUGIN_VERSION = "1.77ds";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -245,6 +246,7 @@ function createPlugin(host) {
     stage2SkipSent: false,
     finalStopSent: false,
     completionTimer: null,
+    abortResetTimer: null,
     liveTrim: null,
     liveTrimTimer: null,
     liveTrimDirty: false,
@@ -316,7 +318,8 @@ function createPlugin(host) {
     uiLanguage:"zh",
     uiLanguageEdited:false,
     curveApplyBusy: false,
-    autoApplyTimer: null
+    autoApplyTimer: null,
+    pendingRefillSave: null
   };
 
   function n(value, fallback) {
@@ -1049,7 +1052,7 @@ function createPlugin(host) {
     state.diagnosticCurrent = {
       schema: 3,
       kind: String(kind || "hyperex"),
-      pluginVersion: "0.1.76",
+      pluginVersion: PLUGIN_VERSION,
       runId: `${now}-${state.diagnosticRunSeq}`,
       profileTitle: state.workflowTitle || (state.cfg ? state.cfg.profileTitle : ""),
       startedAt: new Date(now).toISOString(),
@@ -2349,7 +2352,7 @@ function createPlugin(host) {
     const st = summary.stage3Stability || null;
     return {
       runId: String(run.runId),
-      pluginVersion: "0.1.76",
+      pluginVersion: PLUGIN_VERSION,
       activeRelease:activeReleaseEnabled(run.config),
       learningIntegrity: assessRunLearningIntegrity(run),
       learningReview: run.learningReview||null,
@@ -2379,7 +2382,7 @@ function createPlugin(host) {
     // Never overwrite disk before the initial read, and serialize full-file writes.
     if (!state.persistentHistoryLoaded || !state.storageProbeVerified || state.persistentHistoryAvailable === false || !state.persistentHistoryFile) return false;
     if (state.pendingHistoryWrite) { state.historyWriteDirty = true; return true; }
-    state.persistentHistoryFile.writerVersion = "0.1.76";
+    state.persistentHistoryFile.writerVersion = PLUGIN_VERSION;
     state.persistentHistoryFile.updatedAt = new Date().toISOString();
     state.persistentHistoryFile.writeToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     state.pendingHistoryWrite = JSON.stringify(state.persistentHistoryFile);
@@ -2405,7 +2408,7 @@ function createPlugin(host) {
     const record = compactPersistentShotRecord(run, evidence);
     if (!record) return;
     if (!state.persistentHistoryFile || typeof state.persistentHistoryFile !== "object") {
-      state.persistentHistoryFile = { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:"0.1.76", createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(), shots:[] };
+      state.persistentHistoryFile = { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:PLUGIN_VERSION, createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(), shots:[] };
     }
     if (!Array.isArray(state.persistentHistoryFile.shots)) state.persistentHistoryFile.shots = [];
     state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.filter(x => x && x.runId !== record.runId);
@@ -2748,7 +2751,7 @@ function createPlugin(host) {
     if(s3Shape.enabled&&!s3Shape.origin)s3Shape.origin=sourceCfg.stage3CommandOrigin||stageCommandOrigin("stage3",true);
     const previousOverrides = state.testOverrides ? JSON.parse(JSON.stringify(state.testOverrides)) : null;
     try {
-      state.testOverrides = { schema:3, writerVersion:"0.1.76", savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, activeRelease:binding.activeRelease, basketContext:binding.basketContext, targets:binding.targets, stages, s3Shape, adaptiveSource:{ runId:suggestion.runId, appliedAt:new Date().toISOString(), mode:String(source || "manual") } };
+      state.testOverrides = { schema:3, writerVersion:PLUGIN_VERSION, savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, activeRelease:binding.activeRelease, basketContext:binding.basketContext, targets:binding.targets, stages, s3Shape, adaptiveSource:{ runId:suggestion.runId, appliedAt:new Date().toISOString(), mode:String(source || "manual") } };
       storageWrite(STORAGE_TEST_OVERRIDES, state.testOverrides);
 
       const verifyStatus = testOverrideStatus();
@@ -3184,7 +3187,7 @@ function createPlugin(host) {
     return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 html,body{margin:0;width:100%;min-height:100%;background:transparent;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;color:#f7f7f8;overflow-x:hidden}.card{width:860px;max-width:96vw;box-sizing:border-box;padding:22px;border-radius:20px;background:#17191d;box-shadow:0 18px 60px rgba(0,0,0,.45)}html.diagview,body.diagview{background:#17191d;min-width:100%;min-height:100vh}body.diagview .card{width:100vw;max-width:none;min-height:100vh;border-radius:0;box-shadow:none;padding:24px 30px}body.diagview .chart{height:250px}body.diagview textarea{height:190px}.k{font-size:13px;letter-spacing:.12em;opacity:.65}.t{font-size:27px;font-weight:800;margin:7px 0}.d{font-size:15px;line-height:1.45}.row{display:flex;gap:9px;margin-top:14px;flex-wrap:wrap}.b{border:0;border-radius:12px;padding:12px 14px;font-size:14px;font-weight:800;cursor:pointer}.p{background:#ff4fa3;color:#fff}.s{background:#343840;color:#fff}.warn{background:#8a4b18;color:#fff}.danger{background:#8a2530;color:#fff}.primaryAction{background:#f27a22;color:#fff;padding:14px 20px;font-size:15px;box-shadow:0 5px 18px rgba(0,0,0,.28)}.secondaryAction{background:#2b2f36;color:#e7e9ec;border:1px solid #555b65;padding:10px 13px;font-size:13px}.tertiaryAction{background:transparent;color:#c9cdd3;border:1px solid #3d424a;padding:10px 13px;font-size:13px}.actionBadge{display:inline-block;margin-left:8px;padding:3px 7px;border-radius:999px;background:#4a321d;color:#ffd4ac;font-size:9px;font-weight:800;letter-spacing:.08em;vertical-align:middle}.manualPanel{margin-top:10px;padding:12px;border-radius:10px;background:#1c1f24;border:1px solid #30343b}.active{outline:2px solid #fff}.m{margin-top:12px;font:12px ui-monospace,monospace;opacity:.78}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}.stat{background:#23262c;border-radius:11px;padding:10px}.stat b{display:block;font-size:17px;margin-top:4px}.small{font-size:11px;opacity:.68}.section{margin-top:14px;padding-top:13px;border-top:1px solid #343840}.section h3{margin:0 0 8px;font-size:16px}.good{color:#77d98b}.bad{color:#ff8c92}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}textarea{width:100%;height:150px;box-sizing:border-box;background:#0f1114;color:#dfe6ef;border:1px solid #343840;border-radius:10px;padding:9px;font:10px ui-monospace,monospace;resize:vertical}table{width:100%;border-collapse:collapse;font-size:11px}th,td{text-align:right;padding:5px 6px;border-bottom:1px solid #292d33}th:first-child,td:first-child{text-align:left}.chart{width:100%;height:205px;background:#101216;border:1px solid #2f333a;border-radius:10px;margin-top:8px}.legend{font-size:11px;opacity:.8;line-height:1.5}.stepHead{margin-top:18px;padding:14px 16px;border-radius:14px;background:#20242a;border:1px solid #3a4049}.stepHead b{font-size:19px}.stepBadge{float:right;padding:4px 9px;border-radius:999px;background:#343840;font-size:10px;letter-spacing:.06em}.stepBadge.good{background:#173b25}.stepBadge.bad{background:#4a2024}.stepHint{margin-top:5px;font-size:12px;opacity:.72;line-height:1.45}
-</style></head><body><div class="card"><div id="hx-language" data-no-i18n class="row" style="justify-content:flex-end;margin:0 0 10px"><button class="b s" data-language="zh" lang="zh-CN" aria-pressed="true">中文</button><button class="b s" data-language="en" lang="en" aria-pressed="false">English</button><span id="hx-language-status" style="align-self:center" aria-live="polite"></span></div><div class="k">HYPEREX v0.1.76</div><div id="brewingmode" class="m" role="status" style="margin:8px 0;padding:12px;border:2px solid #efad56;border-radius:10px;font-weight:800">${activeReleaseEnabled(state.cfg)?"Active release: ON · Release / soak / restart":"Active release: OFF · Continuous S1 → S2 → S3"}</div><div id="title" class="t">Checking…</div><div id="detail" class="d"></div>
+</style></head><body><div class="card"><div id="hx-language" data-no-i18n class="row" style="justify-content:flex-end;margin:0 0 10px"><button class="b s" data-language="zh" lang="zh-CN" aria-pressed="true">中文</button><button class="b s" data-language="en" lang="en" aria-pressed="false">English</button><span id="hx-language-status" style="align-self:center" aria-live="polite"></span></div><div class="k">HYPEREX v${PLUGIN_VERSION}</div><div id="brewingmode" class="m" role="status" style="margin:8px 0;padding:12px;border:2px solid #efad56;border-radius:10px;font-weight:800">${activeReleaseEnabled(state.cfg)?"Active release: ON · Release / soak / restart":"Active release: OFF · Continuous S1 → S2 → S3"}</div><div id="title" class="t">Checking…</div><div id="detail" class="d"></div>
 <div id="diag" style="display:none">
   <div class="d" style="margin:2px 0 12px;padding:10px 12px;border-radius:10px;background:#23262c"><b>ENTRY</b> · Dashboard <b>DIAG / CAL</b> is enabled by default. If another plugin occupies the reserved header slot, open <b>Plugins → HyperEx Pulse Filter</b>.</div>
 
@@ -3404,7 +3407,7 @@ function paint(x){const mode=$('brewingmode');if(mode&&typeof x.activeRelease===
 async function post(ep,body){const r=await fetch(base+'/'+ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});let j={};try{j=await r.json()}catch(_){j={error:await r.text()}}if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j;}
 async function doRearm(auto){b.disabled=true;b.textContent='RE-ARMING…';try{const x=await post('rearm',{retry:1});paint(x);t.textContent='RE-ARM REQUEST SENT';d.textContent='Wait for the pink GHC Espresso light, then press the physical GHC Espresso button.';if(auto)setTimeout(closeUi,1300)}catch(e){t.textContent='RE-ARM FAILED';d.textContent=String(e)}finally{b.textContent='RE-ARM';setTimeout(()=>b.disabled=false,800)}}
 function stat(label,v){return '<div class="stat"><span class="small">'+label+'</span><b>'+v+'</b></div>'}
-function esc(v){return String(v==null?'—':v).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function esc(v){return String(v==null?'—':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function commandModeLabel(v,origin,shape){const o=origin||((v==='auto'||!v)?'original':'retained'),label=o==='adaptive'?'ADAPTIVE':o==='manual'?'MANUAL':o==='original'?'ORIGINAL / LUT':'RETAINED / UNKNOWN';const values=shape&&[shape.earlyCommand,shape.midCommand,shape.lateCommand].map(Number),flat=values&&values.every(Number.isFinite)&&Math.max(...values)-Math.min(...values)<.001;return label+(v==='shape'?(flat?' · FLAT (3 timed frames)':' · SHAPE'):'')}
 function shapeCommandText(sh){if(!sh||sh.enabled!==true)return null;return esc(sh.earlyCommand)+' × '+esc(sh.earlySeconds)+'s → '+esc(sh.midCommand)+' × '+esc(sh.midSeconds)+'s → '+esc(sh.lateCommand)+' ml/s'}
 function appliedS3Text(c){const sh=c&&c.s3Shape;const shaped=shapeCommandText(sh);if(shaped)return shaped;const flat=c&&c.stage3FlatCommandMlS!=null?c.stage3FlatCommandMlS:(c&&c.stage3CommandMlS);return esc(flat)+' ml/s FLAT'}
@@ -3418,7 +3421,7 @@ const trimLevelSlider=$('adv_liveFlowTrimLevel');if(trimLevelSlider)trimLevelSli
 
 async function loadAdvancedSettings(){try{const r=await fetch(base+'/advanced-settings');if(!r.ok)return;const j=await r.json(),a=j.settings||{};for(const k of ADV_FIELDS){const q=$('adv_'+k);if(q&&a[k]!=null){if(q.type==='checkbox')q.checked=!!a[k];else q.value=a[k]}}const currentTemp=$('adv_temperature');if(currentTemp&&a.temperature!=null)currentTemp.value=Number(a.temperature).toFixed(1)+' °C';const meta=$('advancedmeta');updateTrimLevelLabel();const modeBox=$('adv_activeRelease');if(modeBox)modeBox.disabled=!j.canEdit;if(meta){const bt=j.basicCurve||{};meta.innerHTML='Single settings source · core curve: S1 <b>'+esc(bt.stage1WeightG)+'g</b> → settle <b>'+esc(bt.releaseSettleSeconds)+'s</b> → soak <b>'+esc(bt.soakSeconds)+'s</b> → S2→S3 <b>'+esc(bt.stage2WeightG)+'g</b> → final <b>'+esc(bt.finalWeightG)+'g</b> · GHC timeout <b>'+esc(bt.ghcConfirmTimeoutSeconds)+'s</b>.'+(j.directStartTest?'<br><b>DIRECT DRIVER TEST: '+esc(j.directStartTest.status)+'</b>':'')}}catch(e){const meta=$('advancedmeta');if(meta)meta.textContent='Settings load error: '+e}}
 async function saveAdvancedSettings(){const preflight=await fetch(base+'/advanced-settings');if(!preflight.ok){alert('Settings availability check failed');return}const eligibility=await preflight.json();if(!eligibility.canEdit){alert('Change settings only while idle');return}const payload={};for(const k of ADV_FIELDS){const q=$('adv_'+k);if(!q)continue;if(q.type==='checkbox'){payload[ADV_SETTING_KEYS[k]]=q.checked;continue}if(k==='adaptiveLearningLevel'){payload[ADV_SETTING_KEYS[k]]=q.value;continue}const v=Number(q.value);if(!Number.isFinite(v)){alert('Invalid setting: '+k);return}payload[ADV_SETTING_KEYS[k]]=k==='liveFlowTrimLevel'?String(v):v}if(!confirm('Save these values to the normal HyperEx plugin Settings?\\n\\nThis uses the same settings source shown on the Plugins page and reloads HyperEx once.'))return;const r=await fetch(coreSettings,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});if(!r.ok){alert('Save failed: '+await r.text());return}alert('Settings saved. HyperEx is reloading; reopen DIAG / CAL if this page closes.');setTimeout(()=>location.reload(),1200)}
-async function loadCal(){try{const r=await fetch(base+'/calibration-status');const c=await r.json();renderLearningHistory(c.learningHistory);latestManualCurveSource=c.commandFlows&&c.commandFlows.manualCurveSource||null;renderCurveEditor(c.curveEditor);renderAppliedCommands(c.commandFlows||{},c.profileTruth||{});renderBasketContext(c);latestAutoApplyEnabled=c.autoApplyNextShot!==false;latestAutoApplyStatus=c.autoApplyLastStatus||null;renderAutoApplyBox();renderAdaptive(latestAdaptiveSummary);renderNextDecision(latestAdaptiveSummary);const ok=c.calibrationUsable;const b1=$("step1badge"),b2=$("step2badge");if(b1){b1.textContent=ok?"CAL READY":"REQUIRED FIRST";b1.className="stepBadge "+(ok?"good":"bad")}if(b2){b2.textContent=ok?"ACTIVE · AUTO NEXT SHOT":"WAITING FOR VALID LUT";b2.className="stepBadge "+(ok?"good":"bad")}const hs=c.persistentHistory||{},hb=$("historystatus");if(hb){if(hs.available===true){hb.style.background="#173b25";hb.style.color="#9ff0b5";hb.innerHTML='<b>ADAPTIVE HISTORY · PERSISTENT</b> · '+esc(hs.savedShots)+' saved shot(s), '+esc(hs.compatibleShots)+' compatible with the current calibration/LUT and basket context. '+esc(hs.baselineReferenceShots||0)+' empty/pre-upgrade baseline references retained; coffee consensus accumulates from normal coffees.'}else if(hs.available===false){hb.style.background="#4a2024";hb.style.color="#ffb4b8";hb.innerHTML='<b>ADAPTIVE HISTORY · SESSION ONLY</b> · '+esc(hs.status)+'<br>Shot-to-shot adaptation still works in this session, but cross-reload/version regression is disabled.'}else{hb.style.background="#3b2d16";hb.style.color="#ffd58a";hb.innerHTML='<b>ADAPTIVE HISTORY</b> · checking pluginStorage write/readback…'}}if($("t1")){ $("t1").value=c.commandFlows&&c.commandFlows.stage1DesiredGS!=null?c.commandFlows.stage1DesiredGS:""; $("t2").value=c.commandFlows&&c.commandFlows.stage2DesiredGS!=null?c.commandFlows.stage2DesiredGS:""; $("t3").value=c.commandFlows&&c.commandFlows.stage3DesiredGS!=null?c.commandFlows.stage3DesiredGS:"";}if(calmode){calmode.innerHTML=(c.calibrationModes||[{id:'low',label:'Low Water'},{id:'full',label:'Full'}]).map(x=>'<button class="b s '+(c.calibrationMode===x.id?'active':'')+'" data-mode="'+esc(x.id)+'">'+esc(x.label)+(x.id==='low'?' · DEFAULT':'')+'</button>').join('');calmode.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-mode',{mode:q.dataset.mode});await loadCal()})}if(waterwarn){const w=c.waterPreflight||{};const wc=w.status==='ok'?'#163b26':w.status==='warn'?'#3b2d16':'#4a2024';const fg=w.status==='ok'?'#9ff0b5':w.status==='warn'?'#ffd58a':'#ffb4b8';waterwarn.style.background=wc;waterwarn.style.color=fg;let tank='Tank level unavailable';if(w.available)tank='Tank: <b>'+esc(w.currentLevelMm)+' mm</b> · refill threshold: <b>'+esc(w.refillLevelMm)+' mm</b> · margin: <b>'+esc(w.marginMm)+' mm</b>';waterwarn.innerHTML='<b>WATER / VESSEL / TANK PREFLIGHT · '+esc(c.calibrationModeLabel)+' · '+esc((w.status||'unknown').toUpperCase())+'</b><br>'+tank+'<br>Prime: '+esc(c.primeFlow)+' ml/s × '+esc(c.primeSeconds)+' s · '+esc(c.calibrationSteps)+' calibration plateaus × '+esc(c.calibrationStepSeconds)+' s · nominal DE1 command water <b>≈'+esc(c.nominalCommandWaterMl)+' ml</b>.<br>Use a <b>'+esc(c.recommendedContainerMl)+' ml or larger</b> catch vessel. Plugin actively stops around <b>'+esc(c.calibrationHardStopG)+' g</b> actual collected water. '+esc(w.message||'');}calstatus.innerHTML='<b class="'+(ok?'good':'bad')+'">'+(ok?'CALIBRATION READY':'CALIBRATION NOT READY')+'</b><br>Mode: <b>'+esc(c.calibrationModeLabel)+'</b> · Profile: <b>'+esc(c.calibrationProfileTitle)+'</b><br>Scope: <b>'+esc(c.scopeLabel)+'</b> · DE1 multiplier: <b>'+esc(c.currentFlowMultiplier)+'</b> · map base: <b>'+esc(c.calibrationBaseMultiplier)+'</b> · suggested: <b>'+esc(c.suggestedFlowMultiplier)+'</b><br>'+esc(c.calibrationStaleReason||'LUT valid')+(c.lastCalibrationValid===false?'<br><b class="bad">LAST CAL RUN INVALID — previous valid LUT retained</b>':c.lastCalibrationValid===true?'<br><b class="good">LAST CAL RUN VALID</b>':'')+'<br>Real→command: S1 '+esc(c.commandFlows&&c.commandFlows.stage1DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage1CommandMlS)+' · S2 '+esc(c.commandFlows&&c.commandFlows.stage2DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage2CommandMlS)+' · S3 '+esc(c.commandFlows&&c.commandFlows.stage3DesiredGS)+'→'+appliedS3Text(c.commandFlows||{})+'<br>Test mode: <b>'+esc((c.commandFlows&&c.commandFlows.manualTestStatus)||'none')+'</b>';renderTestCommands(c.commandFlows||{},latestAdvisorySummary||{});scope.innerHTML=['off','hyperex','global'].map(x=>'<button class="b s '+(c.scope===x?'active':'')+'" data-scope="'+x+'">'+(x==='off'?'OFF':x==='hyperex'?'HYPEREX ONLY':'GLOBAL')+'</button>').join('');scope.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-scope',{scope:q.dataset.scope});await loadCal()});const last=c.lastCalibration||null;const rows=last&&Array.isArray(last.plateauResults)?last.plateauResults:[];const anchors=last&&last.map&&Array.isArray(last.map.targetAnchors)?last.map.targetAnchors:[];const anchorHtml=anchors.length?'<div style="margin:8px 0"><b>TARGET LUT:</b> '+anchors.map(a=>esc(a.blockId)+' '+esc(a.actualFlow)+' g/s → '+esc(a.commandFlow)+' ml/s ('+esc(a.quality)+')').join(' · ')+'</div>':'';map.innerHTML=rows.length?anchorHtml+'<table><tr><th>Frame</th><th>Block / target</th><th>DE1 cmd</th><th>RAW real g/s</th><th>DE1 flow</th><th>R²</th><th>Status</th></tr>'+rows.map(p=>'<tr><td>'+esc(p.frame)+'</td><td>'+esc((p.blockId||'—')+(p.targetReal!=null?' / '+p.targetReal:'') )+'</td><td>'+esc(p.commandFlow)+'</td><td>'+esc(p.actualFlow)+'</td><td>'+esc(p.machineFlow)+'</td><td>'+esc(p.r2)+'</td><td class="'+(p.acceptedInMap?'good':(p.valid?'':'bad'))+'">'+esc(p.acceptedInMap?'ANCHOR SOURCE':(p.reason||'REJECTED'))+'</td></tr>').join('')+'</table><div style="margin-top:8px">'+esc(c.profileSyncStatus||'')+'</div>':'No calibration run yet. Low Water automatically searches the three HyperEx real-flow targets and generates the LUT only when all targets pass. Full remains the wide engineering staircase.';const cur=c.stage1StartupCorrection||1;startupbox.innerHTML='<b>Stable skip topology:</b> scale feedback is advisory only. Optional S3 DECAY COMP may use 5 profile frames, but S3 subframes advance only by their own timers and never add plugin skipStep calls.'+(Number(cur)!==1?(' <br><span class="bad">Legacy S1 startup factor '+esc(cur)+'× is stored but ignored in v0.1.76.</span> <button id=clearstartup class="b s">CLEAR LEGACY</button>'):'');const cl=$("clearstartup");if(cl)cl.onclick=async()=>{try{await post('startup-clear',{});await loadCal()}catch(e){alert('Clear failed: '+e)}};}catch(e){calstatus.textContent='Calibration status error: '+e}}
+async function loadCal(){try{const r=await fetch(base+'/calibration-status');const c=await r.json();renderLearningHistory(c.learningHistory);latestManualCurveSource=c.commandFlows&&c.commandFlows.manualCurveSource||null;renderCurveEditor(c.curveEditor);renderAppliedCommands(c.commandFlows||{},c.profileTruth||{});renderBasketContext(c);latestAutoApplyEnabled=c.autoApplyNextShot!==false;latestAutoApplyStatus=c.autoApplyLastStatus||null;renderAutoApplyBox();renderAdaptive(latestAdaptiveSummary);renderNextDecision(latestAdaptiveSummary);const ok=c.calibrationUsable;const b1=$("step1badge"),b2=$("step2badge");if(b1){b1.textContent=ok?"CAL READY":"REQUIRED FIRST";b1.className="stepBadge "+(ok?"good":"bad")}if(b2){b2.textContent=ok?"ACTIVE · AUTO NEXT SHOT":"WAITING FOR VALID LUT";b2.className="stepBadge "+(ok?"good":"bad")}const hs=c.persistentHistory||{},hb=$("historystatus");if(hb){if(hs.available===true){hb.style.background="#173b25";hb.style.color="#9ff0b5";hb.innerHTML='<b>ADAPTIVE HISTORY · PERSISTENT</b> · '+esc(hs.savedShots)+' saved shot(s), '+esc(hs.compatibleShots)+' compatible with the current calibration/LUT and basket context. '+esc(hs.baselineReferenceShots||0)+' empty/pre-upgrade baseline references retained; coffee consensus accumulates from normal coffees.'}else if(hs.available===false){hb.style.background="#4a2024";hb.style.color="#ffb4b8";hb.innerHTML='<b>ADAPTIVE HISTORY · SESSION ONLY</b> · '+esc(hs.status)+'<br>Shot-to-shot adaptation still works in this session, but cross-reload/version regression is disabled.'}else{hb.style.background="#3b2d16";hb.style.color="#ffd58a";hb.innerHTML='<b>ADAPTIVE HISTORY</b> · checking pluginStorage write/readback…'}}if($("t1")){ $("t1").value=c.commandFlows&&c.commandFlows.stage1DesiredGS!=null?c.commandFlows.stage1DesiredGS:""; $("t2").value=c.commandFlows&&c.commandFlows.stage2DesiredGS!=null?c.commandFlows.stage2DesiredGS:""; $("t3").value=c.commandFlows&&c.commandFlows.stage3DesiredGS!=null?c.commandFlows.stage3DesiredGS:"";}if(calmode){calmode.innerHTML=(c.calibrationModes||[{id:'low',label:'Low Water'},{id:'full',label:'Full'}]).map(x=>'<button class="b s '+(c.calibrationMode===x.id?'active':'')+'" data-mode="'+esc(x.id)+'">'+esc(x.label)+(x.id==='low'?' · DEFAULT':'')+'</button>').join('');calmode.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-mode',{mode:q.dataset.mode});await loadCal()})}if(waterwarn){const w=c.waterPreflight||{};const wc=w.status==='ok'?'#163b26':w.status==='warn'?'#3b2d16':'#4a2024';const fg=w.status==='ok'?'#9ff0b5':w.status==='warn'?'#ffd58a':'#ffb4b8';waterwarn.style.background=wc;waterwarn.style.color=fg;let tank='Tank level unavailable';if(w.available)tank='Tank: <b>'+esc(w.currentLevelMm)+' mm</b> · refill threshold: <b>'+esc(w.refillLevelMm)+' mm</b> · margin: <b>'+esc(w.marginMm)+' mm</b>';waterwarn.innerHTML='<b>WATER / VESSEL / TANK PREFLIGHT · '+esc(c.calibrationModeLabel)+' · '+esc((w.status||'unknown').toUpperCase())+'</b><br>'+tank+'<br>Prime: '+esc(c.primeFlow)+' ml/s × '+esc(c.primeSeconds)+' s · '+esc(c.calibrationSteps)+' calibration plateaus × '+esc(c.calibrationStepSeconds)+' s · nominal DE1 command water <b>≈'+esc(c.nominalCommandWaterMl)+' ml</b>.<br>Use a <b>'+esc(c.recommendedContainerMl)+' ml or larger</b> catch vessel. Plugin actively stops around <b>'+esc(c.calibrationHardStopG)+' g</b> actual collected water. '+esc(w.message||'');}calstatus.innerHTML='<b class="'+(ok?'good':'bad')+'">'+(ok?'CALIBRATION READY':'CALIBRATION NOT READY')+'</b><br>Mode: <b>'+esc(c.calibrationModeLabel)+'</b> · Profile: <b>'+esc(c.calibrationProfileTitle)+'</b><br>Scope: <b>'+esc(c.scopeLabel)+'</b> · DE1 multiplier: <b>'+esc(c.currentFlowMultiplier)+'</b> · map base: <b>'+esc(c.calibrationBaseMultiplier)+'</b> · suggested: <b>'+esc(c.suggestedFlowMultiplier)+'</b><br>'+esc(c.calibrationStaleReason||'LUT valid')+(c.lastCalibrationValid===false?'<br><b class="bad">LAST CAL RUN INVALID — previous valid LUT retained</b>':c.lastCalibrationValid===true?'<br><b class="good">LAST CAL RUN VALID</b>':'')+'<br>Real→command: S1 '+esc(c.commandFlows&&c.commandFlows.stage1DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage1CommandMlS)+' · S2 '+esc(c.commandFlows&&c.commandFlows.stage2DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage2CommandMlS)+' · S3 '+esc(c.commandFlows&&c.commandFlows.stage3DesiredGS)+'→'+appliedS3Text(c.commandFlows||{})+'<br>Test mode: <b>'+esc((c.commandFlows&&c.commandFlows.manualTestStatus)||'none')+'</b>';renderTestCommands(c.commandFlows||{},latestAdvisorySummary||{});scope.innerHTML=['off','hyperex','global'].map(x=>'<button class="b s '+(c.scope===x?'active':'')+'" data-scope="'+x+'">'+(x==='off'?'OFF':x==='hyperex'?'HYPEREX ONLY':'GLOBAL')+'</button>').join('');scope.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-scope',{scope:q.dataset.scope});await loadCal()});const last=c.lastCalibration||null;const rows=last&&Array.isArray(last.plateauResults)?last.plateauResults:[];const anchors=last&&last.map&&Array.isArray(last.map.targetAnchors)?last.map.targetAnchors:[];const anchorHtml=anchors.length?'<div style="margin:8px 0"><b>TARGET LUT:</b> '+anchors.map(a=>esc(a.blockId)+' '+esc(a.actualFlow)+' g/s → '+esc(a.commandFlow)+' ml/s ('+esc(a.quality)+')').join(' · ')+'</div>':'';map.innerHTML=rows.length?anchorHtml+'<table><tr><th>Frame</th><th>Block / target</th><th>DE1 cmd</th><th>RAW real g/s</th><th>DE1 flow</th><th>R²</th><th>Status</th></tr>'+rows.map(p=>'<tr><td>'+esc(p.frame)+'</td><td>'+esc((p.blockId||'—')+(p.targetReal!=null?' / '+p.targetReal:'') )+'</td><td>'+esc(p.commandFlow)+'</td><td>'+esc(p.actualFlow)+'</td><td>'+esc(p.machineFlow)+'</td><td>'+esc(p.r2)+'</td><td class="'+(p.acceptedInMap?'good':(p.valid?'':'bad'))+'">'+esc(p.acceptedInMap?'ANCHOR SOURCE':(p.reason||'REJECTED'))+'</td></tr>').join('')+'</table><div style="margin-top:8px">'+esc(c.profileSyncStatus||'')+'</div>':'No calibration run yet. Low Water automatically searches the three HyperEx real-flow targets and generates the LUT only when all targets pass. Full remains the wide engineering staircase.';const cur=c.stage1StartupCorrection||1;startupbox.innerHTML='<b>Stable skip topology:</b> scale feedback is advisory only. Optional S3 DECAY COMP may use 5 profile frames, but S3 subframes advance only by their own timers and never add plugin skipStep calls.'+(Number(cur)!==1?(' <br><span class="bad">Legacy S1 startup factor '+esc(cur)+'× is stored but ignored in v${PLUGIN_VERSION}.</span> <button id=clearstartup class="b s">CLEAR LEGACY</button>'):'');const cl=$("clearstartup");if(cl)cl.onclick=async()=>{try{await post('startup-clear',{});await loadCal()}catch(e){alert('Clear failed: '+e)}};}catch(e){calstatus.textContent='Calibration status error: '+e}}
 // Daily charts show extraction only. Full original telemetry remains in CSV/run data.
 function extractionChartRows(run,rows){
  if(run.kind==='calibration')return(rows||[]).map(s=>({...s,_chartSegment:0,_chartGroup:'calibration'}));
@@ -3592,6 +3595,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     clearTimer("armReinforceTimer2");
     clearTimer("autoApplyTimer");
     clearTimer("completionTimer");
+    clearTimer("abortResetTimer");
   }
 
   function profileObject() {
@@ -3677,7 +3681,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     return {
       title: calibrationProfileTitle(normalizedMode),
       author: "ladiosupp / HyperEx",
-      notes: `EMPTY BASKET ONLY. HyperEx v0.1.76 ${wp.modeLabel} real-flow calibration. Prime ${wp.primeFlow.toFixed(2)} ml/s × ${wp.primeSeconds.toFixed(1)} s, then ${wp.steps} ${wp.algorithm === "target-lut" ? "target-search" : "calibration"} plateaus × ${wp.stepSeconds.toFixed(1)} s; nominal DE1 commanded water ≈${wp.nominalCommandWaterMl} ml. Use a ${wp.recommendedContainerMl} ml or larger catch vessel. The plugin actively stops calibration at about ${wp.hardStopG} g actual collected water to preserve margin below 300 ml. Tank level is checked before PREPARE when live DE1 water-level telemetry is available. Tare the scale, start Espresso manually, and leave the vessel in place until Idle.`,
+      notes: `EMPTY BASKET ONLY. HyperEx v${PLUGIN_VERSION} ${wp.modeLabel} real-flow calibration. Prime ${wp.primeFlow.toFixed(2)} ml/s × ${wp.primeSeconds.toFixed(1)} s, then ${wp.steps} ${wp.algorithm === "target-lut" ? "target-search" : "calibration"} plateaus × ${wp.stepSeconds.toFixed(1)} s; nominal DE1 commanded water ≈${wp.nominalCommandWaterMl} ml. Use a ${wp.recommendedContainerMl} ml or larger catch vessel. The plugin actively stops calibration at about ${wp.hardStopG} g actual collected water to preserve margin below 300 ml. Tank level is checked before PREPARE when live DE1 water-level telemetry is available. Tare the scale, start Espresso manually, and leave the vessel in place until Idle.`,
       beverage_type: "espresso",
       steps: [
         ...(wp.primeSeconds > 0 ? [{
@@ -4699,6 +4703,16 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       const run=state.diagnosticLast;state.autoApplyTimer=setTimeout(()=>{state.autoApplyTimer=null;return autoApplyNextShotIfEligible(run);},250);
     }
   }
+  function verifyS2RefillReadback(stored){
+    return new Promise(resolve=>{
+      const expected={basis:stored.basis,startDelayMs:stored.startDelayMs,targetPercent:stored.targetPercent,cutoffPercent:stored.cutoffPercent,maxDurationMs:stored.maxDurationMs,approachMs:stored.approachMs};
+      const token={expected,done:false,timer:null};
+      token.resolve=ok=>{if(token.done)return;token.done=true;if(token.timer)clearTimeout(token.timer);if(state.pendingRefillSave===token)state.pendingRefillSave=null;resolve(ok);};
+      token.timer=setTimeout(()=>token.resolve(false),1500);
+      state.pendingRefillSave=token;
+      if(!storageRead(STORAGE_S2_REFILL))token.resolve(false);
+    });
+  }
   async function saveS2RefillSettings(body) {
     if(!state.s2RefillStorageLoaded||state.phase!=="idle"||state.calibrationActive||state.curveApplyBusy||state.runtimeProfileRepairBusy||state.autoApplyLastStatus&&state.autoApplyLastStatus.status==="applying")throw new Error("请在空闲且参数载入完成后保存");
     if(!body||body.revision!==curveEditorRevision())throw new Error("参数已改变，请重新载入后保存");
@@ -4708,7 +4722,9 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       await requireIdleMachineForProfileSync();
       if(state.phase!=="idle"||body.revision!==curveEditorRevision())throw new Error("参数或运行状态已改变");
       const previous=JSON.stringify(before)===JSON.stringify(next)?state.s2RefillPrevious:{at:new Date().toISOString(),before:{...before},after:{...next}};
-      if(!storageWrite(STORAGE_S2_REFILL,{...next,previousChange:previous}))throw new Error("补水参数写入失败");
+      const stored={...next,previousChange:previous};
+      if(!storageWrite(STORAGE_S2_REFILL,stored))throw new Error("补水参数写入失败");
+      if(!await verifyS2RefillReadback(stored))throw new Error("补水参数已写入，但没有收到存储回读确认；请重新载入核对");
       state.s2RefillSettings=next;state.s2RefillPrevious=previous;state.s2RefillLoadWarning=null;
       emitSkinChanged();return {saved:true};
     }finally{state.curveApplyBusy=false;}
@@ -4743,7 +4759,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       if(!shaped&&(before.shaped||Math.abs(v.mid-before.values.mid)>.00001))stages.stage3={mode:"manual",origin:"manual",command:round(v.mid,4)};
       const binding=testOverrideBinding();
       const source={afterRunId:state.diagnosticLast&&state.diagnosticLast.runId||"",appliedAt:new Date().toISOString(),mode:"curve-editor"};
-      state.testOverrides={schema:3,writerVersion:"0.1.76",savedAt:source.appliedAt,...binding,stages,
+      state.testOverrides={schema:3,writerVersion:PLUGIN_VERSION,savedAt:source.appliedAt,...binding,stages,
         s3Shape:shaped?{enabled:true,origin:before.shaped&&["early","mid","late","earlySeconds","midSeconds"].every(k=>v[k]===before.values[k])?c.stage3Origin||"retained":"manual",earlyCommand:round(v.early,4),midCommand:round(v.mid,4),lateCommand:round(v.late,4),earlySeconds:round(v.earlySeconds,1),midSeconds:round(v.midSeconds,1)}:{enabled:false},manualCurveSource:source};
       changed=true;
       state.s2RefillSettings=nextRefill;state.s2RefillLoadWarning=null;
@@ -4765,7 +4781,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     refreshLearningStage();
     const map = state.calibrationMap;
     return {
-      pluginVersion: '0.1.76',
+      pluginVersion: PLUGIN_VERSION,
       curveEditor: curveEditorSnapshot(),
       basketContext: state.cfg ? state.cfg.basketContext : "unknown",
       learningStage: state.learningStage,
@@ -5033,7 +5049,8 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     if (requestIdle) {
       requestMachineState("idle").catch((error) => log(`Abort idle command failed: ${error.message || error}`));
     }
-    setTimeout(() => resetSequence(reason), 1200);
+    if(state.abortResetTimer)clearTimeout(state.abortResetTimer);
+    state.abortResetTimer=setTimeout(()=>{state.abortResetTimer=null;if(state.phase==="aborted")resetSequence(reason);},1200);
   }
 
   function startSequence(rawWeight) {
@@ -6204,7 +6221,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
 
   return {
     id: ID,
-    version: "0.1.76",
+    version: PLUGIN_VERSION,
 
     onLoad(settings) {
       state.cfg = loadConfig(settings || {});
@@ -6226,7 +6243,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       state.runtimeProfileMismatchAbortSent = false;
       state.calibrationArmed = false;
       resetSequence();
-      log(`Loaded v0.1.76. Stable two-skip topology; scale feedback is validation/advisory only; optional S3 decay-compensation subframes advance by profile time and add no skipStep calls. Dual calibration profiles are installed/updated at first load; HyperEx flow settings are desired REAL mass flow: ${state.cfg.stage1Flow}/${state.cfg.stage2Flow}/${state.cfg.stage3Flow} g/s. flowMultiplier scope=${scopeLabel(state.scopeMode)}. Dashboard idle shortcut=${state.cfg.idleDashboardShortcut ? "enabled" : "off (plugin page primary)"}. Brew state machine remains v0.1.16/v0.1.17 baseline.`);
+      log(`Loaded v${PLUGIN_VERSION}. Stable two-skip topology; scale feedback is validation/advisory only; optional S3 decay-compensation subframes advance by profile time and add no skipStep calls. Dual calibration profiles are installed/updated at first load; HyperEx flow settings are desired REAL mass flow: ${state.cfg.stage1Flow}/${state.cfg.stage2Flow}/${state.cfg.stage3Flow} g/s. flowMultiplier scope=${scopeLabel(state.scopeMode)}. Dashboard idle shortcut=${state.cfg.idleDashboardShortcut ? "enabled" : "off (plugin page primary)"}. Brew state machine remains v0.1.16/v0.1.17 baseline.`);
       connectScaleStream();
       connectWaterLevelStream();
       storageRead(STORAGE_UI_LANGUAGE);
@@ -6372,7 +6389,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
           }
           const binding = testOverrideBinding();
           state.curveApplyBusy=true;acquired=true;clearTimer("autoApplyTimer");
-          state.testOverrides = { schema:3, writerVersion:"0.1.76", savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, activeRelease:binding.activeRelease, basketContext:binding.basketContext, targets:binding.targets, stages, s3Shape,
+          state.testOverrides = { schema:3, writerVersion:PLUGIN_VERSION, savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, activeRelease:binding.activeRelease, basketContext:binding.basketContext, targets:binding.targets, stages, s3Shape,
             manualCurveSource:{afterRunId:state.diagnosticLast&&state.diagnosticLast.runId||"",appliedAt:new Date().toISOString(),mode:"numeric-editor"} };written=true;
           storageWrite(STORAGE_TEST_OVERRIDES, state.testOverrides);
           await syncHyperExProfile(state.workflowTitle === state.cfg.profileTitle);
@@ -6394,7 +6411,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
           if(request.body&&request.body.revision&&request.body.revision!==curveEditorRevision())throw new Error("下一杯参数已改变，请重新载入后编辑");
           if (state.phase !== "idle" || state.calibrationActive) throw new Error("Manual test commands can only be changed while HyperEx is idle");
           state.curveApplyBusy=true;acquired=true;clearTimer("autoApplyTimer");
-          state.testOverrides={schema:3,writerVersion:"0.1.76",savedAt:new Date().toISOString(),...testOverrideBinding(),stages:{stage1:{mode:"auto",command:null},stage2:{mode:"auto",command:null},stage3:{mode:"auto",command:null}},s3Shape:{enabled:false},manualCurveSource:{afterRunId:state.diagnosticLast&&state.diagnosticLast.runId||"",appliedAt:new Date().toISOString(),mode:"lut-reset"}};written=true;
+          state.testOverrides={schema:3,writerVersion:PLUGIN_VERSION,savedAt:new Date().toISOString(),...testOverrideBinding(),stages:{stage1:{mode:"auto",command:null},stage2:{mode:"auto",command:null},stage3:{mode:"auto",command:null}},s3Shape:{enabled:false},manualCurveSource:{afterRunId:state.diagnosticLast&&state.diagnosticLast.runId||"",appliedAt:new Date().toISOString(),mode:"lut-reset"}};written=true;
           storageWrite(STORAGE_TEST_OVERRIDES,state.testOverrides);
           await syncHyperExProfile(state.workflowTitle === state.cfg.profileTitle);
           log("Manual test commands cleared; all stages returned to AUTO / LUT.");
@@ -6511,7 +6528,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
         return pluginHttpJson(request, 200, calibrationStatusPayload());
       }
       if (request.endpoint === "startup-apply") {
-        return pluginHttpJson(request, 409, { error: "Legacy startup-apply is disabled in v0.1.76. S1 is handled only by the unified shot-to-shot adaptive engine after two matching MEDIUM-confidence startup shots." });
+        return pluginHttpJson(request, 409, { error: "Legacy startup-apply is disabled in v" + PLUGIN_VERSION + ". S1 is handled only by the unified shot-to-shot adaptive engine after two matching MEDIUM-confidence startup shots." });
       }
       if (request.endpoint === "startup-clear") {
         state.stage1StartupCorrection = null; storageWrite(STORAGE_S1_STARTUP, '');
@@ -6574,6 +6591,13 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
           if(!state.uiLanguageEdited&&["zh","en"].includes(language))state.uiLanguage=language;
           emitSkinChanged();
         } else if(key===STORAGE_S2_REFILL){
+          const saving=state.pendingRefillSave;
+          if(saving){
+            let ok=false;
+            try{const p=value?parseStoredJson(value):null;ok=!!p&&["basis","startDelayMs","targetPercent","cutoffPercent","maxDurationMs","approachMs"].every(k=>p[k]===saving.expected[k]);}catch(_){ok=false;}
+            saving.resolve(ok);
+            return;
+          }
           if(state.phase!=="idle"||state.curveApplyBusy)return;
           try{const parsed=value?parseStoredJson(value):null;if(value&&!parsed)throw new Error("invalid stored JSON");const restored=value?validatedS2RefillSettings(parsed):null;
             // v1 stored a CUP-target percentage. Migrate only that percentage;
@@ -6641,7 +6665,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
           if (!state.persistentHistoryLoaded) {
             const sessionRows = state.persistentHistoryFile && state.persistentHistoryFile.shots || [];
             state.persistentHistoryFile = parsed && Number(parsed.schema || 0) >= 2 && Array.isArray(parsed.shots) ? parsed
-              : { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:"0.1.76", shots:[] };
+              : { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:PLUGIN_VERSION, shots:[] };
             for (const row of sessionRows) {
               state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.filter(x => x && x.runId !== row.runId).concat(row);
             }

@@ -1,3 +1,17 @@
+# HyperEx Pulse Filter 1.77ds
+
+本地开发版（版本号 1.77ds，非严格 semver）。在 1.76 基础上修掉复核发现的三处问题：
+
+- 保存补水参数现在会写入后**读回校验**，回读缺失或不一致时不报成功（1.5 秒超时）；
+- abortSequence 的 1.2 秒复位定时器纳入 abortResetTimer 管理，新一杯不会被上一杯的迟到复位清掉；
+- 界面 esc() 补上双引号/单引号转义；版本号收敛为一个常量。
+
+控制策略、S2 补水算法、S3 投影与 1.76 一致，无真机验证。另附本地离线仿真台 sim/（加载真实 plugin.js，自带植物模型和网页曲线），用法见 sim/README.md。
+
+验证见 tests/RESULTS_v0177ds.txt（511/511）。
+
+## Previous release
+
 # HyperEx Pulse Filter 0.1.76
 
 修复 1.75 独立补水保存按钮报错 `endpoint refill-settings-save not available`：1.75 已实现按钮和处理函数，但漏在 manifest 注册 HTTP 接口，宿主会提前拒绝请求。本版补齐注册。

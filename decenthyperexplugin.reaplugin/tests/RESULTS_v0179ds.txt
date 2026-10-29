@@ -532,5 +532,7 @@ PASS steady-gain k row stays visible with a sample counter when history is short
 PASS diagnostic chart exposes a smoothed trend trajectory series
 PASS control law curve renders per-check trend angles on its own chart
 PASS live trim check rows carry the trend angle for the control law curve
+PASS new history records keep the full per-shot trace for JSON export
+PASS history export endpoint returns every persisted shot including its full record
 
-534/534 checks passed
+536/536 checks passed

@@ -6,7 +6,8 @@
 - 补水基准改为明确双选开关：基础泵倍率（按当前 S2 指令）或目标折算（按设置值 S2 目标动态估算）。UI 同时显示两种基准各自的增强结果，保存时写入 basis；恢复补水默认值同样带基准。
 - 1.78ds 的活调趋势/矢量语义（趋势确认、PD 矢量幅度、同向加码、角度统计、绝对方向箭头）保留。
 - 历史数据全点记录与 STEP 4 CSV 导出保留（1.68 起：每杯持久历史保存全部 action/ACK/target/fault，常规 check 行压缩为原因计数，CSV 导出完整实时轨迹，旧记录不改写）。
-- 验证见 tests/RESULTS_v0179ds.txt（528/528，含 restart 双触发只发一条 skipStep 的回归测试）。
+- 历史导出：STEP 4 新增 EXPORT HISTORY JSON，一键把持久历史（最多 30 杯）导出为 JSON；新增杯记录 fullRecord（完整 samples / rawScaleSamples / liveFlowTrim.trace），旧杯按原压缩记录导出。
+- 验证见 tests/RESULTS_v0179ds.txt（536/536，含 restart 双触发只发一条 skipStep 与历史全点导出的回归测试）。
 - 无 1.79ds 真机验证；skip 修复与补水 UI 待真机复核。
 
 ## Previous release

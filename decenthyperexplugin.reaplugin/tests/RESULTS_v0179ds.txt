@@ -517,7 +517,7 @@ PASS independent refill write failure keeps current settings and history
 PASS S3 rising tail forecast precedes slower full-window regression
 PASS S3 upward writes wait for the previous trend response, not a fixed interval
 PASS live trim angle stats: zero-degree share and mean angle follow RAW check rows
-PASS live trim angle stats: learning assessment exposes angle quality per stage
+PASS live trim angle stats: learning assessment exposes the check-to-check trend angle per stage
 PASS sustained same-direction angles raise the vector step ceiling
 PASS S3 low stable flow can still receive bounded upward correction
 PASS save refill endpoint is registered in host manifest and persists after readback
@@ -526,5 +526,11 @@ PASS manifest http endpoints match handlers and UI calls in both directions
 PASS 1.79ds version is consistent across manifest runtime and generated page
 PASS abort reset timer is tracked and cleared by a new sequence
 PASS generated UI escaping covers attribute quotes
+PASS write vector arrow sits on the check-to-write trend line while the head follows the command direction
+PASS write vector arrow without a RAW regression keeps the command position
+PASS steady-gain k row stays visible with a sample counter when history is short
+PASS diagnostic chart exposes a smoothed trend trajectory series
+PASS control law curve renders per-check trend angles on its own chart
+PASS live trim check rows carry the trend angle for the control law curve
 
-528/528 checks passed
+534/534 checks passed

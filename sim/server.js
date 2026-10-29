@@ -1,7 +1,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { runShot, plantDefaults } = require('./harness');
+const { runShot, plantDefaults, recordings } = require('./harness');
 
 const PORT = Number(process.env.SIM_PORT || 4780);
 const PUB = path.join(__dirname, 'public');
@@ -43,6 +43,10 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/app.js') return staticFile(res, 'app.js');
   if (req.method === 'GET' && req.url === '/api/defaults') {
     return send(res, 200, JSON.stringify({ plant: plantDefaults() }));
+  }
+  if (req.method === 'GET' && req.url === '/api/replays') {
+    const recs = (recordings() || []).map((r, i) => ({ index: i, title: r.title, duration: r.duration, preinfusionStopSec: r.preinfusionStopSec, weightEnd: r.frames && r.frames[r.frames.length - 1] ? r.frames[r.frames.length - 1].w : 0 }));
+    return send(res, 200, JSON.stringify(recs));
   }
   send(res, 404, 'not found', 'text/plain');
 });

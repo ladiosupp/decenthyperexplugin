@@ -1,17 +1,69 @@
 // HyperEx offline shot simulator.
 // Loads the real plugin.js, injects test hooks, and drives one shot against a
-// simple hydraulic plant. No machine, no network, no Decaid host required.
+// hydraulic plant aligned with Decaid's official mock (mock_de1.dart /
+// Streamline demo de1-mock.js). No machine, no network, no Decaid host required.
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
 const PLUGIN_FILE = path.join(__dirname, '..', 'decenthyperexplugin.reaplugin', 'plugin.js');
+const RECORDING_FILE = path.join(__dirname, 'data', 'sim_shots.json');
 
-// Machine envelope, taken from Decaid's mock DE1 (lib/src/models/device/impl/
-// mock_de1/mock_de1.dart): pumpMaxFlow = 8.0 ml/s, physicalMaxPressure = 11.0 bar.
+// Machine envelope, taken from Decaid's mock DE1 (mock_de1.dart):
+// pumpMaxFlow = 8.0 ml/s, physicalMaxPressure = 11.0 bar.
 // The simulator enforces these as machine behaviour; the plugin's own limits are
 // deliberately not used here, so an over-asking plugin gets clamped by the machine.
 const MACHINE = Object.freeze({ maxFlowMlS: 8.0, maxPressureBar: 11.0 });
+
+// Official mock_de1 puck-resistance constants (mock_de1.dart _simulateWithProfile).
+const PUCK = Object.freeze({ rDry: 0.10, rPeak: 4.2, rErode: 2.5, peakSecs: 12, erodeSecs: 16 });
+
+// Official mock_de1 limiter: asymptotic approach, not a hard clamp. range<=0
+// (or a bare {value} limiter) means hard-clamp at value.
+function applyLimiter(measurement, limiter) {
+  if (!limiter || !(Number(limiter.value) > 0) || measurement <= Number(limiter.value)) return measurement;
+  const range = Number(limiter.range);
+  if (!(range > 0)) return Number(limiter.value);
+  const excess = measurement - Number(limiter.value);
+  return Number(limiter.value) + range * excess / (range + excess);
+}
+
+// Puck resistance over shot time: cubic rise rDry->rPeak over peakSecs, then
+// linear erosion rPeak->rErode over erodeSecs. rPeak is a tunable knob; the
+// official mock also multiplies every shot by a random 0.85-1.15, which we keep
+// at 1.0 so identical params reproduce identical results.
+function puckResistance(shotSecs, plant) {
+  const rPeak = Number(plant.rPeak) > 0 ? Number(plant.rPeak) : PUCK.rPeak;
+  if (shotSecs <= PUCK.peakSecs) {
+    const s = shotSecs / PUCK.peakSecs;
+    return PUCK.rDry + (rPeak - PUCK.rDry) * s * s * s;
+  }
+  const e = Math.min((shotSecs - PUCK.peakSecs) / PUCK.erodeSecs, 1);
+  return rPeak - (rPeak - PUCK.rErode) * e;
+}
+
+// Recorded real shots from the official Streamline demo (mock/seed/sim_shots.json),
+// copied to sim/data/. Each recording is { title, duration, preinfusionStopSec,
+// frames:[{t,p,f,tp,tf,g,m,tt,w,wf}] } at ~10 Hz real-machine telemetry.
+let _recordings = null;
+function recordings() {
+  if (_recordings) return _recordings;
+  try { _recordings = JSON.parse(fs.readFileSync(RECORDING_FILE, 'utf8')); }
+  catch (_) { _recordings = []; }
+  return _recordings;
+}
+function sampleRecording(rec, t) {
+  const frames = rec.frames;
+  if (!frames || !frames.length) return { t, p: 0, f: 0, tp: 0, tf: 0, w: 0, wf: 0, g: 90, m: 89, tt: 90 };
+  if (t <= frames[0].t) return frames[0];
+  const last = frames[frames.length - 1];
+  if (t >= last.t) return last;
+  let lo = 0, hi = frames.length - 1;
+  while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (frames[mid].t <= t) lo = mid; else hi = mid; }
+  const a = frames[lo], b = frames[hi], u = (t - a.t) / (b.t - a.t || 1);
+  const lerp = (x, y) => x + (y - x) * u;
+  return { t, p: lerp(a.p, b.p), f: lerp(a.f, b.f), tp: lerp(a.tp, b.tp), tf: lerp(a.tf, b.tf), g: lerp(a.g, b.g), m: lerp(a.m, b.m), tt: lerp(a.tt, b.tt), w: lerp(a.w, b.w), wf: lerp(a.wf, b.wf) };
+}
 
 const HOOKS = [
   'startSequence', 'resetSequence', 'handleStateUpdate', 'onScaleSnapshot',
@@ -37,7 +89,7 @@ function round(v, n) { const p = 10 ** (n || 2); return Math.round(v * p) / p; }
 
 function createEnv(logs) {
   const handles = new Map();
-  const machine = { state: 'idle', substate: 'idle', frame: 0, command: 0, requested: 0, flow: 0, pressure: 0, baseCommand: 0, writeCommand: null, baseFrame: -1, machineFlow: 0 };
+  const machine = { state: 'idle', substate: 'idle', frame: 0, command: 0, requested: 0, flow: 0, pressure: 0, baseCommand: 0, writeCommand: null, baseFrame: -1, machineFlow: 0, shotStartSec: null };
   const violations = [];
   const lastViolation = {};
   const noteViolation = (kind, t, requested, applied) => {
@@ -99,7 +151,7 @@ function createEnv(logs) {
     if (pathOnly.startsWith('/machine/state/')) {
       const cmd = pathOnly.split('/').pop();
       if (cmd === 'idle') { machine.state = 'idle'; machine.substate = 'idle'; }
-      else if (cmd === 'espresso') { machine.state = 'espresso'; machine.substate = 'preinfusion'; machine.frame = 0; machine.writeCommand = null; machine.machineFlow = 0; }
+      else if (cmd === 'espresso') { machine.state = 'espresso'; machine.substate = 'preinfusion'; machine.frame = 0; machine.writeCommand = null; machine.machineFlow = 0; machine.shotStartSec = nowMs / 1000; }
       else if (cmd === 'skipStep') { machine.frame = Math.min(4, machine.frame + 1); machine.substate = 'pouring'; }
       return { status: 200, body: { ok: true } };
     }
@@ -166,7 +218,7 @@ function createEnv(logs) {
 }
 
 function plantDefaults() {
-  return { efficiency: 1.0, cupGain: 1.883, cupExp: 0.564, pumpResponse: 0.35, deadTime: 0.2, noise: 0.015, pressureK: 0.22, pressureB: 0.1 };
+  return { efficiency: 1.0, cupGain: 1.883, cupExp: 0.564, pumpResponse: 0.35, deadTime: 0.2, noise: 0.015, rPeak: 4.2 };
 }
 
 // Cup yield fitted to the user's 0.1.77 history (20 steady S2/S3 points):
@@ -185,6 +237,7 @@ function applyState(env, p) {
     ActiveRelease: p.mode === 'active', S2StartupAssist: p.refill.enabled, AdaptiveLearningLevel: p.policy,
     Enabled: true, DirectDriverStartTest: false, MaxRunSeconds: p.maxSeconds,
     DumpFallbackSeconds: 2, DumpTimeoutSeconds: 6, DumpFlowThreshold: 0.35,
+    HardPressureLimit: p.hardPressureLimit,
   });
   s.cfg = cfg;
   // Target-based refill is a simulator experiment: keep the plugin's own refill
@@ -244,12 +297,28 @@ async function runShot(params) {
     commands: { enabled: false, s1: 0.719, s2: 2.507, s3: 0.569 },
     refill: { enabled: true, basis: 'target', startDelayMs: 0, targetPercent: 160, cutoffPercent: 85, maxDurationMs: 4000, approachMs: 3000 },
     plant: plantDefaults(), policy: '正常', maxSeconds: 90,
+    hardPressureLimit: undefined,
   };
   const input = params || {};
   const p = { ...defaults, ...input };
   for (const key of ['targets', 'weights', 'liveTrim', 'refill', 'plant', 'commands']) {
     p[key] = { ...defaults[key], ...(input[key] || {}) };
   }
+
+  // Replay mode: drive the machine from a real recorded shot (official Streamline
+  // demo sim_shots.json) instead of the hydraulic plant. Recording is one
+  // continuous espresso, so force continuous mode; the plugin's frame state
+  // machine still runs, but flow/pressure/weight come from the recording.
+  const recordingsList = recordings();
+  const replay = (input.replay && Number.isInteger(input.replay.index) && recordingsList[input.replay.index])
+    ? recordingsList[input.replay.index]
+    : null;
+  if (replay) p.mode = 'continuous';
+  // Replay is review semantics for a finished real shot: the machine no longer
+  // answers the plugin, so use the machine envelope pressure ceiling instead of
+  // the plugin's 8 bar protection (pass hardPressureLimit: 8 to observe the
+  // real abort behaviour on a >8 bar recording).
+  if (replay && p.hardPressureLimit == null) p.hardPressureLimit = 11;
 
   applyState(env, p);
   const h = env.h, s = h.state, m = env.machine;
@@ -278,6 +347,10 @@ async function runShot(params) {
   m.substate = 'pouring';
   m.baseCommand = Number(stepAt(0).flow) || 0;
   m.writeCommand = null;
+  if (m.shotStartSec == null) m.shotStartSec = 0;
+  const useReplay = !!replay;
+  const replayLastT = useReplay ? replay.frames[replay.frames.length - 1].t : 0;
+  let replayEnded = false;
 
   // S3 timed subframes advance by profile time, like the machine does.
   let frameEnteredAt = 0, autoFrame = m.frame;
@@ -301,8 +374,9 @@ async function runShot(params) {
     // flow response, puck pressure and the current frame's pressure limiter.
     const step = stepAt(frame);
     // Simulator-side refill whose percentage applies to the S2 target instead of
-    // the plugin's base pump command. Enabled only when basis === 'target'.
-    const useSimRefill = p.refill.enabled && p.refill.basis === 'target';
+    // the plugin's base pump command. Enabled only when basis === 'target';
+    // disabled in replay mode (machine flow is already fixed by the recording).
+    const useSimRefill = !useReplay && p.refill.enabled && p.refill.basis === 'target';
     if (useSimRefill && m.state === 'espresso' && s.phase === 'stage2' && m.frame === 1) {
       if (simRefill.enteredAt == null) simRefill.enteredAt = t;
       const age = t - simRefill.enteredAt;
@@ -334,34 +408,65 @@ async function runShot(params) {
       noteViolation('pump-flow', t, targetMlS, MACHINE.maxFlowMlS);
       targetMlS = MACHINE.maxFlowMlS;
     }
-    const limiter = Math.min(MACHINE.maxPressureBar, Number(step.limiter && step.limiter.value) || MACHINE.maxPressureBar);
-    if (m.state === 'espresso') {
+    if (useReplay) {
+      const elapsed = m.shotStartSec == null ? 0 : Math.max(0, t - m.shotStartSec);
+      const rec = sampleRecording(replay, elapsed);
+      m.machineFlow = Math.max(0, rec.f);
+      m.pressure = Math.max(0, rec.p);
+      cupFlow = Math.max(0, rec.wf);
+      weight = Math.max(0, rec.w);
+      // Replay substate follows the recording's pour boundary (official
+      // simulateReplay semantics); plugin frame state is driven by skipStep.
+      if (elapsed < 0.5) m.substate = 'preparingForShot';
+      else if (elapsed < replay.preinfusionStopSec) m.substate = 'preinfusion';
+      else m.substate = 'pouring';
+      if (elapsed >= replayLastT) {
+        if (!replayEnded) {
+          replayEnded = true;
+          m.substate = 'pouringDone';
+          m.state = 'idle';
+        }
+      }
+    } else if (m.state === 'espresso') {
+      // Official mock_de1 flow-step physics (mock_de1.dart _simulateWithProfile):
+      // newFlow approaches targetMlS at pumpResponse per tick but never exceeds
+      // it; pressure = flow * puckResistance(shotSecs), damped at the same rate;
+      // the frame limiter is applied asymptotically (applyLimiter), and any
+      // limiter hit pulls flow back toward limiter/resistance. The physical
+      // 11 bar ceiling is a hard cap that also pulls flow back.
       const rate = Math.min(1, Math.max(0.01, p.plant.pumpResponse));
-      m.machineFlow += (targetMlS - m.machineFlow) * rate;
-      let pressure = p.plant.pressureB + p.plant.pressureK * m.machineFlow;
-      if (pressure > limiter) {
-        pressure = limiter;
-        m.machineFlow = Math.max(0, (limiter - p.plant.pressureB) / p.plant.pressureK);
+      const shotSecs = m.shotStartSec == null ? 0 : Math.max(0, t - m.shotStartSec);
+      const resistance = puckResistance(shotSecs, p.plant);
+      let newFlow = m.machineFlow + (targetMlS - m.machineFlow) * rate;
+      if (newFlow > targetMlS) newFlow = targetMlS; // flow step: never overshoot target
+      let newPressure = m.pressure + (newFlow * resistance - m.pressure) * rate;
+      const limitedPressure = applyLimiter(newPressure, step.limiter);
+      if (limitedPressure < newPressure) {
+        newPressure = limitedPressure;
+        newFlow = Math.min(newFlow, limitedPressure / resistance);
       }
-      if (pressure > MACHINE.maxPressureBar) {
-        noteViolation('pressure', t, pressure, MACHINE.maxPressureBar);
-        pressure = MACHINE.maxPressureBar;
-        m.machineFlow = Math.min(m.machineFlow, Math.max(0, (MACHINE.maxPressureBar - p.plant.pressureB) / p.plant.pressureK));
+      if (newPressure > MACHINE.maxPressureBar) {
+        noteViolation('pressure', t, newPressure, MACHINE.maxPressureBar);
+        newPressure = MACHINE.maxPressureBar;
+        newFlow = Math.min(newFlow, MACHINE.maxPressureBar / resistance);
       }
-      m.pressure = pressure;
+      m.machineFlow = newFlow;
+      m.pressure = newPressure;
     } else {
       m.machineFlow += (0 - m.machineFlow) * 0.35;
-      m.pressure = 0.2;
+      m.pressure = 0;
     }
-    cupFlow = cupFlowForMachineFlow(m.machineFlow, p.plant) * p.plant.efficiency;
-    weight += cupFlow * dt;
+    if (!useReplay) {
+      cupFlow = cupFlowForMachineFlow(m.machineFlow, p.plant) * p.plant.efficiency;
+      weight += cupFlow * dt;
+    }
     const pressure = m.pressure;
 
     t += dt;
 
     if (t - lastSample >= 0.1) {
       lastSample = t;
-      const noisy = Math.max(0, weight + gauss() * p.plant.noise);
+      const noisy = useReplay ? weight : Math.max(0, weight + gauss() * p.plant.noise);
       h.onScaleSnapshot({ weight: noisy, weightFlow: cupFlow, timestamp: round(t, 3) });
       await env.drain();
     }
@@ -383,6 +488,8 @@ async function runShot(params) {
       pressure: round(pressure, 2), frame: m.frame, phase: s.phase,
     });
 
+    if (useReplay && replayEnded) break;
+
     if (s.phase === 'idle' && t > 1 && s.diagnosticLast) break;
     if (s.phase === 'aborted') break;
   }
@@ -402,6 +509,7 @@ async function runShot(params) {
     simRefill: { targetPumpMlS: round(targetPumpMlS, 3), events: refillEvents },
     applied: run && run.config ? { s1: run.config.stage1CommandMlS, s2: run.config.stage2CommandMlS, s3: run.config.stage3CommandMlS } : null,
     machineLimits: MACHINE,
+    replay: useReplay ? { index: input.replay.index, title: replay.title, duration: replay.duration, lastT: replayLastT } : null,
     violations: env.violations.slice(0, 40),
     startup: run && run.liveFlowTrim ? run.liveFlowTrim.startupExecution : null,
     report: run && run.liveFlowTrim ? { checks: run.liveFlowTrim.checks, writes: run.liveFlowTrim.writes, retries: run.liveFlowTrim.retries, misses: run.liveFlowTrim.targetMisses, status: run.liveFlowTrim.status } : null,
@@ -411,7 +519,7 @@ async function runShot(params) {
   };
 }
 
-module.exports = { runShot, plantDefaults, PLUGIN_FILE };
+module.exports = { runShot, plantDefaults, PLUGIN_FILE, recordings };
 
 if (require.main === module) {
   const params = process.argv[2] ? JSON.parse(process.argv[2]) : {};

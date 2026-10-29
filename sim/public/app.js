@@ -13,6 +13,7 @@ function val(id, fallback) {
 }
 
 function readParams() {
+  const replayIdx = Number($('replayIdx').value);
   return {
     mode: $('mode').value,
     targets: { s1: val('t1', 2), s2: val('t2', 5), s3: val('t3', 1.5) },
@@ -35,6 +36,7 @@ function readParams() {
       approachMs: val('rfAppr', 3000),
     },
     policy: $('policy').value,
+    replay: replayIdx >= 0 ? { index: replayIdx } : null,
     plant: {
       efficiency: val('pEff', 100) / 100,
       cupGain: val('pGain', 1.883),
@@ -42,7 +44,7 @@ function readParams() {
       pumpResponse: val('pResp', 0.35),
       deadTime: val('pDead', 0.2),
       noise: val('pNoise', 0.015),
-      pressureK: val('pK', 0.22),
+      rPeak: val('pRPeak', 4.2),
     },
     maxSeconds: val('maxS', 90),
   };
@@ -100,6 +102,7 @@ function stageCard(name, st, target) {
 
 function render(r, params) {
   $('meta').textContent = 'plugin ' + r.version + ' · ' + (r.params.mode === 'active' ? '主动泄压' : '连续出杯') +
+    (r.replay ? ' · 回放「' + r.replay.title + '」' : '') +
     ' · 效率 ' + Math.round(r.params.plant.efficiency * 100) + '%';
 
   const s = r.summary || {};
@@ -253,5 +256,17 @@ $('export').addEventListener('click', () => {
 
 const _origRender = render;
 render = function (r, p) { window.__last = r; _origRender(r, p); };
+
+// Fill replay titles from the server and lock the mode select while replaying.
+fetch('/api/replays').then((res) => res.json()).then((recs) => {
+  const sel = $('replayIdx');
+  sel.innerHTML = '<option value="-1">关闭</option>' + recs.map((r) =>
+    '<option value="' + r.index + '">' + r.title + '（' + r.duration.toFixed(0) + 's）</option>').join('');
+  sel.addEventListener('change', () => {
+    $('mode').disabled = Number(sel.value) >= 0;
+    if (Number(sel.value) >= 0) $('mode').value = 'continuous';
+  });
+}).catch(() => {});
+
 run();
 

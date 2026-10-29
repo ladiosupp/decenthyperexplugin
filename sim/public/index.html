@@ -48,6 +48,7 @@ canvas{width:100%;height:180px;display:block}
 <aside>
   <fieldset><legend>出杯</legend>
     <label>模式<select id="mode"><option value="active">主动泄压 ON</option><option value="continuous">连续出杯 OFF</option></select></label>
+    <label>回放出杯<select id="replayIdx"><option value="-1">关闭</option><option value="0">录制 #0</option><option value="1">录制 #1</option><option value="2">录制 #2</option></select></label>
     <label>S1 目标 g/s<input id="t1" type="number" step="0.1" min="0.3" max="6.5" value="2"></label>
     <label>S2 目标 g/s<input id="t2" type="number" step="0.1" min="0.3" max="6.5" value="5"></label>
     <label>S3 目标 g/s<input id="t3" type="number" step="0.1" min="0.3" max="6.5" value="1.5"></label>
@@ -85,13 +86,13 @@ canvas{width:100%;height:180px;display:block}
     <label>泵响应 /100ms<input id="pResp" type="number" step="0.05" value="0.35"></label>
     <label>纯滞后 s<input id="pDead" type="number" step="0.1" value="0.2"></label>
     <label>称重噪声 g<input id="pNoise" type="number" step="0.005" value="0.015"></label>
-    <label>压力系数 bar/(ml/s)<input id="pK" type="number" step="0.01" value="0.22"></label>
+    <label>阻力峰值 bar/(ml/s)<input id="pRPeak" type="number" step="0.1" value="4.2"></label>
     <label>最长时长 s<input id="maxS" type="number" step="5" value="90"></label>
   </fieldset>
   <button class="primary" id="run">运行仿真</button>
   <button class="ghost" id="pin">保存为对照</button>
   <button class="ghost" id="export">导出本次 JSON</button>
-  <p class="note">机器包线取自 Decaid mock_de1：泵 ≤8 ml/s、物理压力 ≤11 bar；超出时由机器侧限幅并记录，插件内限不参与钳制。杯流曲线用你 0.1.77 历史的 20 个稳态点拟合；相同参数重复运行结果一致（固定噪声种子）。</p>
+  <p class="note">机器侧对齐官方 mock_de1 物理：泵 ≤8 ml/s、物理压力 ≤11 bar，流量按 0.35/100ms 一阶逼近、压力 = 流量 × 粉饼阻力（阻力曲线 + 帧限压渐近 + 超 11 bar 反压流量）。杯流曲线用你 0.1.77 历史的 20 个稳态点拟合；相同参数重复运行结果一致（固定噪声种子）。回放出杯 = 官方 Streamline demo 的真实录制出杯，机器数据按录制播放、插件照常跑分析。</p>
 </aside>
 <section class="view">
   <div class="cards" id="cards"></div>

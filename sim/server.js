@@ -1,7 +1,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { runShot, plantDefaults, recordings } = require('./harness');
+const { runShot, plantDefaults, recordings, historyRecordings } = require('./harness');
 
 const PORT = Number(process.env.SIM_PORT || 4780);
 const PUB = path.join(__dirname, 'public');
@@ -47,6 +47,19 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/api/replays') {
     const recs = (recordings() || []).map((r, i) => ({ index: i, title: r.title, duration: r.duration, preinfusionStopSec: r.preinfusionStopSec, weightEnd: r.frames && r.frames[r.frames.length - 1] ? r.frames[r.frames.length - 1].w : 0 }));
     return send(res, 200, JSON.stringify(recs));
+  }
+  if (req.method === 'GET' && req.url.startsWith('/api/history')) {
+    const q = new URL(req.url, 'http://x').searchParams;
+    const file = q.get('file') || '';
+    try {
+      const recs = (historyRecordings(fs.readFileSync(file, 'utf8')) || []).map((r, i) => ({
+        index: i, title: r.title, result: r.result, duration: r.duration, weightEnd: r.weightEnd,
+        startedAt: r.startedAt, frames: r.frames.length, source: 'hyperex',
+      }));
+      return send(res, 200, JSON.stringify({ file, cups: recs }));
+    } catch (e) {
+      return send(res, 400, JSON.stringify({ ok: false, error: String((e && e.message) || e) }));
+    }
   }
   send(res, 404, 'not found', 'text/plain');
 });

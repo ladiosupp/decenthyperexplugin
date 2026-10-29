@@ -62,7 +62,62 @@ function sampleRecording(rec, t) {
   while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (frames[mid].t <= t) lo = mid; else hi = mid; }
   const a = frames[lo], b = frames[hi], u = (t - a.t) / (b.t - a.t || 1);
   const lerp = (x, y) => x + (y - x) * u;
-  return { t, p: lerp(a.p, b.p), f: lerp(a.f, b.f), tp: lerp(a.tp, b.tp), tf: lerp(a.tf, b.tf), g: lerp(a.g, b.g), m: lerp(a.m, b.m), tt: lerp(a.tt, b.tt), w: lerp(a.w, b.w), wf: lerp(a.wf, b.wf) };
+  return { t, p: lerp(a.p, b.p), f: lerp(a.f, b.f), tp: lerp(a.tp, b.tp), tf: lerp(a.tf, b.tf), g: lerp(a.g, b.g), m: lerp(a.m, b.m), tt: lerp(a.tt, b.tt), w: lerp(a.w, b.w), wf: lerp(a.wf, b.wf), phase: a.phase || null, frame: a.frame != null ? a.frame : null };
+}
+
+// Parse the plugin's own history export (hyperex-history.json) into replay
+// recordings. Only cups that kept their raw telemetry are replayable; summary-
+// only rows (detailRetention stripped) are skipped. Returns array of
+// { source:'hyperex', title, runId, result, startedAt, duration, weightEnd,
+//   frames:[{t,p,f,tp,tf,g,m,tt,w,wf,phase,frame}], phaseDriven:true }.
+function historyRecordings(fileText) {
+  const json = JSON.parse(fileText);
+  const out = [];
+  const pushRun = (run, idxLabel) => {
+    if (!run || typeof run !== 'object') return;
+    const raw = Array.isArray(run.rawScaleSamples) ? run.rawScaleSamples
+      : Array.isArray(run.samples) ? run.samples : null;
+    if (!raw || !raw.length) return;
+    const frames = [];
+    for (const x of raw) {
+      const tMs = Number(x.tMs);
+      if (!Number.isFinite(tMs)) continue;
+      frames.push({
+        t: tMs / 1000,
+        p: Number.isFinite(Number(x.pressureBar)) ? Number(x.pressureBar) : 0,
+        f: Number.isFinite(Number(x.machineFlowMlS)) ? Number(x.machineFlowMlS) : 0,
+        tp: 0,
+        tf: Number.isFinite(Number(x.targetFlowMlS)) ? Number(x.targetFlowMlS) : 0,
+        g: 90, m: 89, tt: 90,
+        w: Number.isFinite(Number(x.weightG)) ? Number(x.weightG) : 0,
+        wf: Number.isFinite(Number(x.decaidWeightFlowGS)) ? Number(x.decaidWeightFlowGS) : (Number.isFinite(Number(x.rawDwDtGS)) ? Number(x.rawDwDtGS) : 0),
+        phase: x.phase || 'stage1',
+        frame: Number.isFinite(Number(x.profileFrame)) ? Number(x.profileFrame) : 0,
+      });
+    }
+    if (!frames.length) return;
+    const last = frames[frames.length - 1];
+    out.push({
+      source: 'hyperex',
+      title: (run.profileTitle || 'HyperEx 历史') + ' · ' + (run.runId || idxLabel || ''),
+      runId: run.runId || null,
+      result: run.result ? String(run.result) : '',
+      pluginVersion: run.pluginVersion || json.pluginVersion || '',
+      startedAt: run.startedAt || run.exportedAt || '',
+      duration: last.t,
+      preinfusionStopSec: 0.5,
+      weightEnd: last.w,
+      frames,
+      phaseDriven: true,
+    });
+  };
+  // Newer export shape: { shots:[...] } or { latestRun, history:{shots:[...]} }.
+  if (Array.isArray(json.shots)) json.shots.forEach((r, i) => pushRun(r, String(i)));
+  else if (json.latestRun) pushRun(json.latestRun, 'latest');
+  if (json.history && Array.isArray(json.history.shots)) {
+    json.history.shots.forEach((r, i) => pushRun(r, String(i)));
+  }
+  return out;
 }
 
 const HOOKS = [
@@ -305,15 +360,26 @@ async function runShot(params) {
     p[key] = { ...defaults[key], ...(input[key] || {}) };
   }
 
-  // Replay mode: drive the machine from a real recorded shot (official Streamline
-  // demo sim_shots.json) instead of the hydraulic plant. Recording is one
-  // continuous espresso, so force continuous mode; the plugin's frame state
-  // machine still runs, but flow/pressure/weight come from the recording.
-  const recordingsList = recordings();
-  const replay = (input.replay && Number.isInteger(input.replay.index) && recordingsList[input.replay.index])
-    ? recordingsList[input.replay.index]
-    : null;
-  if (replay) p.mode = 'continuous';
+  // Replay mode: drive the machine from a real recorded shot instead of the
+  // hydraulic plant. Two sources:
+  //  - official Streamline demo sim_shots.json (recording.index) — one
+  //    continuous espresso, so force continuous mode;
+  //  - the plugin's own history export hyperex-history.json (recording.file +
+  //    recording.index) — carries per-sample phase (stage1/dumping/soak/
+  //    restart_wait/stage2/stage3/finishing), so the machine state follows the
+  //    recording's real sequence and the plugin's active release flow is kept.
+  // In both, flow/pressure/weight come from the recording; the plugin's frame
+  // state machine still runs.
+  let replay = null;
+  if (input.replay && input.replay.file) {
+    const recs = historyRecordings(fs.readFileSync(input.replay.file, 'utf8'));
+    const idx = Number.isInteger(input.replay.index) ? input.replay.index : recs.length - 1;
+    replay = recs[idx] || null;
+  } else if (input.replay && Number.isInteger(input.replay.index)) {
+    const recordingsList = recordings();
+    replay = recordingsList[input.replay.index] || null;
+  }
+  if (replay && !replay.phaseDriven) p.mode = 'continuous';
   // Replay is review semantics for a finished real shot: the machine no longer
   // answers the plugin, so use the machine envelope pressure ceiling instead of
   // the plugin's 8 bar protection (pass hardPressureLimit: 8 to observe the
@@ -354,6 +420,10 @@ async function runShot(params) {
 
   // S3 timed subframes advance by profile time, like the machine does.
   let frameEnteredAt = 0, autoFrame = m.frame;
+  // Replay runs on its own recording clock: the plugin may request espresso a
+  // second time (active release restart), which resets machine.shotStartSec,
+  // so the recording timeline must be anchored to the first t instead.
+  let replayStart = null;
 
   while (t < p.maxSeconds) {
     await env.advance(dt * 1000);
@@ -409,17 +479,37 @@ async function runShot(params) {
       targetMlS = MACHINE.maxFlowMlS;
     }
     if (useReplay) {
-      const elapsed = m.shotStartSec == null ? 0 : Math.max(0, t - m.shotStartSec);
+      if (replayStart == null) replayStart = t;
+      const elapsed = Math.max(0, t - replayStart);
       const rec = sampleRecording(replay, elapsed);
       m.machineFlow = Math.max(0, rec.f);
       m.pressure = Math.max(0, rec.p);
       cupFlow = Math.max(0, rec.wf);
       weight = Math.max(0, rec.w);
-      // Replay substate follows the recording's pour boundary (official
-      // simulateReplay semantics); plugin frame state is driven by skipStep.
-      if (elapsed < 0.5) m.substate = 'preparingForShot';
-      else if (elapsed < replay.preinfusionStopSec) m.substate = 'preinfusion';
-      else m.substate = 'pouring';
+      if (replay.phaseDriven) {
+        // Real recorded machine sequence (plugin history export): feed the
+        // plugin the same state/substate the real machine showed so its active
+        // release / soak / restart flow can follow it.
+        const ph = rec.phase || 'stage1';
+        if (ph === 'stage1' || ph === 'stage2' || ph === 'stage3' || ph === 'preinfusion') {
+          m.state = 'espresso';
+          m.substate = ph === 'preinfusion' ? 'preinfusion' : 'pouring';
+        } else if (ph === 'soak') {
+          m.state = 'idle'; m.substate = 'soak';
+        } else if (ph === 'restart_wait') {
+          m.state = 'idle'; m.substate = 'restart_wait';
+        } else if (ph === 'finishing') {
+          m.state = 'idle'; m.substate = 'finishing';
+        } else {
+          m.state = 'idle'; m.substate = 'idle'; // dumping / unknown
+        }
+      } else {
+        // Replay substate follows the recording's pour boundary (official
+        // simulateReplay semantics); plugin frame state is driven by skipStep.
+        if (elapsed < 0.5) m.substate = 'preparingForShot';
+        else if (elapsed < replay.preinfusionStopSec) m.substate = 'preinfusion';
+        else m.substate = 'pouring';
+      }
       if (elapsed >= replayLastT) {
         if (!replayEnded) {
           replayEnded = true;
@@ -519,7 +609,7 @@ async function runShot(params) {
   };
 }
 
-module.exports = { runShot, plantDefaults, PLUGIN_FILE, recordings };
+module.exports = { runShot, plantDefaults, PLUGIN_FILE, recordings, historyRecordings };
 
 if (require.main === module) {
   const params = process.argv[2] ? JSON.parse(process.argv[2]) : {};

@@ -14,6 +14,11 @@ function val(id, fallback) {
 
 function readParams() {
   const replayIdx = Number($('replayIdx').value);
+  const histShots = window.__histShots || [];
+  const histCup = Number(replayIdx) >= 0 && histShots.length ? histShots[Number(replayIdx) - window.__baseReplayCount] : null;
+  const replay = replayIdx >= 0
+    ? (histCup ? { file: $('histFile').value.trim(), index: histCup.index } : { index: replayIdx })
+    : null;
   return {
     mode: $('mode').value,
     targets: { s1: val('t1', 2), s2: val('t2', 5), s3: val('t3', 1.5) },
@@ -36,7 +41,7 @@ function readParams() {
       approachMs: val('rfAppr', 3000),
     },
     policy: $('policy').value,
-    replay: replayIdx >= 0 ? { index: replayIdx } : null,
+    replay,
     plant: {
       efficiency: val('pEff', 100) / 100,
       cupGain: val('pGain', 1.883),
@@ -260,13 +265,36 @@ render = function (r, p) { window.__last = r; _origRender(r, p); };
 // Fill replay titles from the server and lock the mode select while replaying.
 fetch('/api/replays').then((res) => res.json()).then((recs) => {
   const sel = $('replayIdx');
+  window.__baseReplayCount = recs.length;
   sel.innerHTML = '<option value="-1">关闭</option>' + recs.map((r) =>
     '<option value="' + r.index + '">' + r.title + '（' + r.duration.toFixed(0) + 's）</option>').join('');
   sel.addEventListener('change', () => {
     $('mode').disabled = Number(sel.value) >= 0;
-    if (Number(sel.value) >= 0) $('mode').value = 'continuous';
+    const isHistory = Number(sel.value) >= window.__baseReplayCount;
+    $('mode').value = isHistory ? 'active' : 'continuous';
   });
 }).catch(() => {});
+
+$('histLoad').addEventListener('click', async () => {
+  const file = $('histFile').value.trim();
+  if (!file) { $('status').textContent = '失败：请填历史 JSON 路径'; return; }
+  try {
+    const res = await fetch('/api/history?file=' + encodeURIComponent(file));
+    const data = await res.json();
+    if (!res.ok || !data.cups) throw new Error(data.error || ('HTTP ' + res.status));
+    window.__histShots = data.cups;
+    const sel = $('replayIdx');
+    const base = window.__baseReplayCount || 0;
+    sel.innerHTML = '<option value="-1">关闭</option>' +
+      Array.from({ length: base }, (_, i) => '<option value="' + i + '">官方录制 #' + i + '</option>').join('') +
+      data.cups.map((c) => '<option value="' + (base + c.index) + '">' + c.title + '（' + c.duration.toFixed(0) + 's · ' + (c.result || '') + '）</option>').join('');
+    window.__baseReplayCount = base;
+    sel.value = '-1';
+    $('status').textContent = '已载入 ' + data.cups.length + ' 杯可回放历史';
+  } catch (e) {
+    $('status').textContent = '失败：' + (e.message || e);
+  }
+});
 
 run();
 

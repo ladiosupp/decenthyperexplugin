@@ -79,7 +79,28 @@ Decaid 的 `skipStep` 语义（推进一个 profile step、重置计时）、`es
   紧急中止而看不到分析）；想验证真实保护行为，传 `hardPressureLimit: 8`。
 - 录制只到 ~34 g，S2 触发 40 g / 100 g 结束不会走到，插件会如实停在录制能提供的阶段。
 
+
+## 回放插件导出的历史 JSON（hyperex-history.json）
+
+页面「历史 JSON 路径」填插件诊断页导出的 hyperex-history.json（或任意同构导出），
+点「载入历史杯」列出**保留了原始时序**的杯（被 detailRetention 裁掉时序的历史行
+不可回放）。选中后机器按录制帧插值播放，且**带 phase 的录制会把真实状态序列喂给
+插件**（stage1 → dumping/soak/restart_wait → stage2 → stage3 → finishing 对应
+espresso / idle / soak / …），所以主动泄压双杯流程、GHC 重启、scale tare/reset
+都能按录制的真实节奏复盘：
+
+```
+node sim/harness.js '{"replay":{"file":"C:/Users/ladios/Downloads/hyperex-history.json","index":0}}'
+```
+
+- 与官方 demo 录制不同，这里**不强制 continuous、不强制 11 bar**：保持插件默认
+  压力保护（要放宽就传 hardPressureLimit: 11），机器状态完全按录制相位走。
+- 重量用录制原始秤读数（weightG），插件在 tare/reset 时自己衔接累计（日志可见
+  "Detected scale tare/reset … carrying cumulative"），与真机一致。
+- 回放跑的是当前 plugin.js（1.79ds），数值口径与录制当时（0.1.77）的分析可不同
+  ——这正是复盘目的：看现在的控制/学习逻辑在真实曲线下会怎么判。
+
 ## 边界
 
-这是趋势工具，不是真机复现：没有 Decaid 的 profile 校验、上报时序、GHC 交互、真实泵/阀特性和秤的滤波延迟，也没有历史存储的异步行为。用它回答「这个参数会不会更容易过冲 / 补水是否太猛 / S3 投影会不会被抬回去」，不要用它断言某杯真机的绝对流量。回放模式是复盘工具，不承诺结局与真机一致（录制只到 34 g，且插件对 >8 bar 的保护行为取决于传入的 `hardPressureLimit`）。
+这是趋势工具，不是真机复现：没有 Decaid 的 profile 校验、上报时序、GHC 交互、真实泵/阀特性和秤的滤波延迟，也没有历史存储的异步行为。用它回答「这个参数会不会更容易过冲 / 补水是否太猛 / S3 投影会不会被抬回去」，不要用它断言某杯真机的绝对流量。回放模式是复盘工具，不承诺结局与真机一致（官方 demo 录制只到 34 g；hyperex 历史回放的压力保护/学习口径取决于当前插件版本）。
 

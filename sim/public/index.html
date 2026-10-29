@@ -49,6 +49,8 @@ canvas{width:100%;height:180px;display:block}
   <fieldset><legend>出杯</legend>
     <label>模式<select id="mode"><option value="active">主动泄压 ON</option><option value="continuous">连续出杯 OFF</option></select></label>
     <label>回放出杯<select id="replayIdx"><option value="-1">关闭</option><option value="0">录制 #0</option><option value="1">录制 #1</option><option value="2">录制 #2</option></select></label>
+    <label>历史 JSON 路径<input id="histFile" type="text" placeholder="C:/Users/ladios/Downloads/hyperex-history.json"></label>
+    <label><button class="ghost" id="histLoad" style="width:100%;margin-top:2px">载入历史杯</button></label>
     <label>S1 目标 g/s<input id="t1" type="number" step="0.1" min="0.3" max="6.5" value="2"></label>
     <label>S2 目标 g/s<input id="t2" type="number" step="0.1" min="0.3" max="6.5" value="5"></label>
     <label>S3 目标 g/s<input id="t3" type="number" step="0.1" min="0.3" max="6.5" value="1.5"></label>

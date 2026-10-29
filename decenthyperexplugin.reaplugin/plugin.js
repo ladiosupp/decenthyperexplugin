@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "1.79ds";
+  const PLUGIN_VERSION = "1.80ds";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -878,6 +878,14 @@ function createPlugin(host) {
       originalCommandMlS:b,originalMeasuredGS:Number(previous.measured),comparisonModel:"nearby-command local proportional model"};
   }
   function s2AdaptiveSuggestion(run,current,previous) {
+    const chain=current&&current.liveTrimChain;
+    if(chain){
+      const target=Number(run&&run.config&&run.config.stage2Flow);
+      if(!chain.usable)return {usable:false,action:"SATURATED / HOLD",confidence:"LOW",targetGS:round(target,3),reason:chain.reason+"; hold the next-shot S2 command",maxStepRule:"single-shot chain: command rose but cup flow did not; do not learn a LUT offset"};
+      const need=chain.gain>0?chain.startCommandMlS+(target-chain.startGS)/chain.gain:chain.commandMlS;
+      const suggested=clampCommandFlow(Math.max(chain.startCommandMlS,Math.min(LIMITS.commandFlowMax,chain.commandMlS+(need-chain.commandMlS)*0.9)));
+      return {usable:true,action:"LUT COMPENSATE",confidence:"MEDIUM",targetGS:round(target,3),currentCommandMlS:round(chain.commandMlS,3),measuredGS:round(chain.endGS,3),suggestedCommandMlS:round(suggested,3),errorPct:round((chain.endGS/target-1)*100,1),maxStepRule:"single-shot chain: reverse the measured gain, 0.9 damping, bounded by the command limit",reason:chain.reason+"; chain "+chain.startCommandMlS+"->"+chain.commandMlS+" ml/s moved cup flow "+chain.startGS+"->"+chain.endGS+" g/s (gain "+round(chain.gain,2)+"); next shot "+round(suggested,3)+" ml/s"};
+    }
     const policy=learningPolicy(run&&run.config&&run.config.adaptiveLearningLevel),q=controlOutputQuality(run,"stage2"),err=current&&current.targetGS>0?(Number(current.measured)/Number(current.targetGS)-1)*100:0;
     const large=!!(current&&q.available&&q.windows>=2&&q.tailRippleCVPct<=12&&Math.abs(err)>=20&&Math.abs(q.tailErrorPct)>=15&&Math.sign(err)===Math.sign(q.tailErrorPct));
     return {...scalarLearningSuggestion("S2","s2",current,previous,policy,large),outputQuality:q};
@@ -1997,6 +2005,11 @@ function createPlugin(host) {
 
 
   function stage2AdaptiveEvidence(run) {
+    const chain=liveTrimChainEvidence(run);
+    if(chain){
+      const target=Number(desiredRealForRunPhase(run,"stage2"));
+      if(Number.isFinite(target)&&target>0)return {measurementBasis:"single-shot command chain",runId:run.runId,targetGS:round(target,3),command:round(chain.commandMlS,3),measured:round(chain.endGS,3),errorPct:round((chain.endGS/target-1)*100,1),confidence:"MEDIUM",r2:null,seconds:null,liveTrimChain:chain};
+    }
     const controlled=controlLearningAssessment(run,"stage2");
     if(controlled.applicable)return controlled.eligible?controlled.evidence:null;
     run = liveTrimLearningView(run, "stage2");
@@ -2820,7 +2833,7 @@ function createPlugin(host) {
       const decision=key==="s1"?s1:key==="s2"?s2:s3;
       if (!guard.eligible) Object.assign(decision,{usable:false,action:"LIMITED / HOLD",confidence:"INSUFFICIENT",reason:guard.reason,actuatorGuard:guard});
     }
-    const actionable=!!((s1.usable&&s1.action==="ADJUST"&&Number.isFinite(Number(s1.suggestedCommandMlS)))||(s2.usable&&s2.action==="ADJUST"&&Number.isFinite(Number(s2.suggestedCommandMlS)))||(s3.usable&&s3.suggestedShape));
+    const actionable=!!((s1.usable&&s1.action==="ADJUST"&&Number.isFinite(Number(s1.suggestedCommandMlS)))||(s2.usable&&(s2.action==="ADJUST"||s2.action==="LUT COMPENSATE")&&Number.isFinite(Number(s2.suggestedCommandMlS)))||(s3.usable&&s3.suggestedShape));
     if(liveS2.applicable)s2.outputQuality=liveS2.outputQuality;
     if(liveS3.applicable){s3.outputQuality=liveS3.outputQuality;s3.evidenceBasis=liveS3.basis;if(liveS3.eligible)s3.reason=liveS3.reason+"; "+s3.reason;}
     return {usable:!!(s1.usable||s2.usable||s3.usable),actionable,basketContext:run.config.basketContext||"unknown",actuatorGuards,runId:run.runId,mode:"SHOT-TO-SHOT ONLY",learningLevel:policy.name,s1,s2,s3,note:run.config.experimentalLiveTrim?"Experimental live trim ran in this shot. This table proposes NEXT-SHOT changes only; normalized response is a local model. Actual RAW tracking metrics remain separate; LUT unchanged.":"All three stages use completed-shot evidence only. No running-shot scale control, no extra skipStep calls, and the calibration LUT is never rewritten."};
@@ -2860,7 +2873,7 @@ function createPlugin(host) {
     if (suggestion.s1 && suggestion.s1.usable && suggestion.s1.action === "ADJUST" && Number.isFinite(Number(suggestion.s1.suggestedCommandMlS))) {
       stages.stage1 = { mode:"manual",origin:"adaptive", command:round(clampCommandFlow(Number(suggestion.s1.suggestedCommandMlS)),3) };
     }
-    if (suggestion.s2 && suggestion.s2.usable && suggestion.s2.action === "ADJUST" && Number.isFinite(Number(suggestion.s2.suggestedCommandMlS))) {
+    if (suggestion.s2 && suggestion.s2.usable && (suggestion.s2.action === "ADJUST" || suggestion.s2.action === "LUT COMPENSATE") && Number.isFinite(Number(suggestion.s2.suggestedCommandMlS))) {
       stages.stage2 = { mode:"manual",origin:"adaptive", command:round(clampCommandFlow(Number(suggestion.s2.suggestedCommandMlS)),3) };
     }
 
@@ -2887,7 +2900,7 @@ function createPlugin(host) {
           throw new Error(`S1 adaptive readback mismatch: expected ${expectedS1}, got ${actualS1}`);
         }
       }
-      if (suggestion.s2 && suggestion.s2.usable && suggestion.s2.action === "ADJUST") {
+      if (suggestion.s2 && suggestion.s2.usable && (suggestion.s2.action === "ADJUST" || suggestion.s2.action === "LUT COMPENSATE")) {
         const expectedS2 = round(clampCommandFlow(Number(suggestion.s2.suggestedCommandMlS)),3);
         const actualS2 = manualTestCommand("stage2");
         if (!Number.isFinite(actualS2) || Math.abs(Number(actualS2) - expectedS2) > 0.001) {
@@ -2976,7 +2989,7 @@ function createPlugin(host) {
       proposalMatchesWorkflow=!!(contextStable && commands);
       for (const [key,field] of [["s1","stage1CommandMlS"],["s2","stage2CommandMlS"]]) {
         const q=proposal[key];
-        if (q && q.usable && q.action==="ADJUST") proposalMatchesWorkflow=proposalMatchesWorkflow && close(commands&&commands[field],q.suggestedCommandMlS);
+        if (q && q.usable && (q.action==="ADJUST"||q.action==="LUT COMPENSATE")) proposalMatchesWorkflow=proposalMatchesWorkflow && close(commands&&commands[field],q.suggestedCommandMlS);
       }
       if (proposal.s3 && proposal.s3.usable && proposal.s3.suggestedShape) {
         const shape=commands && commands.s3Shape;
@@ -3591,7 +3604,7 @@ function renderChart(svg,series,ymin,ymax,markers,tickVals){if(!svg)return;let a
 function liveTrimMarkers(run){return(run.liveFlowTrim&&run.liveFlowTrim.trace||[]).filter(x=>['check','write','machine-target-response'].includes(x.kind)).map(x=>{const delta=Number.isFinite(x.previousMlS)&&Number.isFinite(x.commandMlS)?x.commandMlS-x.previousMlS:null;const direction=x.kind==='write'?(x.retry?'retry':delta===null?'unknown':delta>0?'up':delta<0?'down':'retry'):null;return {x:x.tMs/1000,y:x.kind==='check'?x.rawGS:(Number.isFinite(Number(x.rawGS))?Number(x.rawGS):x.commandMlS),size:delta===null?null:Math.max(2,Math.round(Math.abs(delta)*48)),shape:x.kind==='write'?direction:x.kind==='machine-target-response'?'square':'circle',color:x.kind==='write'?'#ff9c45':x.kind==='machine-target-response'?'#f4e6a5':x.rawGS==null?'#7c8795':'#63d89b',label:(x.kind==='write'?(direction==='retry'?'同值重试 ↻':direction==='up'?'上调指令 ↑':direction==='down'?'下调指令 ↓':'写入指令（方向未知）'):x.kind)+' @ '+(x.tMs/1000).toFixed(2)+'s · '+(x.kind==='check'?(x.rawGS==null?'no valid RAW regression':x.rawGS+' g/s')+' · '+(x.reason||x.decision):x.commandMlS+' ml/s')+(delta!==null&&x.kind==='write'?' · '+x.previousMlS+' → '+x.commandMlS+' ml/s':'')+(x.startupAction?' · '+(x.startupAction==='return'?'补水收回':'补水增强')+(x.startupReason?' · '+x.startupReason:''):'')}})}
 function renderLiveTrim(run){const q=$('livetrimstatus');if(!q)return;const x=run&&run.liveFlowTrim;if(!x){q.textContent='';return}q.textContent='EXPERIMENTAL LIVE FLOW TRIM · level '+(x.level||1)+' · '+x.status+' · checks '+x.checks+'/'+(x.maxChecks||50)+' · writes '+x.writes+'/'+(x.maxWrites||50)+' · driver ACK '+x.acks+' · trend confirms '+x.targetConfirmations+' · unresponsive '+(x.targetMisses||0)+' / streak '+(x.consecutiveTargetMisses||0)+' · vector redispatch '+(x.retries||0)+' · interval '+x.periodMs+' ms'+(x.zeroDegreeShare===null?'':' · 0° share '+Math.round(x.zeroDegreeShare*100)+'% · mean angle '+x.meanAngleDeg+'°')+' · vector angle '+(x.vectorAngleDeg==null?'—':x.vectorAngleDeg+'°')+' · big-angle streak '+(x.bigAngleStreak||0)+' · next-shot band ±'+esc(x.learningBand||8)+'%; confirmed windows pooled with labelled seed-normalization model';}
 function renderCharts(run){if(!run)return;lastChartRun=run;const chart=extractionChartData(run),combined=chart.combined,raw=chart.raw,chartRun={...run,liveFlowTrim:{...(run.liveFlowTrim||{}),trace:chart.trace}};const target=extractionChartPoints(combined,'targetFlowMlS'),machine=extractionChartPoints(combined,'machineFlowMlS'),decaid=extractionChartPoints(combined,'decaidWeightFlowGS');const cupTarget=extractionChartPoints(combined,'desiredRealFlowGS');const rawSlope=[];let rawSegment=null,segmentStart=0;for(let i=0;i<raw.length;i++){if(rawSegment!==raw[i]._chartSegment){if(rawSegment!==null){const prev=raw[i-1];if(prev&&prev._chartGroup==='stage1'&&raw[i]._chartGroup==='brew')rawSlope.push([Number(prev.tMs)/1000,0],[Number(raw[i].tMs)/1000,0]);else rawSlope.push([Number(raw[i].tMs)/1000,NaN]);}rawSegment=raw[i]._chartSegment;segmentStart=i;}let j=i-1;while(j>segmentStart&&Number(raw[i].tMs)-Number(raw[j].tMs)<900)j--;if(j>=segmentStart){let reset=false;for(let k=j+1;k<=i;k++)if(raw[k].tareReset){reset=true;break}const dt=(Number(raw[i].scaleTimestampSeconds)-Number(raw[j].scaleTimestampSeconds));if(!reset&&Number.isFinite(dt)&&dt>.25){rawSlope.push([Number(raw[i].tMs)/1000,(Number(raw[i].weightG)-Number(raw[j].weightG))/dt])}}}const trendPts=[];for(const x of (chart.trace||[]))if((x.kind==='check'||x.kind==='write')&&Number.isFinite(Number(x.rawGS)))trendPts.push([Number(x.tMs)/1000,Number(x.rawGS)]);const trendSmooth=trendPts.map((p,i)=>{const a=trendPts.slice(Math.max(0,i-1),Math.min(trendPts.length,i+2));return [p[0],a.reduce((s,q)=>s+q[1],0)/a.length]});const flowYs=[...target,...machine,...decaid,...rawSlope].map(p=>p[1]).filter(v=>Number.isFinite(v)&&v>-1&&v<20);const fymax=Math.max(6,flowYs.length?Math.min(12,Math.ceil(Math.max(...flowYs)+.5)):8);renderChart($('flowchart'),[{key:'cup',points:cupTarget,stroke:'#f58d9a',width:1.3},{key:'target',points:target,stroke:'#f0c75e',width:1.4},{key:'machine',points:machine,stroke:'#71a7ff',width:1.8},{key:'decaid',points:decaid,stroke:'#c77dff',width:1.5,opacity:.8},{key:'raw',points:rawSlope,stroke:'#63d89b',width:2.1},{key:'trend',points:trendSmooth,stroke:'#8fd7ff',width:1.3,opacity:.9},{key:'writes',points:extractionChartPoints(chart.trace.filter(x=>x.kind==='write'),'commandMlS'),stroke:'#ff9c45',width:2}].filter(x=>flowSeriesVisible[x.key]),0,fymax,liveTrimMarkers(chartRun).filter(x=>x.shape==='circle'?flowSeriesVisible.raw:x.shape==='square'?flowSeriesVisible.target:flowSeriesVisible.writes));const anglePts=[];for(const x of (chart.trace||[]))if(x.kind==='check'&&Number.isFinite(Number(x.trendAngleDeg)))anglePts.push([Number(x.tMs)/1000,Number(x.trendAngleDeg)]);if($('anglechart')){if(anglePts.length)renderChart($('anglechart'),[{key:'angle',points:anglePts,stroke:'#ffd166',width:1.8}],0,180,null,[90]);else $('anglechart').innerHTML='';}const wp=extractionChartPoints(raw,'weightG');if(wp.length){const wy=wp.map(p=>p[1]).filter(Number.isFinite);renderChart($('weightchart'),[{points:wp,stroke:'#e5e8ed',width:2}],Math.min(...wy),Math.max(...wy))}else if($('weightchart'))$('weightchart').innerHTML=''}
-function renderNextDecision(s){const el=$('nextdecision');if(!el)return;const a=s&&s.nextShotAdaptive;if(!a){el.textContent=s&&(s.learningReview&&s.learningReview.excluded||s.learningIntegrity&&s.learningIntegrity.eligible===false)?'Shot excluded from learning; see history review.':'尚无完整杯数据；请按正常流程出杯。';return}const manual=latestManualCurveSource&&String(latestManualCurveSource.afterRunId||'')===String(a.runId||''),st=latestAutoApplyStatus||{},matching=String(st.runId||'')===String(a.runId||'');let h='<b>下一杯决策 · 输出偏差与调整资格分别判断</b>';for(const [label,key] of [['S1','s1'],['S2','s2'],['S3','s3']]){const x=a[key]||{},p=s['stage'+label.slice(1)]||{};let status=manual?'手动曲线已替代此杯建议':x.usable!==false&&(x.action==='ADJUST'||x.suggestedShape)?(matching&&['applied','manual-applied'].includes(st.status)?'已校验应用':matching&&st.status==='error'?'应用失败，保留原曲线':latestAutoApplyEnabled?'有调整建议，等待校验应用':'有调整建议，自动应用已关闭'):x.action==='HOLD'?(x.actualDirectionGuard&&x.actualDirectionGuard.blocked?'实测与模型方向冲突，保持':'保持当前指令'):String(x.action||'').includes('VARIABLE')?'杯间差异较大，暂不自动追调':String(x.action||'').includes('LIMITED')?'受压力／执行条件限制':'等待可比学习证据';h+='<div class="m"><b>'+label+' · '+esc(p.validationStatus||'—')+' '+(p.rawErrorPct==null?'':esc(p.rawErrorPct)+'%')+' → '+esc(status)+'</b><br>'+esc(x.reason||'尚无学习证据')+(x.historySearch?'<br><span class="small">History checked: '+esc(x.historySearch.checked)+' · missing stage: '+esc(x.historySearch.missingStage)+' · context mismatch: '+esc(x.historySearch.skippedContext)+' · command mismatch: '+esc(x.historySearch.incompatibleCommands)+' · storage excluded: '+esc(x.historySearch.skippedStorage)+' · basis mismatch: '+esc(x.historySearch.incompatibleBasis||0)+' · nearby command comparisons: '+esc(x.historySearch.nearbyCommandComparisons||0)+' · matched run: '+esc(x.historySearch.matchedRunId||'none')+'</span>':'')+'</div>'}if(!manual)h+='<div class="small">若需主动调整，可使用上方“下一杯 · 曲线编辑”；修改后需应用并校验。</div>';const selected=s.learningPolicy||{};h+='<div class="small">Learning strength: '+esc(selected.name||'—')+' · Admission width: '+esc(selected.qualityWidth||1)+'×</div>';const audit=s.historyPersistence||{};h+='<div class="m"><b>History persistence</b><br>'+esc(audit.status||'—')+' · '+esc(audit.records||0)+' records · '+esc(audit.bytes||0)+' bytes<br>'+esc(audit.detail||'')+'</div>';const m=s.stage2Startup||{},plan=s.stage2StartupNext||{},execution=s.liveFlowTrim&&s.liveFlowTrim.startupExecution||{};h+='<div class="m"><b>S2 startup response</b><br>'+esc(m.reason||'S2 startup data insufficient')+'<br>Response delay: '+esc(m.firstResponseDelayS==null?'—':m.firstResponseDelayS)+' s · 20–80% rise: '+esc(m.rise20to80S==null?'—':m.rise20to80S)+' s · Rise basis: '+esc(m.riseBasis||'target')+' · Tail error: '+esc(m.tailErrorPct==null?'—':m.tailErrorPct)+'%<br>Next startup: '+esc(plan.reason||'S2 startup needs two comparable clean shots')+(plan.enabled?(plan.strategy==='refill-85'?' · '+esc(plan.baseCommandMlS)+' → '+esc(plan.boostCommandMlS)+' ml/s · '+esc(Math.round((plan.refillTargetFraction||1)*100))+'% base pump flow · '+esc(Math.round(plan.cutoffFraction*100))+'% cutoff · max '+esc(plan.holdMs)+' ms':' · +'+esc(plan.boostQuanta)+'/16 ml/s × '+esc(plan.holdMs)+' ms'):'')+(plan.returnCommandMlS!=null?' · 接管指令 '+esc(plan.returnCommandMlS)+' ml/s':'')+(s.stage2CupOnset?'<br>'+(s.stage2CupOnset.detected?'S2有效称流起点：'+esc((s.stage2CupOnset.startMs/1000).toFixed(2))+' s · 出液前等待 '+esc(s.stage2CupOnset.delayS)+' s，不计入合格与学习窗口':'S2尚未检测到持续有效出液；暂不计算流量合格判定'):'')+'<br>Executed startup boost: '+esc(m.pulseUsed?'YES':'NO')+' · '+esc(execution.status||'not-planned')+'<br>'+esc(execution.reason||'')+'</div>';const tl=s.s2RefillTimeline||{};if(tl.stage2StartMs!=null||tl.onsetMs!=null){const pct=plan.cutoffFraction!=null?Math.round(plan.cutoffFraction*100):null,relS=v=>v==null?'—':Number(v).toFixed(2)+' s';h+='<div class="m"><b>S2 补水节点</b><br>帧确认 0.00 s · onset '+relS(tl.relative&&tl.relative.onsetS)+'（S2 起点）'+(tl.cutoffAtMs!=null?' · 杯流 '+esc(pct==null?'—':pct)+'% '+relS(tl.relative&&tl.relative.cutoffS):'')+(tl.relative&&tl.relative.returnS!=null?' · 收回 '+relS(tl.relative&&tl.relative.returnS):'')+(tl.relative&&tl.relative.completeS!=null?' · 确认 '+relS(tl.relative&&tl.relative.completeS):'')+'<br>'+(tl.overlap?'S2 与补水重叠 '+esc(tl.overlap.seconds)+' s（onset → 收回）':'S2 与补水无重叠')+'</div>'}const gains=[['S2',a.s2&&a.s2.gainFeedForward],['S3',a.s3&&a.s3.gainFeedForward]].filter(x=>x[1]);if(gains.length)h+='<div class="m">'+gains.map(([n,g])=>g.k==null?'<b>'+n+' 稳态增益 k</b><br>样本 '+esc(g.samples||0)+' 杯 · 需 ≥2 杯同段干净记录':'<b>'+n+' 稳态增益 k</b><br>k '+esc(g.k)+' · 样本 '+esc(g.samples)+' · 离散 '+esc(Number(g.spread*100).toFixed(1))+'%<br>当前指令 '+esc(g.currentCommandMlS)+' → 目标折算 '+esc(g.targetCommandMlS)+' · 限幅后 '+esc(g.boundedCommandMlS)+' ml/s'+(g.applied?' · 已应用':'')).join('<br>')+'</div>';el.innerHTML=h}
+function renderNextDecision(s){const el=$('nextdecision');if(!el)return;const a=s&&s.nextShotAdaptive;if(!a){el.textContent=s&&(s.learningReview&&s.learningReview.excluded||s.learningIntegrity&&s.learningIntegrity.eligible===false)?'Shot excluded from learning; see history review.':'尚无完整杯数据；请按正常流程出杯。';return}const manual=latestManualCurveSource&&String(latestManualCurveSource.afterRunId||'')===String(a.runId||''),st=latestAutoApplyStatus||{},matching=String(st.runId||'')===String(a.runId||'');let h='<b>下一杯决策 · 输出偏差与调整资格分别判断</b>';for(const [label,key] of [['S1','s1'],['S2','s2'],['S3','s3']]){const x=a[key]||{},p=s['stage'+label.slice(1)]||{};let status=manual?'手动曲线已替代此杯建议':x.usable!==false&&(x.action==='ADJUST'||x.action==='LUT COMPENSATE'||x.suggestedShape)?(matching&&['applied','manual-applied'].includes(st.status)?'已校验应用':matching&&st.status==='error'?'应用失败，保留原曲线':latestAutoApplyEnabled?'有调整建议，等待校验应用':'有调整建议，自动应用已关闭'):x.action==='HOLD'?(x.actualDirectionGuard&&x.actualDirectionGuard.blocked?'实测与模型方向冲突，保持':'保持当前指令'):String(x.action||'').includes('SATURATED')?'加码未触发杯流响应，保持下一杯指令':String(x.action||'').includes('VARIABLE')?'杯间差异较大，暂不自动追调':String(x.action||'').includes('LIMITED')?'受压力／执行条件限制':'等待可比学习证据';h+='<div class="m"><b>'+label+' · '+esc(p.validationStatus||'—')+' '+(p.rawErrorPct==null?'':esc(p.rawErrorPct)+'%')+' → '+esc(status)+'</b><br>'+esc(x.reason||'尚无学习证据')+(x.historySearch?'<br><span class="small">History checked: '+esc(x.historySearch.checked)+' · missing stage: '+esc(x.historySearch.missingStage)+' · context mismatch: '+esc(x.historySearch.skippedContext)+' · command mismatch: '+esc(x.historySearch.incompatibleCommands)+' · storage excluded: '+esc(x.historySearch.skippedStorage)+' · basis mismatch: '+esc(x.historySearch.incompatibleBasis||0)+' · nearby command comparisons: '+esc(x.historySearch.nearbyCommandComparisons||0)+' · matched run: '+esc(x.historySearch.matchedRunId||'none')+'</span>':'')+'</div>'}if(!manual)h+='<div class="small">若需主动调整，可使用上方“下一杯 · 曲线编辑”；修改后需应用并校验。</div>';const selected=s.learningPolicy||{};h+='<div class="small">Learning strength: '+esc(selected.name||'—')+' · Admission width: '+esc(selected.qualityWidth||1)+'×</div>';const audit=s.historyPersistence||{};h+='<div class="m"><b>History persistence</b><br>'+esc(audit.status||'—')+' · '+esc(audit.records||0)+' records · '+esc(audit.bytes||0)+' bytes<br>'+esc(audit.detail||'')+'</div>';const m=s.stage2Startup||{},plan=s.stage2StartupNext||{},execution=s.liveFlowTrim&&s.liveFlowTrim.startupExecution||{};h+='<div class="m"><b>S2 startup response</b><br>'+esc(m.reason||'S2 startup data insufficient')+'<br>Response delay: '+esc(m.firstResponseDelayS==null?'—':m.firstResponseDelayS)+' s · 20–80% rise: '+esc(m.rise20to80S==null?'—':m.rise20to80S)+' s · Rise basis: '+esc(m.riseBasis||'target')+' · Tail error: '+esc(m.tailErrorPct==null?'—':m.tailErrorPct)+'%<br>Next startup: '+esc(plan.reason||'S2 startup needs two comparable clean shots')+(plan.enabled?(plan.strategy==='refill-85'?' · '+esc(plan.baseCommandMlS)+' → '+esc(plan.boostCommandMlS)+' ml/s · '+esc(Math.round((plan.refillTargetFraction||1)*100))+'% base pump flow · '+esc(Math.round(plan.cutoffFraction*100))+'% cutoff · max '+esc(plan.holdMs)+' ms':' · +'+esc(plan.boostQuanta)+'/16 ml/s × '+esc(plan.holdMs)+' ms'):'')+(plan.returnCommandMlS!=null?' · 接管指令 '+esc(plan.returnCommandMlS)+' ml/s':'')+(s.stage2CupOnset?'<br>'+(s.stage2CupOnset.detected?'S2有效称流起点：'+esc((s.stage2CupOnset.startMs/1000).toFixed(2))+' s · 出液前等待 '+esc(s.stage2CupOnset.delayS)+' s，不计入合格与学习窗口':'S2尚未检测到持续有效出液；暂不计算流量合格判定'):'')+'<br>Executed startup boost: '+esc(m.pulseUsed?'YES':'NO')+' · '+esc(execution.status||'not-planned')+'<br>'+esc(execution.reason||'')+'</div>';const tl=s.s2RefillTimeline||{};if(tl.stage2StartMs!=null||tl.onsetMs!=null){const pct=plan.cutoffFraction!=null?Math.round(plan.cutoffFraction*100):null,relS=v=>v==null?'—':Number(v).toFixed(2)+' s';h+='<div class="m"><b>S2 补水节点</b><br>帧确认 0.00 s · onset '+relS(tl.relative&&tl.relative.onsetS)+'（S2 起点）'+(tl.cutoffAtMs!=null?' · 杯流 '+esc(pct==null?'—':pct)+'% '+relS(tl.relative&&tl.relative.cutoffS):'')+(tl.relative&&tl.relative.returnS!=null?' · 收回 '+relS(tl.relative&&tl.relative.returnS):'')+(tl.relative&&tl.relative.completeS!=null?' · 确认 '+relS(tl.relative&&tl.relative.completeS):'')+'<br>'+(tl.overlap?'S2 与补水重叠 '+esc(tl.overlap.seconds)+' s（onset → 收回）':'S2 与补水无重叠')+'</div>'}const gains=[['S2',a.s2&&a.s2.gainFeedForward],['S3',a.s3&&a.s3.gainFeedForward]].filter(x=>x[1]);if(gains.length)h+='<div class="m">'+gains.map(([n,g])=>g.k==null?'<b>'+n+' 稳态增益 k</b><br>样本 '+esc(g.samples||0)+' 杯 · 需 ≥2 杯同段干净记录':'<b>'+n+' 稳态增益 k</b><br>k '+esc(g.k)+' · 样本 '+esc(g.samples)+' · 离散 '+esc(Number(g.spread*100).toFixed(1))+'%<br>当前指令 '+esc(g.currentCommandMlS)+' → 目标折算 '+esc(g.targetCommandMlS)+' · 限幅后 '+esc(g.boundedCommandMlS)+' ml/s'+(g.applied?' · 已应用':'')).join('<br>')+'</div>';el.innerHTML=h}
 function validationClass(x){return x==='HIT'?'good':x==='NEAR'||x==='TRANSIENT'?'':'bad'}
 function validationRow(label,p){if(!p)return '<tr><td>'+label+'</td><td colspan=7>—</td></tr>';return '<tr><td>'+label+'</td><td>'+esc(p.desiredRealFlowGS)+'</td><td>'+esc(p.machineFlowAvg)+'</td><td>'+esc(p.gflowAvg)+'</td><td><b>'+esc(p.rawRegressionGS)+'</b></td><td>'+esc(p.rawRegressionR2)+'</td><td>'+esc(p.rawRegressionSeconds)+'s</td><td class="'+validationClass(p.validationStatus)+'">'+esc(p.validationStatus)+' '+(p.rawErrorPct==null?'':('('+p.rawErrorPct+'%)'))+'</td></tr>'}
 function advisoryClass(a){return !a?'':a.action==='HOLD'?'good':a.confidence==='INSUFFICIENT'?'bad':''}
@@ -3610,7 +3623,7 @@ function renderAdaptive(s){
   const s1=a.s1||{},s2=a.s2||{},s3=a.s3||{},ready=!!a.actionable,st=latestAutoApplyStatus||{};
   const appliedForRun=String(st.runId||'')===String(a.runId||'')&&(st.status==='applied'||st.status==='manual-applied');
   const failedForRun=String(st.runId||'')===String(a.runId||'')&&st.status==='error';
-  const scalarRow=(label,x,basis)=>{let measured=x.measuredGS==null?'—':esc(x.measuredGS)+' g/s';if(x.previousGS!=null&&x.currentGS!=null)measured=esc(x.previousGS)+' → '+esc(x.currentGS)+' g/s · mean '+esc(x.measuredGS);let proposed='repeat';if(x.action==='HOLD')proposed='<span class="good"><b>HOLD '+esc(x.currentCommandMlS)+' ml/s</b></span>';else if(x.action==='ADJUST')proposed='<b>'+esc(x.suggestedCommandMlS)+' ml/s</b>';else if(x.action)proposed='<b>'+esc(x.action)+'</b>';return '<tr><td>'+label+'</td><td>'+basis+'<br>'+measured+(x.variabilityPct!=null?' · var '+esc(x.variabilityPct)+'%':'')+'</td><td>'+esc(x.currentCommandMlS)+' ml/s</td><td>'+proposed+'</td><td>'+esc(x.confidence||'—')+'</td></tr>'};
+  const scalarRow=(label,x,basis)=>{let measured=x.measuredGS==null?'—':esc(x.measuredGS)+' g/s';if(x.previousGS!=null&&x.currentGS!=null)measured=esc(x.previousGS)+' → '+esc(x.currentGS)+' g/s · mean '+esc(x.measuredGS);let proposed='repeat';if(x.action==='HOLD')proposed='<span class="good"><b>HOLD '+esc(x.currentCommandMlS)+' ml/s</b></span>';else if(x.action==='ADJUST'||x.action==='LUT COMPENSATE')proposed='<b>'+esc(x.suggestedCommandMlS)+' ml/s</b>';else if(x.action)proposed='<b>'+esc(x.action)+'</b>';return '<tr><td>'+label+'</td><td>'+basis+'<br>'+measured+(x.variabilityPct!=null?' · var '+esc(x.variabilityPct)+'%':'')+'</td><td>'+esc(x.currentCommandMlS)+' ml/s</td><td>'+proposed+'</td><td>'+esc(x.confidence||'—')+'</td></tr>'};
   let h='<div class="small">Learning strength: '+esc(a.learningLevel||'—')+'<br>Source run: <b>'+esc(a.runId)+'</b> · <b>'+esc(a.mode)+'</b> · all numeric changes below apply to the <b>NEXT SHOT ONLY</b>.</div><table><tr><th>Stage</th><th>Evidence</th><th>LEARNING seed / fixed command</th><th>NEXT action / command</th><th>Confidence</th></tr>';
   if(latestManualCurveSource&&String(latestManualCurveSource.afterRunId||'')===String(a.runId||''))h='<div class="manualPanel good"><b>下一杯已采用手动曲线。</b> 以下为旧杯分析，尚未作为新曲线效果验证。</div>'+h;
   h+=scalarRow('S1',s1,esc(s1.evidenceBasis||'startup 20–80%'));
@@ -5637,6 +5650,38 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
   }
 
 
+  // Single-shot command-chain evidence: consecutive same-direction steady writes
+  // are direct proof that the mapped command sits below the target. This replaces
+  // the old "wait 2 s and keep a 5 s stable window" gate for next-shot learning.
+  function liveTrimChainEvidence(run){
+    const trace=(run&&run.liveFlowTrim&&run.liveFlowTrim.trace)||[];
+    const writes=trace.filter(x=>x.kind==="write"&&Number(x.frame)===1&&!x.startupAction&&Number.isFinite(Number(x.commandMlS)));
+    if(writes.length<2)return null;
+    let chain=null,best=null,lastStep=null;
+    for(const w of writes){
+      const prev=chain&&chain[chain.length-1];
+      const step=prev?Number(w.commandMlS)-Number(prev.commandMlS):Number(w.commandMlS)-Number(w.previousMlS);
+      const same=prev&&Number.isFinite(step)&&Number.isFinite(lastStep)&&step!==0&&Math.sign(step)===Math.sign(lastStep)&&Number(w.tMs)-Number(prev.tMs)<=4000;
+      chain=same?chain.concat([w]):[w];
+      if(step!==null)lastStep=step;
+      if(!best||chain.length>best.length)best=chain.slice();
+    }
+    if(!best||best.length<2)return null;
+    const first=best[0],last=best[best.length-1];
+    const c0=Number(first.previousMlS),c1=Number(last.commandMlS);
+    const dCmd=c1-c0;
+    if(!Number.isFinite(dCmd)||Math.abs(dCmd)<0.125)return null;
+    const checks=trace.filter(x=>x.kind==="check"&&Number(x.frame)===1&&Number.isFinite(Number(x.rawGS)));
+    const nearest=t=>checks.filter(x=>Number(x.tMs)<=t).slice(-1)[0];
+    const r0=nearest(Number(first.tMs)),r1=nearest(Number(last.tMs)+2500)||nearest(Number(last.tMs));
+    if(!r0||!r1)return null;
+    const dCup=Number(r1.rawGS)-Number(r0.rawGS);
+    const gain=dCup/dCmd;
+    const usable=Math.sign(dCup)===Math.sign(dCmd)&&Math.abs(dCup)>=0.08&&gain>=0.2&&gain<=3;
+    return {usable,startCommandMlS:c0,commandMlS:c1,startGS:Number(r0.rawGS),endGS:Number(r1.rawGS),deltaCommand:dCmd,deltaGS:dCup,gain:gain,writes:best.map(x=>Number(x.commandMlS)),
+      reason:usable?"single-shot chain shows the LUT-mapped command is low":"command rose without a matching cup-flow change; treat as saturated"};
+  }
+
   function liveTrimLearningView(run,phase) {
     if(!run||!run.config||!run.config.experimentalLiveTrim)return run;
     const trace=run.liveFlowTrim&&run.liveFlowTrim.trace||[];
@@ -6008,12 +6053,24 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       }
       if(angleDeg!==null&&angleDeg>=45)t.bigAngleStreak=(t.bigAngleStreak||0)+1;else t.bigAngleStreak=0;
       t.report.bigAngleStreak=t.bigAngleStreak;t.report.vectorAngleDeg=angleDeg===null?null:round(angleDeg,1);
-      const steps=vectorStepCount(errGS,t.bigAngleStreak);
+      // Explicit trim states (user 2026-10-30): coast = the trend is closing on
+      // its own; lut-compensate = parallel/weak offset with pressure headroom;
+      // vector = the existing bounded controller.
+      const predicted=reg.fastSlope!==null&&reg.fastSlope!==undefined?Math.max(reg.slope,Number(reg.fastSlope),Number.isFinite(reg.predicted)?reg.predicted:reg.slope):Math.max(reg.slope,Number.isFinite(reg.predicted)?reg.predicted:reg.slope);
+      const closing=reg.slope<target?predicted>=target*0.98:predicted<=target*1.02;
+      const trimMode=Math.abs(errGS/target)<=0.06&&closing?"coast":(errGS>0&&angleDeg!==null&&angleDeg>=55&&angleDeg<=125?"lut-compensate":"vector");
+      row.trimMode=trimMode;
+      if(trimMode==="coast"){row.reason="coast-trend-stable";return;}
+      const steps=trimMode==="lut-compensate"?Math.max(2,vectorStepCount(errGS,t.bigAngleStreak)):vectorStepCount(errGS,t.bigAngleStreak);
       const raw=Math.round((command+Math.sign(errGS)*steps/16)*16)/16;
       // Hard envelope first (base ±20% at native 1/16 quanta): the PD amplitude adapts
       // inside it, so a wide angle never breaks the bounds. No room inside the envelope
       // reports a bound instead of an empty write.
-      const lo=Math.ceil(base*0.8*16)/16,hi=Math.floor(base*1.2*16)/16;
+      let lo=Math.ceil(base*0.8*16)/16,hi=Math.floor(base*1.2*16)/16;
+      if(trimMode==="lut-compensate"){
+        const mapped=mappedCommandForReal(target);
+        if(Number.isFinite(mapped))hi=Math.max(hi,Math.floor(Math.min(mapped*0.9,LIMITS.commandFlowMax)*16)/16);
+      }
       const candidate=Math.max(lo,Math.min(hi,raw));
       if(candidate===command||candidate<LIMITS.commandFlowMin||candidate>LIMITS.commandFlowMax){row.reason="command-bound-vector";return;}
       if(t.report.writes>=t.report.maxWrites){row.reason=`${t.report.maxWrites}-write-budget`;return;}

@@ -1,3 +1,20 @@
+# HyperEx Pulse Filter 1.80ds
+
+本地开发版（版本号 1.80ds，非严格 semver）。1.80ds 把 1.79ds 工作区里的矢量控制与诊断曲线收进正式版本，并补上控制律曲线的 90° 中刻度：
+
+- 控制律曲线（0–180°）：每个 check 的 trendAngleDeg 按时间画在独立图上；0° 表示趋势落在目标线上，90° 表示平行偏离，大于 90° 表示背离。本版补上 90° 中刻度（虚线网格 + 左侧标签），现在 0 / 90 / 180 三档都可见。
+- 矢量箭头画在「上一检测点 → 本次写入」的趋势连线上：方向 = 指令增/减的绝对方向，头部固定 5px 高、±4px 宽，强度只拉长尾巴（|command − previous|×48）。
+- 角度统计（连线角口径）：相邻两个带 RAW 回归的检测点连线延长到目标线；zeroDegreeShare / meanAngleDeg 进 report 与 learningAssessment。
+- 连续大角度加码：bigAngleStreak（趋势角 ≥45° 连续次数）≥3 → 步长上限 6 档，≥6 → 8 档。
+- 稳态增益 k 常驻显示：有样本显示 k / 样本数 / 离散 / 当前指令 / 目标折算 / 限幅后；样本不足显示「样本 N 杯 · 需 ≥2 杯同段干净记录」。
+- 诊断图新增浅蓝趋势轨迹线（check / write 的 rawGS 按时间连接 + 3 点移动平均）。
+- 历史导出：STEP 4 EXPORT HISTORY JSON 生成 Decaid 本地服务地址（/api/v1/plugins/&lt;id&gt;/history-export）并复制到剪贴板，浏览器打开即下载；新杯记录 fullRecord（完整 samples / rawScaleSamples / events / liveFlowTrim.trace），上限 30 杯。
+- 杯内控制显式分状态：coast（趋势正在收敛，交给固件，不写）／lut-compensate（平行偏离且压力有余量，包络改为目标杯流反算指令×0.9，不再受 base±20% 限制）／vector（原有有界矢量）。状态写进诊断 trace 的 trimMode 字段。
+- 杯间学习改用单杯加码链：连续同向写入的 Δ指令→Δ杯流作为直接证据，下一杯按实测增益反推目标指令（0.9 阻尼）；加码后杯流不响应则标记 SATURATED / HOLD，不把饱和误学成 LUT 偏低。
+- 验证见 tests/RESULTS_v0180ds.txt（538/538）。
+
+## Previous release
+
 # HyperEx Pulse Filter 1.79ds
 
 本地开发版（版本号 1.79ds，非严格 semver）。1.79ds 修复真机发现的 restart skipStep 双发竞态，并把补水基准做成明确开关：

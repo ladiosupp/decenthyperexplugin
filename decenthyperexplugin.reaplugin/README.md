@@ -18,10 +18,10 @@
 - 活调确认改为趋势确认：RAW 杯流斜率向目标收敛为主判据（写后 600ms 起，误差缩小 ≥0.015 g/s）；machineFlow 朝写入方向移动 ≥1/16 为辅助佐证；驱动 ACK 仍是硬闸但不推进命令。
 - 同值重试废弃：未响应矢量记 vector-unresponsive，下一次决策从当前趋势重算新矢量（加码/撤码），不再重发同值、不再有 3 次降级冷却。
 - PD 矢量写控制：写入幅度 = |target − slope|×8 档（1/16 量化，封顶 4 档）；先 clamp 进 base±20% 包络，无余量报 command-bound-vector，不空写。
-- 连续同向加码：sameSignStreak（RAW slope 相对目标连续同号）≥3 时步长上限 6 档、≥6 时 8 档；波幅由包络与趋势预测 hold 压住。
+- 连续大角度加码：bigAngleStreak（上一检测点到当前回归的趋势线与目标线夹角 ≥45° 的连续次数）≥3 时步长上限 6 档、≥6 时 8 档；sameSignStreak 保留作报告；波幅由包络与趋势预测 hold 压住。
 - S3 固定 1600ms 防毛刺写间隔删除：写不写由统计闸（R²、新鲜度、预测 hold、2% 死区）决定。
-- 角度统计：zeroDegreeShare（|errorPct|≤2% 的 check 占比）、meanAngleDeg、sameSignStreak 进报告与诊断状态行；不设硬门槛。
-- 诊断曲线箭头：方向 = 绝对方向（command 相对 previous 升则向上、降则向下），长度 = |command − previous|×48；与目标背离时如实显示；↻ 表示趋势未响应时的重新决策（不是重发同值）。
+- 角度统计：zeroDegreeShare 与 meanAngleDeg 按相邻检测点连线的夹角计算（连线延长到目标线；0° = 趋势落在目标线上，朝目标 0–90°，背离 90–180°）；sameSignStreak 仍按 RAW slope 相对目标同号维护；进报告与诊断状态行，不设硬门槛。
+- 诊断曲线箭头：方向 = 绝对方向（command 相对 previous 升则向上、降则向下），箭头画在上一检测点到本次写入的趋势连线上；长度 = |command − previous|×48；与目标背离时如实显示；↻ 表示趋势未响应时的重新决策（不是重发同值）。
 - 状态/事件/文案语义：monitoring-unresponsive-trend、vector-unresponsive、feedbackPolicy trend-vector-response；i18n 同步新状态翻译。
 
 S2 补水算法、S3 投影、杯间学习与 1.77ds 一致；历史数据全点记录与 STEP 4 CSV 导出保留（1.68 起：每杯持久历史保存全部 action/ACK/target/fault，常规 check 行压缩为原因计数，CSV 导出完整实时轨迹，旧记录不改写）；S1 走 LUT 直给，不做精细活调。无真机验证。另附本地离线仿真台 sim/（加载真实 plugin.js，自带植物模型和网页曲线），用法见 sim/README.md。

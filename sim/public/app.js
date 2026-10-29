@@ -141,9 +141,15 @@ function render(r, params) {
   $('cards').innerHTML = cards;
 
   const targetFor = (p) => p.phase === 'stage1' ? targets.s1 : p.phase === 'stage2' ? targets.s2 : p.phase === 'stage3' ? targets.s3 : null;
+  // 插件合成曲线（samples / rawScale 两层）：默认已按「S2 起」裁剪（graphFromStage2），
+  // 叠加 decaid 杯流与 RAW 秤 dW/dt 差分，展示插件自己加工过的视角。
+  const plugDecaid = (r.samples || []).map((s) => ({ t: s.tMs / 1000, v: s.decaidWeightFlowGS })).filter((p) => Number.isFinite(p.v));
+  const plugRaw = (r.rawScale || []).map((s) => ({ t: s.tMs / 1000, v: s.rawDwDtGS })).filter((p) => Number.isFinite(p.v));
   drawChart($('cFlow'), r.series, [
     { get: (p) => p.cupFlow, color: '#f5a442', width: 2, label: '杯流' },
     { get: targetFor, color: '#8b93a1', width: 1, dash: [5, 4], label: '目标' },
+    plugDecaid.length ? { data: plugDecaid, get: (p) => p.v, color: '#c77dff', width: 1.3, dash: [3, 3], label: '插件 decaid 杯流' } : null,
+    plugRaw.length ? { data: plugRaw, get: (p) => p.v, color: '#63d89b', width: 1, dash: [2, 4], label: '插件 RAW dW/dt' } : null,
     pinned ? { get: (p) => p.cupFlow, color: '#5c6470', width: 1, dash: [2, 4], label: '对照', data: pinned.series } : null,
   ].filter(Boolean));
   drawChart($('cWeight'), r.series, [

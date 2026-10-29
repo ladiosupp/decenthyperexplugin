@@ -587,11 +587,30 @@ async function runShot(params) {
   const run = s.diagnosticLast;
   const trace = (run && run.liveFlowTrim && run.liveFlowTrim.trace) || [];
   const writes = trace.filter(x => x.kind === 'write');
+  // The plugin's diagnostic curve is NOT a single sensor line: it is composed
+  // of two streams that renderCharts() merges — the plugin-processed samples
+  // (targetFlow/machineFlow/decaidWeightFlow/desiredRealFlow…) and the RAW
+  // scale samples (weightG/scaleTimestampSeconds, plugin-computed <900 ms dW/dt).
+  // By default we keep only the second-espresso S2-onwards window (the first
+  // stage1 / release / soak segments are cut), matching the user's visualization
+  // rule; pass graphFromStage2:false to export the full stream.
+  const graphFromStage2 = p.graphFromStage2 !== false;
+  const clipFromStage2 = (rows) => {
+    if (!rows || !rows.length) return rows;
+    if (!graphFromStage2) return rows;
+    const idx = rows.findIndex(x => typeof x.phase === 'string' && x.phase === 'stage2');
+    return idx < 0 ? rows : rows.slice(idx);
+  };
+  const clipSamples = clipFromStage2(run && run.samples);
+  const clipRaw = clipFromStage2(run && run.rawScaleSamples);
   return {
     ok: true,
     version: env.plugin.version,
     params: p,
     series,
+    graphFromStage2,
+    samples: clipSamples ? clipSamples.slice(-4000).map(x => ({ tMs: x.tMs, phase: x.phase, profileFrame: x.profileFrame, targetFlowMlS: x.targetFlowMlS, machineFlowMlS: x.machineFlowMlS, desiredRealFlowGS: x.desiredRealFlowGS, decaidWeightFlowGS: x.decaidWeightFlowGS, rawScaleWeightG: x.rawScaleWeightG, rawScaleDwDtGS: x.rawScaleDwDtGS, pressureBar: x.pressureBar, machineWeightFlowGS: x.machineWeightFlowGS, substate: x.substate })) : null,
+    rawScale: clipRaw ? clipRaw.slice(-4000).map(x => ({ tMs: x.tMs, phase: x.phase, profileFrame: x.profileFrame, scaleTimestampSeconds: x.scaleTimestampSeconds, weightG: x.weightG, rawDwDtGS: x.rawDwDtGS, decaidWeightFlowGS: x.decaidWeightFlowGS, tareReset: x.tareReset, targetFlowMlS: x.targetFlowMlS, machineFlowMlS: x.machineFlowMlS, pressureBar: x.pressureBar })) : null,
     writes: writes.map(x => ({ t: round(x.tMs / 1000, 2), frame: x.frame, commandMlS: x.commandMlS, action: x.startupAction || 'trim' })),
     trace: trace.map(x => ({ t: round(x.tMs / 1000, 2), kind: x.kind, frame: x.frame, reason: x.reason || '', commandMlS: x.commandMlS })),
     summary: run ? h.diagnosticSummary(run) : null,

@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "1.80ds";
+  const PLUGIN_VERSION = "1.81ds";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -845,7 +845,10 @@ function createPlugin(host) {
       if(Math.abs(measured/target-1)*100<=policy.deadband)return old[i];
       const agrees=p>0&&Math.sign(p-target)===Math.sign(measured-target)&&Math.abs(p-measured)/((p+measured)/2)<=.35*policy.qualityWidth;
       const response=agrees?measured*.8+p*.2:measured,damping=p>0&&!agrees?.5:1;
-      const delta=Math.max(-absolute,Math.min(absolute,old[i]*Math.max(-fraction,Math.min(fraction,(target/response-1)*policy.gain*damping))));
+      // Proportional reverse mapping: next command = old * target / measured,
+      // damped 0.9. The old policy.gain factor under-shot (S3 field data climbed
+      // 0.63 -> 0.81 while the correct steady command was ~0.72).
+      const delta=Math.max(-absolute,Math.min(absolute,(target/response-1)*old[i]*.9*damping));
       return round(clampCommandFlow(old[i]+delta),3);
     });
     const rawProposedCommands=raw.slice(),projected=projectS3Commands(raw,old,policy,source.map(x=>x.seconds));raw.splice(0,3,...projected);
@@ -885,6 +888,17 @@ function createPlugin(host) {
       const need=chain.gain>0?chain.startCommandMlS+(target-chain.startGS)/chain.gain:chain.commandMlS;
       const suggested=clampCommandFlow(Math.max(chain.startCommandMlS,Math.min(LIMITS.commandFlowMax,chain.commandMlS+(need-chain.commandMlS)*0.9)));
       return {usable:true,action:"LUT COMPENSATE",confidence:"MEDIUM",targetGS:round(target,3),currentCommandMlS:round(chain.commandMlS,3),measuredGS:round(chain.endGS,3),suggestedCommandMlS:round(suggested,3),errorPct:round((chain.endGS/target-1)*100,1),maxStepRule:"single-shot chain: reverse the measured gain, 0.9 damping, bounded by the command limit",reason:chain.reason+"; chain "+chain.startCommandMlS+"->"+chain.commandMlS+" ml/s moved cup flow "+chain.startGS+"->"+chain.endGS+" g/s (gain "+round(chain.gain,2)+"); next shot "+round(suggested,3)+" ml/s"};
+    }
+    const tail=current&&current.tailGain;
+    if(tail&&!previous){
+      const target=Number(run&&run.config&&run.config.stage2Flow),need=Number(target)/Number(tail.k),cur=Number(run&&run.config&&run.config.stage2CommandMlS);
+      if(Number.isFinite(need)&&Number.isFinite(cur)&&cur>0&&Number.isFinite(target)&&target>0){
+        const pol=learningPolicy(run&&run.config&&run.config.adaptiveLearningLevel),[fraction,absolute]=pol.s2;
+        const raw=cur+(need-cur)*0.9;
+        const bounded=Math.max(cur-cur*fraction,cur-absolute,Math.min(cur+cur*fraction,cur+absolute,raw));
+        const suggested=clampCommandFlow(bounded);
+        return {usable:true,action:"LUT COMPENSATE",confidence:"MEDIUM",targetGS:round(target,3),currentCommandMlS:round(cur,3),measuredGS:tail.tailMeanGS,suggestedCommandMlS:round(suggested,3),errorPct:tail.tailErrorPct,tailGain:tail,maxStepRule:pol.name+" S2 step ≤"+round(fraction*100,1)+"% / "+absolute+" ml/s; single-shot steady tail reverse with 0.9 damping",reason:"steady tail "+tail.tailMeanGS+" g/s at "+tail.machineFlowMlS+" ml/s (gain "+round(tail.k,2)+"); next shot "+round(suggested,3)+" ml/s"};
+      }
     }
     const policy=learningPolicy(run&&run.config&&run.config.adaptiveLearningLevel),q=controlOutputQuality(run,"stage2"),err=current&&current.targetGS>0?(Number(current.measured)/Number(current.targetGS)-1)*100:0;
     const large=!!(current&&q.available&&q.windows>=2&&q.tailRippleCVPct<=12&&Math.abs(err)>=20&&Math.abs(q.tailErrorPct)>=15&&Math.sign(err)===Math.sign(q.tailErrorPct));
@@ -1976,6 +1990,11 @@ function createPlugin(host) {
     const pending={frame:1,command,at:now,ack:false,targetSeen:false,startupAction:action,flowAtWrite:finiteOrNull(state.lastFlow),slopeAtWrite:null};t.pending=pending;
     t.report.writes++;t.lastWriteAt=now;state.liveTrimDirty=true;
     liveTrimRecord("write",{frame:1,commandMlS:command,previousMlS:action==="boost"?base:boosted,retry:false,startupAction:action,startupReason:t.report.startupExecution.reason,payload:encodeLiveFlowFrame(step,1,command)});
+    // Keep the ordinary trim baseline in sync with the startup boost/return
+    // write. Without this the next decision still starts from the boost value
+    // (real 1.80ds trace: return to 4.0 was followed by previousMlS 5.5625) and
+    // spends several writes walking back inside the envelope.
+    t.commands[1]=command;
     if(action==="boost"){
       p.startedAt=now;
       if(refill)t.startupAckTimer=setTimeout(()=>{
@@ -2011,7 +2030,23 @@ function createPlugin(host) {
       if(Number.isFinite(target)&&target>0)return {measurementBasis:"single-shot command chain",runId:run.runId,targetGS:round(target,3),command:round(chain.commandMlS,3),measured:round(chain.endGS,3),errorPct:round((chain.endGS/target-1)*100,1),confidence:"MEDIUM",r2:null,seconds:null,liveTrimChain:chain};
     }
     const controlled=controlLearningAssessment(run,"stage2");
-    if(controlled.applicable)return controlled.eligible?controlled.evidence:null;
+    if(controlled.applicable&&controlled.eligible){
+      // The normalized learner's "measured" is seed-normalized (1.80ds field:
+      // 3.14 vs a real tail of 5.15). Attach the physical tail gain so the
+      // next-shot suggestion uses the real cup flow instead of the model value.
+      const ev=controlled.evidence;
+      if(ev){
+        const tail=tailMachineGain(run,"stage2",controlled.actuator);
+        if(tail&&Math.abs(Number(tail.tailErrorPct))>=2)ev.tailGain=tail;
+      }
+      return ev;
+    }
+    const tailGain=tailMachineGain(run,"stage2",controlled.actuator);
+    if(tailGain&&Number.isFinite(Number(tailGain.tailErrorPct))&&Math.abs(Number(tailGain.tailErrorPct))>=2){
+      const target=Number(desiredRealForRunPhase(run,"stage2"));
+      if(Number.isFinite(target)&&target>0)return {measurementBasis:"single-shot steady tail machine gain",runId:run.runId,targetGS:round(target,3),command:round(target/tailGain.k,3),measured:tailGain.tailMeanGS,errorPct:round((tailGain.tailMeanGS/target-1)*100,1),confidence:"MEDIUM",r2:null,seconds:null,tailGain};
+    }
+    if(controlled.applicable)return null;
     run = liveTrimLearningView(run, "stage2");
     if (!run || !stageActuatorEvidence(run, "stage2").eligible) return null;
     if (!run || (run.kind || "hyperex") !== "hyperex") return null;
@@ -5505,6 +5540,30 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       basis:"actual RAW g/s; rolling regressions over final60% of phase, separate from normalized learning model"};
   }
 
+  // Steady-tail machine gain: cup flow (RAW) divided by the machine's own flow
+  // over the same tail window. This is the physical feed-forward the 1.80ds field
+  // data supports (S2 5.16/4.6 = 1.12, S3 1.53/0.75 = 2.0). It does not depend on
+  // the calibration LUT, so a stale LUT cannot bias the next-shot command.
+  function tailMachineGain(run,phase,actuator){
+    // Reuse the same safety gates as the normalized learner: fresh machine
+    // telemetry, target/frame coverage, pressure headroom and actuator tracking.
+    if(!actuator||!(Number(actuator.samples)>=4)||!(Number(actuator.total)>0)||Number(actuator.samples)<Number(actuator.total)*.7)return null;
+    if(!(Number(actuator.pressureLimitedFraction)<.2)||!(Number(actuator.underCommandFraction)<.25))return null;
+    const q=controlOutputQuality(run,phase);
+    if(!q||!q.available||!(Number(q.tailMeanGS)>0))return null;
+    const raw=phaseRawSamples(run,phase)||[];
+    const samples=(run.samples||[]).filter(x=>x.phase===phase&&Number.isFinite(Number(x.machineFlowMlS))&&Number(x.machineFlowMlS)>0);
+    if(raw.length<6||samples.length<4)return null;
+    const first=Number(raw[0].tMs),last=Number(raw[raw.length-1].tMs),tailStart=first+(last-first)*.4;
+    const flows=samples.filter(x=>Number(x.tMs)>=tailStart).map(x=>Number(x.machineFlowMlS));
+    if(flows.length<4)return null;
+    const m=median(flows);
+    if(!(m>0))return null;
+    const k=Number(q.tailMeanGS)/m;
+    if(!(k>.2&&k<=3))return null;
+    return {k,tailMeanGS:round(Number(q.tailMeanGS),3),machineFlowMlS:round(m,3),tailErrorPct:q.tailErrorPct,tailRippleCVPct:q.tailRippleCVPct};
+  }
+
   // Use every measurable command epoch, not only the last attempted write.
   // Normalization is a local proportional response model, not a physical identity.
   function controlLearningAssessment(run,phase) {
@@ -5534,8 +5593,10 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       if(!frames.includes(f)||!Number.isFinite(seed)||seed<=0||v===null||v<=0)return null;
       const base=Math.floor(seed*16+0.5)/16;
       if(v<LIMITS.commandFlowMin||v>LIMITS.commandFlowMax||v<base*.8-.02||v>base*1.2+.02)return null;
-      if(Math.abs(v-base)<.02)return v;
-      return trace.some(x=>x.kind==="write"&&Number(x.frame)===f&&x.tMs<=m.tMs&&Math.abs(Number(x.commandMlS)-v)<.02)?v:null;
+      // Firmware ramps its observed target through intermediate 1/16 quanta, so
+      // an in-envelope echo that does not exactly equal a write is still a known
+      // target (real 1.80ds shots: exact-match left only 47% coverage and blocked learning).
+      return v;
     };
     const limit=finiteOrNull(c[phase+"PressureLimit"]),m0=allMachine.length?Number(allMachine[0].tMs):0;
     const machine=allMachine.filter(x=>Number(x.tMs)-m0>=1000);
@@ -5543,7 +5604,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     const good=machine.filter(valid),near=good.filter(x=>limit!==null&&Number(x.pressureBar)>=limit*.95).length;
     const under=good.filter(x=>Number(x.machineFlowMlS)<known(x)*.7).length;
     report.actuator={samples:good.length,total:machine.length,pressureLimitedFraction:good.length?near/good.length:1,underCommandFraction:good.length?under/good.length:1};
-    if(limit===null||limit<=0||good.length<4||good.length<.8*machine.length){report.reason="Live learning: fresh machine target/frame coverage below80% or fewer than4 samples";return report;}
+    if(limit===null||limit<=0||good.length<4||good.length<.7*machine.length){report.reason="Live learning: fresh machine target/frame coverage below70% or fewer than4 samples";return report;}
     if(near/good.length>=.2){report.reason="Live learning: pressure limiter active in at least20% of samples";return report;}
     if(under/good.length>=.25){report.reason="Live learning: actual flow below70% of observed target in at least25% of samples";return report;}
     report.actuator.eligible=true;
@@ -5748,7 +5809,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
   // Sustained same-direction angles mean the current vector is too weak: raise the step
   // ceiling (4 -> 6 -> 8 native quanta) so fewer writes and less time close the angle.
   // The base±20% envelope and the trend gates keep the resulting wave amplitude bounded.
-  function vectorStepCount(errGS,sameSideStreak){const head=Math.min(8,4+Math.floor((sameSideStreak||0)/3)*2);return Math.max(1,Math.min(head,Math.round(Math.abs(errGS)*8)));}
+  function vectorStepCount(errGS,sameSideStreak,target){const rel=target>0?Math.abs(errGS/target):1;const head=rel<=.10?1:Math.min(8,4+Math.floor((sameSideStreak||0)/3)*2);return Math.max(1,Math.min(head,Math.round(Math.abs(errGS)*8)));}
   function closeLiveTrim(t) {
     if(!t)return;clearS2StartupTimers(t);if(!t.handle)return;const h=t.handle;t.handle=null;
     host.transport.close(h).catch(()=>{});
@@ -5771,7 +5832,7 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     const budget=[50,150,200,250][level-1];
     const period=level===1?Math.max(300,Math.round(seconds*1000/50)):[0,300,250,200][level-1];
     const report={enabled:true,status:c.activeRelease===false?"armed-for-S1":"armed-for-S2",level,plannedDurationMs:Math.round(seconds*1000),periodMs:period,maxChecks:2000,maxWrites:budget,
-      checks:0,writes:0,acks:0,targetConfirmations:0,targetMissTolerance:3,targetMisses:0,consecutiveTargetMisses:0,retries:0,feedbackReleases:0,feedbackPolicy:"trend-vector-response",degradedRetryIntervalMs:3000,minWriteIntervalMs:50,responseTimeoutMs:2000,deadbandPct:2,trace:[],zeroDegreeShare:null,meanAngleDeg:null,sameSignStreak:0,bigAngleStreak:0,vectorAngleDeg:null,adaptiveMode:"trend-confirmed-window-and-dynamic-exposure-learning"};
+      checks:0,writes:0,acks:0,targetConfirmations:0,targetMissTolerance:3,targetMisses:0,consecutiveTargetMisses:0,retries:0,feedbackReleases:0,feedbackPolicy:"trend-vector-response",degradedRetryIntervalMs:3000,minWriteIntervalMs:50,responseTimeoutMs:2000,deadbandPct:4,trace:[],zeroDegreeShare:null,meanAngleDeg:null,sameSignStreak:0,bigAngleStreak:0,vectorAngleDeg:null,adaptiveMode:"trend-confirmed-window-and-dynamic-exposure-learning"};
     report.learningBand=learningPolicy(c.adaptiveLearningLevel).deadband;report.learningLevel=learningPolicy(c.adaptiveLearningLevel).name;
     report.s2StartupPlan=c.s2StartupPlan||null;report.startupExecution={status:c.s2StartupPlan&&c.s2StartupPlan.enabled?"armed":"not-planned",reason:c.s2StartupPlan&&c.s2StartupPlan.reason||"S2 startup assist disabled"};
     run.liveFlowTrim=report;
@@ -5896,9 +5957,13 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     return bytes.map(x=>x.toString(16).padStart(2,"0").toUpperCase()).join("");
   }
   function liveTrimRegression(t) {
+    // S3's machine pump responds with a 2-4 s lag (measured on 1.80ds field data),
+    // so a 1.6 s regression is mostly noise there. Use a 3 s window, a 1.2 s tail
+    // and a 2 s forecast horizon for S3; keep S2 at 1.6 s / 0.5 s.
+    const isS3=state.phase==="stage3",windowMs=isS3?3000:1600,tailSec=isS3?1.2:.75,headSec=isS3?1.2:.65,horizon=isS3?2:.5;
     const now=Date.now(),raw=state.phase==="stage2"?phaseRawSamples(t.run,"stage2"):t.run.rawScaleSamples||[],seen=new Set(),points=[];
     for(const x of raw){
-      if(x.phase!==state.phase||Number(x.profileFrame)!==t.frame||x.tMs<t.frameAt-t.run.startedAtMs||now-t.run.startedAtMs-x.tMs>1600)continue;
+      if(x.phase!==state.phase||Number(x.profileFrame)!==t.frame||x.tMs<t.frameAt-t.run.startedAtMs||now-t.run.startedAtMs-x.tMs>windowMs)continue;
       if(x.tareReset){points.length=0;seen.clear();continue;}
       const stamp=finiteOrNull(x.scaleTimestampSeconds),weight=finiteOrNull(x.weightG);
       if(stamp===null||weight===null||seen.has(stamp))continue;
@@ -5907,11 +5972,11 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     }
     if(points.length<6||points[points.length-1].x-points[0].x<1.2)return null;
     const r=linearRegression(points),end=points[points.length-1].x;
-    const tail=points.filter(p=>end-p.x<=.75),head=points.filter(p=>end-p.x>=.65);
+    const tail=points.filter(p=>end-p.x<=tailSec),head=points.filter(p=>end-p.x>=headSec);
     const fit=a=>a.length>=4&&a[a.length-1].x-a[0].x>=.45?linearRegression(a):null;
     const fast=fit(tail),early=fit(head);
     const fastSlope=fast&&fast.r2>=.90&&fast.slope>=0?fast.slope:null;
-    const predicted=fastSlope!==null&&early&&early.r2>=.90?Math.max(0,fastSlope+Math.max(0,fastSlope-early.slope)*.5):fastSlope;
+    const predicted=fastSlope!==null&&early&&early.r2>=.90?Math.max(0,fastSlope+Math.max(0,fastSlope-early.slope)*horizon):fastSlope;
     return r&&r.r2>=0.90&&r.slope>0?{...r,fastSlope,predicted,sourceEndStamp:end}:null;
   }
   async function liveTrimTick(t) {
@@ -6017,7 +6082,8 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
         if(reg.fastSlope!==null&&reg.fastSlope!==undefined&&(reg.fastSlope>=target*.98||reg.predicted>=target)){row.reason="S3 rising response; hold upward correction";return;}
       }
       row.rawGS=round(reg.slope,3);row.targetGS=target;row.errorPct=round((reg.slope/target-1)*100,2);row.r2=round(reg.r2,4);
-      if(Math.abs(reg.slope/target-1)<=0.02+1e-9){row.reason="inside-2pct-band";return;}
+      const deadband=(Number(t.report.deadbandPct)||4)/100;
+      if(Math.abs(reg.slope/target-1)<=deadband+1e-9){row.reason="inside-"+Math.round(deadband*100)+"pct-band";return;}
       if(t.retry&&t.retry.frame!==frame){
         liveTrimRecord("unconfirmed-frame-ended",{frame:t.retry.frame,commandMlS:t.retry.command,nextFrame:frame});
         t.retry=null; // Never carry an unresponsive vector across a frame transition.
@@ -6043,11 +6109,12 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       // target line) means the current vector is too weak: raise the step ceiling
       // so fewer writes and less time close the angle.
       const prevGS=Number(t.lastCheckGS),prevAt=Number(t.lastCheckAtMs);
-      let angleDeg=null;
+      let angleDeg=null,trendSlope=null;
       if(Number.isFinite(prevGS)&&prevAt>0){
         const dtS=(Date.now()-prevAt)/1000;
         if(dtS>0.1){
-          const trendSlope=(reg.slope-prevGS)/dtS,mag=Math.atan(Math.abs(trendSlope))*180/Math.PI,inBand=Math.abs(reg.slope/target-1)<=0.02;
+          trendSlope=(reg.slope-prevGS)/dtS;
+          const mag=Math.atan(Math.abs(trendSlope))*180/Math.PI,inBand=Math.abs(reg.slope/target-1)<=0.02;
           angleDeg=Math.abs(trendSlope)<1e-9?(inBand?0:90):((target>reg.slope?trendSlope>0:trendSlope<0)?Math.min(90,mag):180-Math.min(90,mag));
         }
       }
@@ -6058,10 +6125,14 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       // vector = the existing bounded controller.
       const predicted=reg.fastSlope!==null&&reg.fastSlope!==undefined?Math.max(reg.slope,Number(reg.fastSlope),Number.isFinite(reg.predicted)?reg.predicted:reg.slope):Math.max(reg.slope,Number.isFinite(reg.predicted)?reg.predicted:reg.slope);
       const closing=reg.slope<target?predicted>=target*0.98:predicted<=target*1.02;
-      const trimMode=Math.abs(errGS/target)<=0.06&&closing?"coast":(errGS>0&&angleDeg!==null&&angleDeg>=55&&angleDeg<=125?"lut-compensate":"vector");
+      // A flat 3 s trend is the real steady signal; with puck noise the prediction
+      // rarely crosses the band even when the cup is already flat (field data:
+      // coast fired once per shot).
+      const trendFlat=Number.isFinite(trendSlope)&&Math.abs(trendSlope)<0.1;
+      const trimMode=Math.abs(errGS/target)<=0.06&&(closing||trendFlat)?"coast":(errGS>0&&angleDeg!==null&&angleDeg>=55&&angleDeg<=125?"lut-compensate":"vector");
       row.trimMode=trimMode;
       if(trimMode==="coast"){row.reason="coast-trend-stable";return;}
-      const steps=trimMode==="lut-compensate"?Math.max(2,vectorStepCount(errGS,t.bigAngleStreak)):vectorStepCount(errGS,t.bigAngleStreak);
+      const steps=trimMode==="lut-compensate"?Math.max(2,vectorStepCount(errGS,t.bigAngleStreak,target)):vectorStepCount(errGS,t.bigAngleStreak,target);
       const raw=Math.round((command+Math.sign(errGS)*steps/16)*16)/16;
       // Hard envelope first (base ±20% at native 1/16 quanta): the PD amplitude adapts
       // inside it, so a wide angle never breaks the bounds. No room inside the envelope

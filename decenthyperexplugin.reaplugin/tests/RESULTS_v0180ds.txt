@@ -193,6 +193,7 @@ PASS cross-temperature matching retains physical basket LUT multiplier and mode 
 PASS cross-temperature evidence still fails pressure quality and same-command gates
 PASS all known S2 target epochs supply learning even when final write lacks feedback
 PASS controlled S2 evidence forms bounded next-shot adjustment rather than INSUFFICIENT
+PASS firmware-ramped in-envelope target echo still counts as known coverage
 PASS S2 single-shot chain supplies LUT COMPENSATE and auto-applies to next shot
 PASS saturated chain holds next-shot S2 command and is not actionable
 PASS corrected S3 frames contribute independent known-target windows to consensus
@@ -296,6 +297,7 @@ PASS S2 startup metrics reject pressure headroom, actuator lag, RAW gaps and sus
 PASS beneficial S2 pulse is retained bounded; ineffective pulse returns to baseline
 PASS S2 pulse uses fast same frame one quantum and no skip, profile or LUT changes
 PASS S2 pulse returns on independent deadline with ACK but no target echo or usable regression
+PASS S2 startup boost and return keep the ordinary trim baseline in sync
 PASS S2 base return confirmation resumes regular trim only after response settle
 PASS S2 return driver ACK completes the refill immediately without waiting for base echo
 PASS S2 return ACK clears the watchdog so no degraded retry follows
@@ -537,4 +539,4 @@ PASS live trim check rows carry the trend angle for the control law curve
 PASS new history records keep the full per-shot trace for JSON export
 PASS history export endpoint returns every persisted shot including its full record
 
-538/538 checks passed
+540/540 checks passed

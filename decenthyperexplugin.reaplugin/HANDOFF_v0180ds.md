@@ -27,6 +27,16 @@
    - saturated chain holds next-shot S2 command and is not actionable：链不可用 → SATURATED / HOLD、不应用。
 4. RESULTS_v0180ds.txt 已刷新为 538/538。
 
+## 2c. 2026-10-30 真机历史分析后的修复（本分支工作区，未提交）
+
+用户提供的 hyperex-history1030.json（30 杯，最后 2 杯为 1.80ds）暴露：S2 尾段实测 5.155 g/s（误差 3.1%、波动 4.2%）已经达标，但学习连续十几杯都是 LIMITED / HOLD，原因是覆盖率被挡住：
+
+- 固件把机器目标按 1/16 档位渐变回显（4.94→5.5→4.2…），而 controlLearningAssessment 的 known() 要求回显精确等于某次写入或 base 才计为已知目标。真实两杯覆盖率仅 22.8% / 32.7%，低于 80% 门槛。
+- 修法：包络内（base×0.8–1.2）的回显即视为已知目标；覆盖率门槛 80% → 70%。同两杯覆盖率升至 80.7% / 75.0%。
+- 另一处：S2 startup 的 boost/return 写没有同步 t.commands[frame]，return 回 4.0 后决策仍从 5.5625 起（trace 里 previousMlS=5.5625），会多走几次下调。现在 boost/return 写后同步基线。
+- 新增测试：固件渐变回显计为已知覆盖；S2 startup 写同步基线。540/540。
+- 真机其余观察：trimMode 以 vector 为主（84/171、65/180），coast 各 1 次，lut-compensate 2 次且均 command-bound；尾段达标说明包络够用，但 43–67 次 command-bound-vector 说明指令常贴上界，后续可观察学习恢复后是否减少。
+
 ## 3. 真机待验证（承 1.79ds，均未复核）
 
 1. 矢量箭头方向是否与趋势一致（write 带 rawGS 时起点在连线上）；箭头头部大小是否可接受。

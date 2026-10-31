@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.3";
+  const PLUGIN_VERSION = "2.2.4";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -3688,16 +3688,16 @@ function createPlugin(host) {
   }
 
   // The strip cells are painted by the skin itself; the RAW real-flow reading is the
-  // plugin's own regression, so it needs a skin push about once a second while S2/S3 run.
+  // plugin's own regression, so it needs a skin push twice a second while S2/S3 run.
   function startFlowStripTicker() {
     clearTimer("flowStripTimer");
     const tick = () => {
       state.flowStripTimer = null;
       if (state.phase !== "stage2" && state.phase !== "stage3") return;
       emitSkinChanged();
-      state.flowStripTimer = setTimeout(tick, 1000);
+      state.flowStripTimer = setTimeout(tick, 500);
     };
-    state.flowStripTimer = setTimeout(tick, 1000);
+    state.flowStripTimer = setTimeout(tick, 500);
   }
 
   function startSoakCountdown() {
@@ -3755,7 +3755,22 @@ function createPlugin(host) {
 
   function stripRealFlowText() {
     const gs = Number(state.liveTrim && state.liveTrim.lastCheckGS);
-    return Number.isFinite(gs) ? `${gs.toFixed(2)} g/s` : "—";
+    const at = Number(state.liveTrim && state.liveTrim.lastCheckAtMs);
+    if (Number.isFinite(gs) && at > 0 && Date.now() - at <= 1500) return `${gs.toFixed(2)} g/s`;
+    // The live-trim regression only advances while a trim check runs. Fall back
+    // to the RAW scale itself so the strip keeps moving when trim is idle or
+    // stopped; an instant dW/dt is the last resort because it is noisy.
+    const run = state.diagnosticCurrent;
+    const raw = run && Array.isArray(run.rawScaleSamples)
+      ? run.rawScaleSamples.filter(x => (x.phase === "stage2" || x.phase === "stage3") && Number.isFinite(Number(x.weightG))).slice(-16)
+      : [];
+    if (raw.length >= 6) {
+      const fit = regressionForRawSamples(raw);
+      if (fit && Number.isFinite(fit.slope) && fit.seconds >= 0.8) return `${fit.slope.toFixed(2)} g/s`;
+    }
+    const d = Number(state.latestRawDwDt), dAt = Number(state.latestScaleAtMs);
+    if (Number.isFinite(d) && dAt > 0 && Date.now() - dAt <= 1200) return `${d.toFixed(2)} g/s`;
+    return "—";
   }
 
   function buildSkinSurfaceAnswer() {

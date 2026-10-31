@@ -1,3 +1,14 @@
+# HyperEx Pulse Filter 1.93ds
+
+本地开发版（版本号 1.93ds，非严格 semver）。1.93ds 修复诊断页顶栏预设快切按钮不显示：
+
+- 1.89ds 起 `renderPresets` 末尾的 `renderPresetBar(d)` 落在函数体外面。脚本启动时它用页面 detail 元素调了一次，之后即使拿到预设数据也不再刷新顶栏，所以 1–5 一直是空的。
+- 现在这行放回函数体内，按 `/presets` 返回的槽位渲染；顶栏在拿到数据前先画 5 个空槽（描边、禁用），`/presets` 失败也不会整排消失。
+- 控制律、校准、学习与预设写入逻辑未改。
+- 验证见 tests/RESULTS_v0193ds.txt（566/566）。
+
+## Previous release
+
 # HyperEx Pulse Filter 1.92ds
 
 本地开发版（版本号 1.92ds，非严格 semver）。1.92ds 按使用频率重排诊断页：

@@ -1,3 +1,17 @@
+# HyperEx Pulse Filter 2.1.1
+
+诊断页回归只读，加载路径减负：
+
+- 打开诊断页不再触发 verify / repair。`calibration-status` 只返回缓存状态（倍数读取改为不强制），所以 GHC 不会因为开页面闪一圈粉灯，也不会无谓改写 profile——这也是 Streamline 里 HyperEx 收藏消失的可疑原因。
+- 修复只在三种时机发生：工作流切换、点 SYNC、检测到明确漂移且距上次修复 ≥ 10 分钟（冷却期内只记跳过）。
+- 启动时的 profile 维护推迟 2 秒执行，不再和 Decaid 启动抢本地 API。
+- 每次加载的 profile 列表从 4 次读取合并为 1 次；旧校准 profile 迁移成功后写标记，之后不再查询。
+- 实测加载 REST：稳定态 5 → 2（1 次倍数 + 1 次 profile 列表），前 1.5 秒只有 1 次；新装 8 → 5。
+
+验证见 tests/RESULTS_v0211.txt（582/582）。
+
+## Previous release
+
 # HyperEx Pulse Filter 2.1.0
 
 图表渲染加了 Canvas 2D / SVG 开关，默认 Canvas 2D：

@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.1.1";
+  const PLUGIN_VERSION = "2.1.2";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -87,8 +87,6 @@ function createPlugin(host) {
   const STORAGE_HISTORY_PROBE = "adaptiveHistoryStorageProbeV1";
   const HISTORY_FILE_MAX_SHOTS = 30;
   const STORAGE_PRESETS = "hyperExPresetsV1";
-  const STORAGE_LEGACY_PROFILE = "legacyCalibrationProfileHiddenV1";
-  const PROFILE_REPAIR_COOLDOWN_MS = 10 * 60 * 1000;
   const STORAGE_PRESET_PENDING = "hyperExPresetPendingV1";
 
   function normalizeCalibrationMode(value) {
@@ -3239,7 +3237,6 @@ function createPlugin(host) {
 
   function stopGhcPrompt(status, message) {
     clearTimer("ghcCountdownTimer");
-    clearTimer("startupProfileMaintenanceTimer");
     state.ghcPromptStartedAtMs = 0;
     state.ghcSecondsRemaining = 0;
     emitGhcPrompt(status, 0, message);
@@ -4205,7 +4202,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
   function recheckHomeTemperatureIfNeeded() {
     if(!state.temperatureRecheckNeeded||state.runtimeProfileRepairBusy||state.profileVerificationPending||!profileSyncIsIdle())return;
     state.temperatureRecheckNeeded=false;state.profileVerificationRetryAtMs=0;
-    scheduleProfileVerification('home temperature changed during synchronization', true);
+    scheduleProfileVerification('home temperature changed during synchronization');
   }
 
   function checkProfileSelection(revision) {
@@ -4223,10 +4220,8 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     return syncHyperExProfile(true, reason || 'workflow verification');
   }
 
-  function scheduleProfileVerification(reason, immediate) {
+  function scheduleProfileVerification(reason) {
     if (!state.cfg || state.workflowTitle !== state.cfg.profileTitle || state.runtimeProfileRepairBusy || state.profileVerificationPending || Date.now() < state.profileVerificationRetryAtMs || !profileSyncIsIdle()) return;
-    if (!immediate && Date.now() - (state.lastProfileRepairAtMs || 0) < PROFILE_REPAIR_COOLDOWN_MS) { state.profileVerificationSkippedAtMs = Date.now(); return; }
-    state.lastProfileRepairAtMs = Date.now();
     state.profileVerificationPending = true;
     state.profileVerificationRetryAtMs = Date.now() + 3000;
     verifyAndRepairSelectedHyperExProfile(reason).catch(error => {
@@ -4236,19 +4231,16 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     }).finally(() => { state.profileVerificationPending = false; recheckHomeTemperatureIfNeeded(); });
   }
 
-  async function upsertProfile(profile, recordsArg) {
+  async function upsertProfile(profile) {
     const title = profile && profile.title ? String(profile.title) : "";
     if (!title) throw new Error("profile title missing");
-    let records = Array.isArray(recordsArg) ? recordsArg : null;
-    if (!records) {
-      records = [];
-      try {
-        const listResponse = await api('/profiles?includeHidden=true', { method: 'GET' });
-        const body = await listResponse.json();
-        if (Array.isArray(body)) records = body;
-      } catch (error) {
-        log(`Profile list read failed before upsert '${title}': ${error.message || error}`);
-      }
+    let records = [];
+    try {
+      const listResponse = await api('/profiles?includeHidden=true', { method: 'GET' });
+      const body = await listResponse.json();
+      if (Array.isArray(body)) records = body;
+    } catch (error) {
+      log(`Profile list read failed before upsert '${title}': ${error.message || error}`);
     }
     const matching = records.filter(r => r && r.profile && String(r.profile.title || '') === title && r.visibility !== 'deleted');
     if (matching.length) {
@@ -4262,34 +4254,26 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile })
       });
       const updated = await response.json();
-      if (updated) { const at = records.findIndex(r => r && r.id === chosen.id); if (at >= 0) records[at] = updated; }
       return updated;
     }
     const response = await api('/profiles', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile })
     });
-    const created = await response.json();
-    if (created) records.push(created);
-    return created;
+    return await response.json();
   }
 
-  async function ensureProfileInstalled(records) {
-    try { await syncHyperExProfile(false, 'startup maintenance', records); }
+  async function ensureProfileInstalled() {
+    try { await syncHyperExProfile(false); }
     catch (error) { state.profileSyncStatus = `HyperEx profile sync failed: ${error.message || error}`; log(state.profileSyncStatus); }
   }
 
-  async function hideLegacyCalibrationProfile(recordsArg) {
+  async function hideLegacyCalibrationProfile() {
     const legacyTitle = state.cfg ? String(state.cfg.calibrationProfileTitle || "") : "";
     if (!legacyTitle || isCalibrationProfileTitle(legacyTitle)) return;
-    if (state.legacyProfileHiddenTitle === legacyTitle) return;
     try {
-      let records = Array.isArray(recordsArg) ? recordsArg : null;
-      if (!records) {
-        const listResponse = await api('/profiles?includeHidden=true', { method: 'GET' });
-        const body = await listResponse.json();
-        if (!Array.isArray(body)) return;
-        records = body;
-      }
+      const listResponse = await api('/profiles?includeHidden=true', { method: 'GET' });
+      const records = await listResponse.json();
+      if (!Array.isArray(records)) return;
       const legacy = records.filter(r => r && r.profile && String(r.profile.title || '') === legacyTitle && r.visibility === 'visible');
       for (const rec of legacy) {
         if (!rec.id) continue;
@@ -4298,41 +4282,29 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         });
         log(`Legacy single calibration profile '${legacyTitle}' hidden after dual-profile migration.`);
       }
-      state.legacyProfileHiddenTitle = legacyTitle;
-      storageWrite(STORAGE_LEGACY_PROFILE, legacyTitle);
     } catch (error) {
       log(`Legacy calibration profile migration skipped: ${error.message || error}`);
     }
   }
 
-  async function ensureCalibrationProfilesInstalled(recordsArg) {
-    let records = Array.isArray(recordsArg) ? recordsArg : null;
-    if (!records) {
-      try {
-        const listResponse = await api('/profiles?includeHidden=true', { method: 'GET' });
-        const body = await listResponse.json();
-        if (Array.isArray(body)) records = body;
-      } catch (error) {
-        log(`Profile list read failed during calibration profile maintenance: ${error.message || error}`);
-      }
-    }
+  async function ensureCalibrationProfilesInstalled() {
     for (const mode of ['low', 'full']) {
       try {
         const profile = calibrationProfileObject(mode);
-        const rec = await upsertProfile(profile, records);
+        const rec = await upsertProfile(profile);
         state.calibrationProfileIds[mode] = rec && rec.id ? rec.id : state.calibrationProfileIds[mode];
         log(`Calibration profile '${profile.title}' installed/updated.`);
       } catch (error) {
         log(`Calibration profile ${calibrationModeConfig(mode).label} auto-install failed: ${error.message || error}`);
       }
     }
-    await hideLegacyCalibrationProfile(records);
+    await hideLegacyCalibrationProfile();
   }
 
-  function syncHyperExProfile(updateCurrentWorkflow, reason, records) {
+  function syncHyperExProfile(updateCurrentWorkflow, reason) {
     if (!profileSyncIsIdle()) return Promise.reject(new Error('Profile writes blocked during an active shot'));
     if (updateCurrentWorkflow && state.workflowTitle === (state.cfg && state.cfg.profileTitle)) invalidateProfileTruth('waiting for fresh workflow readback', false);
-    const task = state.profileSyncQueue.catch(() => {}).then(() => performHyperExProfileSync(updateCurrentWorkflow, reason, records));
+    const task = state.profileSyncQueue.catch(() => {}).then(() => performHyperExProfileSync(updateCurrentWorkflow, reason));
     state.profileSyncQueue = task.catch(() => {});
     return task;
   }
@@ -4343,7 +4315,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     if (!profileSyncIsIdle()) throw new Error('Shot began during profile verification');
   }
 
-  async function performHyperExProfileSync(updateCurrentWorkflow, reason, records) {
+  async function performHyperExProfileSync(updateCurrentWorkflow, reason) {
     if (!profileSyncIsIdle()) throw new Error('Profile writes blocked during an active shot');
     const selected = !!(updateCurrentWorkflow && state.workflowTitle === state.cfg.profileTitle);
     const revision = state.workflowSelectionRevision;
@@ -4374,7 +4346,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       }
       const profile = profileObject();
       if (selected) checkProfileSyncContext(profile, revision);
-      const rec = await upsertProfile(profile, records);
+      const rec = await upsertProfile(profile);
       state.hyperExProfileId = rec && rec.id ? rec.id : state.hyperExProfileId;
       if (selected) {
         checkProfileSyncContext(profile, revision);
@@ -4453,7 +4425,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
 
     const selectedMode = normalizeCalibrationMode(state.calibrationMode);
     const profile = calibrationProfileObject(selectedMode);
-    const rec = await upsertProfile(profile, records);
+    const rec = await upsertProfile(profile);
     state.calibrationProfileIds[selectedMode] = rec && rec.id ? rec.id : state.calibrationProfileIds[selectedMode];
     await api('/workflow', {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile })
@@ -6933,7 +6905,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       invalidateProfileTruth(title === (state.cfg && state.cfg.profileTitle) ? 'workflow notification; GET verification required' : 'not HyperEx', !unchanged && !state.runtimeProfileRepairBusy);
       if (state.diagnosticCurrent && state.diagnosticCurrent.kind === 'hyperex' && !unchanged) state.diagnosticCurrent.config.profileTruthVerified = false;
       if (previousTitle !== title) { state.workflowProfile = null; state.profileReadbackAt = null; }
-   if (!state.runtimeProfileRepairBusy) scheduleProfileVerification('workflowUpdated', true);
+      if (!state.runtimeProfileRepairBusy) scheduleProfileVerification('workflowUpdated');
     }
 
     if (selectedCalMode !== null && state.calibrationMode !== selectedCalMode) {
@@ -6980,8 +6952,6 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     onLoad(settings) {
       state.cfg = loadConfig(settings || {});
       state.temperatureRecheckNeeded=false;
-      state.legacyProfileHiddenTitle="";
-      state.lastProfileRepairAtMs=0;
       state.learningContextLoaded = false;
       state.scopeMode = normalizeScope(state.cfg.flowMultiplierScope);
       state.calibrationMode = normalizeCalibrationMode(state.cfg.calibrationMode);
@@ -7014,7 +6984,6 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       storageRead(STORAGE_S2_REFILL);
       storageRead(STORAGE_AUTO_APPLY);
       storageRead(STORAGE_PRESETS);
-      storageRead(STORAGE_LEGACY_PROFILE);
       storageRead(STORAGE_PRESET_PENDING);
       storageRead(STORAGE_HISTORY_FILE);
       storageRead(STORAGE_ADAPTIVE_HISTORY);
@@ -7024,17 +6993,8 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         rescaleOverridesForTargets();
         emitSkinChanged();
       });
-      state.startupProfileMaintenanceTimer = setTimeout(async () => {
-        state.startupProfileMaintenanceTimer = null;
-        let records = null;
-        try {
-          const listResponse = await api('/profiles?includeHidden=true', { method: 'GET' });
-          const body = await listResponse.json();
-          if (Array.isArray(body)) records = body;
-        } catch (_) {}
-        try { await ensureProfileInstalled(records); } catch (_) {}
-        try { await ensureCalibrationProfilesInstalled(records); } catch (_) {}
-      }, 2000);
+      ensureProfileInstalled();
+      ensureCalibrationProfilesInstalled();
     },
 
     async __httpRequestHandler(request) {
@@ -7151,7 +7111,10 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         catch(error) { return pluginHttpJson(request,503,{error:String(error.message||error),autoApply:state.autoApplyLastStatus}); }
       }
       if (request.endpoint === "calibration-status") {
-        refreshFlowMultiplier(false).catch(() => {});
+        await refreshFlowMultiplier(true);
+        if (state.workflowTitle === state.cfg.profileTitle && profileSyncIsIdle()) {
+          try { await verifyAndRepairSelectedHyperExProfile('diagnostics refresh'); } catch (_) {}
+        }
         return pluginHttpJson(request, 200, calibrationStatusPayload());
       }
       if (request.endpoint === "calibration-mode") {
@@ -7304,7 +7267,6 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       if (request.endpoint === "calibration-sync") {
         try {
           await refreshFlowMultiplier(true);
-          state.lastProfileRepairAtMs = Date.now();
           await syncHyperExProfile(state.workflowTitle === state.cfg.profileTitle);
           return pluginHttpJson(request, 200, calibrationStatusPayload());
         } catch (error) {
@@ -7479,8 +7441,6 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         } else if (key === STORAGE_PRESET_PENDING) {
           const storedPending = parseStoredJson(value); state.pendingPreset = storedPending && typeof storedPending === "object" ? storedPending : null;
           if (state.pendingPreset) schedulePendingPresetApply(0);
-        } else if (key === STORAGE_LEGACY_PROFILE) {
-          state.legacyProfileHiddenTitle = typeof value === "string" ? value : "";
         } else if (key === STORAGE_CAL_MODE && value) {
           state.calibrationMode = normalizeCalibrationMode(value);
           emitSkinChanged();

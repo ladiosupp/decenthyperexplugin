@@ -1,3 +1,16 @@
+# HyperEx Pulse Filter 2.1.2
+
+回退 2.1.1 对 `calibration-status` 的「只读」改造，恢复 2.1.0 的行为：
+
+- `calibration-status` 重新在打开页面时验证/修复 profile。2.1.1 把它改成只读后，真机出现偶发首杯 controller 起不来、HyperEx 曲线不介入控制、冲洗出水完成后状态不退出且计时继续（切换曲线无效，休眠再唤醒才恢复）。这次实验得不偿失。
+- 取消 10 分钟修复冷却和 2 秒启动延迟，加载时恢复即时维护。
+- 2.1.1 那次一并做的「profile 列表合并读取」也撤掉，请求序列回到与 2.1.0 相同（稳定态 5 次）。
+- 2.1.0 的图表 Canvas 开关、2.0.2 的预设回读与 STEP 4 折叠等均保留。
+
+验证见 tests/RESULTS_v0212.txt（578/578）。
+
+## Previous release
+
 # HyperEx Pulse Filter 2.1.1
 
 诊断页回归只读，加载路径减负：

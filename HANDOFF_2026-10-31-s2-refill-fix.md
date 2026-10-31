@@ -118,3 +118,22 @@ GitHub Release：
 3. 若仍出现「S2 回落基础指令缺少驱动确认」，导出 history JSON 的 `liveFlowTrim.trace` 最后几条。
 
 发布：GitHub v2.2.3（包 HyperExPulseFilter_v2.2.3.zip，SHA256 09DAD2F16F9ABB695E8A0A6751B023BDBC746F3406494C347C6E3230FF4032CD）。夸克上传当时返回 commit status 203，未完成。
+
+## 9. 2.2.3 真机结果与 2.2.4（2026-11-01）
+
+2.2.3 真机一杯：S2 没到 5 g/s、不平直；S3 波动大；看诊断页时 Decaid 失去响应；状态栏 REAL 冻结在一个固定值（另外两格正常刷新）。
+
+2.2.4 只修状态栏：
+
+- 状态栏推送 1000 ms → 500 ms。
+- `stripRealFlowText` 增加过期回退：调流值 1.5 s 内新鲜才用；否则用当前杯最近 16 个 S2/S3 原始秤样本的短窗回归（跨度 ≥0.8 s）；再不行用 `state.latestRawDwDt`（1.2 s 内）；都没有显示「—」。
+- tests/verify_v0224.cjs 625/625。
+
+仍未解决（需要下一杯的 trace）：
+
+1. S2 未达 5、不平直：看 `cutoff.rawGS/predictedGS/decisionGS`、平台段 RAW 回归、以及杯内写入次数。
+2. S3 波动：先分 `s3Shape` drift 与救急（`s3RescueWrites`、trace 里 `rescue:true`）。
+3. 诊断页卡死：怀疑打开时的 `calibration-status`（含曲线校验/上传）加大 trace 同步重绘；未复现未改，注意 2.1.1 的教训。
+4. 调流在杯中停止：看 `report.status`（stopped / write-failed）与最后一条 check 时间。
+
+发布：GitHub v2.2.4（SHA256 C7EB96A45FDCE4FD3DAFEA5B5C08FA51C44EA8B2C28F3532D4D878B0075ADA9A）；夸克 来自：Codex/HyperExPulseFilter_v2.2.4.zip。

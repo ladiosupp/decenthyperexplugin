@@ -1,3 +1,13 @@
+# HyperEx Pulse Filter 1.90ds
+
+本地开发版（版本号 1.90ds，非严格 semver）。1.90ds 只调整诊断页首屏结构：
+
+- 去掉诊断页的标题「诊断 / 流量校准」和下面那行步骤说明（只在诊断页隐藏，浸泡/GHC 提示卡里仍保留）。
+- STEP 2 · 杯间自动学习改为与 STEP 1 对称的折叠块，默认收起；徽标仍显示状态，展开后是学习历史与已应用曲线。
+- 验证见 tests/RESULTS_v0190ds.txt（561/561）。
+
+## Previous release
+
 # HyperEx Pulse Filter 1.89ds
 
 本地开发版（版本号 1.89ds，非严格 semver）。1.89ds 在诊断页顶栏加五个预设快切按钮：

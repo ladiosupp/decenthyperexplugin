@@ -1,3 +1,13 @@
+# HyperEx Pulse Filter 1.86ds
+
+本地开发版（版本号 1.86ds，非严格 semver）。1.86ds 在诊断页加入导入，用于找回丢失的 LUT 与学习记录：
+
+- IMPORT HISTORY JSON：读 hyperex-history*.json，按 runId 合并（同杯取新），超过 30 杯保留最新；导入后重建自适应历史。只允许 idle，且要求持久化存储已就绪。
+- IMPORT LUT JSON：接受 LUT 表或导出的 history（从最近一杯的 fingerprint.lutPoints 取点）。校验数值范围、按实际流量排序、强制指令单调（至少 3 点），然后走合并落盘；会回报量程与是否可用。
+- 新增 history-import / calibration-import 两个端点，manifest 已声明。
+- 控制、学习数学与合并规则未改；验证见 tests/RESULTS_v0186ds.txt（551/551）。
+
+## Previous release
 # HyperEx Pulse Filter 1.85ds
 
 本地开发版（版本号 1.85ds，非严格 semver）。1.85ds 修 1.84ds 的一个上下文判定漏洞：

@@ -1,3 +1,15 @@
+# HyperEx Pulse Filter 2.2.2
+
+2.2.1 已发布后，S2 补水口径进一步按目标流量校正：
+
+- 补水控制目标固定在 S2 目标流量 5 g/s；`targetPercent` 不再参与 bounded 控制，旧 140% 会被归一到 100%。
+- 实际泵指令由控制律计算，目标是把 S2 onset 后的秤流速上升段做陡（接近 90°）；泵域统一硬限 8 ml/s。
+- 收口默认 `cutoffPercent=95%`（4.75 g/s），到 95% 就交回正常 S2 控制器形成 5 g/s 平台；旧 85% 在 bounded 模式下迁移为 95%。
+- 如果过冲，下调 cutoff；如果到目标太慢，上调 cutoff。cutoff 仍是可调上限/交回点，不是固定流量。
+- 补水收口仍要求实测斜率到 cutoff 的 95%，避免预测噪声提前收回。
+
+## Previous release
+
 # HyperEx Pulse Filter 2.2.1
 
 2.2.0 真机两杯在 S3 early 中止，trace 明确是 `rescueActive is not initialized`。2.2.1 是热修：

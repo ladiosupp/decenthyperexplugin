@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.1";
+  const PLUGIN_VERSION = "2.2.2";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -2124,7 +2124,7 @@ function createPlugin(host) {
       plannedBoostMlS:plan.boostCommandMlS,plannedHoldingMlS:plan.returnCommandMlS==null?plan.baseCommandMlS:plan.returnCommandMlS,executedBoostMlS:write?write.commandMlS:null,
       execution:run.liveFlowTrim&&run.liveFlowTrim.startupExecution||null,timeline:s2RefillTimeline(run)};
   }
-  function currentS2RefillSettings(){try{return validatedS2RefillSettings(state.s2RefillSettings);}catch(_){return validatedS2RefillSettings(null);}}
+  function currentS2RefillSettings(){let out;try{out=validatedS2RefillSettings(state.s2RefillSettings);}catch(_){out=validatedS2RefillSettings(null);}if(state.cfg&&state.cfg.s2RefillBoundedModel){out={...out};if(out.cutoffPercent===85)out.cutoffPercent=95;out.targetPercent=100;}return out;}
   // CUP-TARGET basis: estimate the pump command this machine needs for the S2
   // cup target, then apply the multiplier. The last clean shot's settled tail
   // is the only machine-specific response evidence; without it the refinement
@@ -2157,15 +2157,17 @@ function createPlugin(host) {
   function boundedRefillCommand(t) {
     const plan=t&&t.startup&&t.startup.plan;
     if(!plan||plan.boundedModel!==true)return plan?plan.boostCommandMlS:null;
-    const base=Number(plan.controlBaseMlS),max=Math.min(LIMITS.commandFlowMax,Number(plan.refillMaxCommandMlS||plan.boostCommandMlS));
-    const target=Number(plan.refillTargetGS||(t.run&&t.run.config&&t.run.config.stage2Flow)),cutoff=target*Number(plan.cutoffFraction||.85);
+    const base=Number(plan.controlBaseMlS);
+    const target=Number(plan.refillTargetGS||(t.run&&t.run.config&&t.run.config.stage2Flow));
+    const flowMax=Number(plan.flowMaxGS||target*Number(plan.refillTargetFraction||1));
+    const max=Math.min(LIMITS.commandFlowMax,Number(plan.refillMaxCommandMlS||plan.boostCommandMlS));
     const r=Number(plan.controlGain)>0?Number(plan.controlGain):(base>0?target/base:1);
     if(!(base>0)||!(max>0)||!(target>0))return null;
     const estimate=s2RefillFlowEstimate(t);
     let predicted=estimate?Number(estimate.predicted):null;
     if(!Number.isFinite(predicted))predicted=0;
-    predicted=Math.max(0,Math.min(target*1.5,predicted));
-    let candidate=predicted>0?base+Math.max(0,(cutoff-predicted)/Math.max(.15,r)):max;
+    predicted=Math.max(0,Math.min(flowMax,predicted));
+    let candidate=predicted>0?base+Math.max(0,(target-predicted)/Math.max(.15,r)):max;
     candidate=Math.max(base,Math.min(max,candidate));
     return Math.floor((candidate+1e-9)*16)/16;
   }
@@ -2207,13 +2209,17 @@ function createPlugin(host) {
     if(!state.cfg.s2StartupAssist||!state.cfg.liveFlowTrimTest)return plan;
     if(!Number.isFinite(base)||base<LIMITS.commandFlowMin||base>LIMITS.commandFlowMax){plan.reason="S2 refill base command invalid";return plan;}
     if(!Number.isFinite(refillBase)||refillBase<LIMITS.commandFlowMin||refillBase>LIMITS.commandFlowMax){plan.reason="S2 refill target estimate invalid";return plan;}
-    // Percentage applies to the selected basis: the quantized base pump command,
-    // or the pump command estimated to deliver the S2 cup target. Never cup g/s.
-    const requested=refillBase*settings.targetPercent/100;
+    // The UI basis is cup/g-s. targetPercent and cutoffPercent are flow-domain
+    // bounds; LUT/r only translates the desired g/s into a pump command.
+    const flowMaxGS=bounded?cupTarget:cupTarget*settings.targetPercent/100;
+    const flowCutoffGS=cupTarget*settings.cutoffPercent/100;
+    const requested=bounded?LIMITS.commandFlowMax:refillBase*settings.targetPercent/100;
     if(settings.basis!=="cup-target")plan.commandBasis="base-pump-command multiplier";
-    const ceiling=Math.min(LIMITS.commandFlowMax,refillBase*1.6);
+    const ceiling=bounded?LIMITS.commandFlowMax:Math.min(LIMITS.commandFlowMax,refillBase*1.6);
     const boost=Math.floor((Math.min(ceiling,Math.max(refillBase,requested))+1e-9)*16)/16;
+    plan.flowMaxGS=round(flowMaxGS,3);plan.flowCutoffGS=round(flowCutoffGS,3);
     plan.requestedCommandMlS=round(requested,4);plan.commandLimited=requested>ceiling;
+    plan.controlMaxMlS=bounded?round(boost,4):null;
     plan.refillMaxCommandMlS=boost;
     if(boost<(bounded?refillBase:base)+1/16){plan.reason=requested<=refillBase?"S2 refill target needs no extra command":"S2 refill has no command headroom";return plan;}
     const holding=bounded&&settings.basis==="cup-target"?{commandMlS:round(refillBase,3),basis:"bounded target-equivalent command",sourceRunId:control&&control.bucketId||null}:s2HoldingReference(base,boost);
@@ -2281,7 +2287,9 @@ function createPlugin(host) {
       if(refill){
         let limits;try{limits=validatedS2RefillSettings(p.plan.settings);}catch(_){return startupBlock(t,"S2 refill plan settings invalid");}
         const planBase=Number.isFinite(Number(p.plan.refillPumpBaseMlS))?Number(p.plan.refillPumpBaseMlS):base;
-        const expectedBoost=Math.floor((Math.min(LIMITS.commandFlowMax,planBase*limits.targetPercent/100)+1e-9)*16)/16;
+        const expectedBoost=p.plan.boundedModel===true
+          ?Math.floor((Math.min(LIMITS.commandFlowMax,Number(p.plan.refillMaxCommandMlS||LIMITS.commandFlowMax))+1e-9)*16)/16
+          :Math.floor((Math.min(LIMITS.commandFlowMax,planBase*limits.targetPercent/100)+1e-9)*16)/16;
         if(p.plan.holdMs!==limits.maxDurationMs||p.plan.cutoffFraction!==limits.cutoffPercent/100||p.plan.approachMs!==limits.approachMs||p.plan.startDelayMs!==limits.startDelayMs||p.plan.refillTargetFraction!==limits.targetPercent/100||!Number.isFinite(planBase)||planBase<LIMITS.commandFlowMin||planBase>LIMITS.commandFlowMax||typeof p.plan.commandBasis!=="string"||!p.plan.commandBasis||p.plan.boostCommandMlS!==expectedBoost)return startupBlock(t,"S2 refill plan settings invalid");
         if(now-(Number.isFinite(p.frameConfirmedAt)?p.frameConfirmedAt:t.frameAt)<limits.startDelayMs)return startupBlock(t,"S2 refill start delay");
       }
@@ -3990,7 +3998,7 @@ function renderRefillEditor(){
  const request=refillBase*r.targetPercent/100;
  const boost=Math.max(refillBase,Math.floor((Math.min(upper,Math.max(refillBase,request))+1e-9)*16)/16);
  const holding=Math.max(baseCommand,Math.floor((Math.min(boost,baseCommand*1.2,baseCommand*(Number(plan.returnCommandMlS)||Number(plan.baseCommandMlS)||baseCommand)/Math.max(.1,Number(plan.baseCommandMlS)||baseCommand))+1e-9)*16)/16);
- for(const x of refillControlFields){const input=box.querySelector('[data-refill-key="'+x[0]+'"]');input.value=r[x[0]];input.disabled=curveBusy||!curveLatest.canApply;const text=x[2]==='s'?(r[x[0]]/1000).toFixed(2)+' s':r[x[0]]+'%'+(x[0]==='targetPercent'?' · '+boost.toFixed(4)+' ml/s':' · '+(goal*r[x[0]]/100).toFixed(2)+' g/s');$('refillvalue-'+x[0]).textContent=text;}
+ for(const x of refillControlFields){if(curveLatest.refillBoundedModel&&x[0]==='targetPercent')continue;const input=box.querySelector('[data-refill-key="'+x[0]+'"]');input.value=r[x[0]];input.disabled=curveBusy||!curveLatest.canApply;const text=x[2]==='s'?(r[x[0]]/1000).toFixed(2)+' s':r[x[0]]+'%'+(x[0]==='targetPercent'?' · '+boost.toFixed(4)+' ml/s':' · '+(goal*r[x[0]]/100).toFixed(2)+' g/s');$('refillvalue-'+x[0]).textContent=text;}
  box.querySelectorAll('[data-refill-basis]').forEach(q=>{q.checked=r.basis===q.value;q.disabled=curveBusy||!curveLatest.canApply;});
  const planBasis=plan.settings&&plan.settings.basis;
  const cupBase=Number.isFinite(planEstimate)?planEstimate:baseCommand;const pumpBase=baseCommand;const otherBasis=r.basis==="cup-target"?"pump-command":"cup-target";const otherBase=otherBasis==="cup-target"?cupBase:pumpBase;const otherUpper=Math.min(8,otherBase*1.6);const otherBoost=Math.max(otherBase,Math.floor((Math.min(otherUpper,Math.max(otherBase,otherBase*r.targetPercent/100))+1e-9)*16)/16);$('refillvalue-basis').textContent=(r.basis==="cup-target"?("目标折算 · 设置值 S2 "+(goal||"—")+" g/s → 估算基础 "+(Number.isFinite(planEstimate)?planEstimate.toFixed(4):(planBasis==="cup-target"?"无合格实测尾段，用 "+baseCommand.toFixed(4)+" ml/s":"保存后按实测尾段折算"))+" ml/s → 增强 "+boost.toFixed(4)+" ml/s · 另一基准 "+otherBoost.toFixed(4)+" ml/s"):("基础泵倍率 · 当前指令 "+pumpBase.toFixed(4)+" ml/s → 增强 "+boost.toFixed(4)+" ml/s · 目标折算基准 "+(Number.isFinite(planEstimate)?"（可用）"+otherBoost.toFixed(4)+" ml/s":"（保存后可用）")));
@@ -5436,7 +5444,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
   function curveEditorSnapshot() {
     if(!state.cfg)return null;
     const c=commandFlowSummary(),q=c.s3Shape||{},v={stage1:c.stage1CommandMlS,stage2:c.stage2CommandMlS,early:q.enabled?q.earlyCommand:c.stage3FlatCommandMlS,mid:q.enabled?q.midCommand:c.stage3FlatCommandMlS,late:q.enabled?q.lateCommand:c.stage3FlatCommandMlS,earlySeconds:q.enabled?q.earlySeconds:8,midSeconds:q.enabled?q.midSeconds:14};
-    return {revision:curveEditorRevision(),values:v,shaped:!!q.enabled,refill:currentS2RefillSettings(),refillLimits:S2_REFILL_LIMITS,refillDefaults:validatedS2RefillSettings(null),
+    return {revision:curveEditorRevision(),values:v,shaped:!!q.enabled,refill:currentS2RefillSettings(),refillBoundedModel:state.cfg.s2RefillBoundedModel===true,refillLimits:S2_REFILL_LIMITS,refillDefaults:validatedS2RefillSettings(null),
       refillPreview:stage2StartupPlan(),refillActive:activeReleaseEnabled(state.cfg)&&state.cfg.liveFlowTrimTest&&state.cfg.s2StartupAssist,refillLoadWarning:state.s2RefillLoadWarning,refillPrevious:state.s2RefillPrevious?JSON.parse(JSON.stringify(state.s2RefillPrevious)):null,refillLastShot:refillLastShotSnapshot(),
       canApply:state.s2RefillStorageLoaded&&state.phase==="idle"&&!state.calibrationActive&&!state.curveApplyBusy&&!state.runtimeProfileRepairBusy&&!(state.autoApplyLastStatus&&state.autoApplyLastStatus.status==="applying")&&state.workflowTitle===state.cfg.profileTitle&&state.runtimeProfileVerified&&state.calibrationMapUsable,
       source:state.testOverrides&&testOverrideStatus().valid&&!testOverrideStatus().baselinePrior?state.testOverrides.manualCurveSource||null:null,

@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "1.83ds";
+  const PLUGIN_VERSION = "1.84ds";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -2284,6 +2284,13 @@ function createPlugin(host) {
     delete q.shotSettings.temperature;
     q.shotSettings={activeRelease:fp.shotSettings&&fp.shotSettings.activeRelease!==undefined?fp.shotSettings.activeRelease!==false:true};
     delete q.targets;
+    // A merged LUT re-samples the same machine. Only its identity (mapCreatedAt) and
+    // the physical context decide whether old evidence still applies; the point list
+    // is deliberately not part of the learning key.
+    delete q.lutPoints;
+    delete q.targetAnchors;
+    delete q.lutSchema;
+    delete q.lutAlgorithm;
     return adaptiveHistoryFingerprintKey(q);
   }
 
@@ -3682,7 +3689,7 @@ const trimLevelSlider=$('adv_liveFlowTrimLevel');if(trimLevelSlider)trimLevelSli
 
 async function loadAdvancedSettings(){try{const r=await fetch(base+'/advanced-settings');if(!r.ok)return;const j=await r.json(),a=j.settings||{};for(const k of ADV_FIELDS){const q=$('adv_'+k);if(q&&a[k]!=null){if(q.type==='checkbox')q.checked=!!a[k];else q.value=a[k]}}const currentTemp=$('adv_temperature');if(currentTemp&&a.temperature!=null)currentTemp.value=Number(a.temperature).toFixed(1)+' °C';const meta=$('advancedmeta');updateTrimLevelLabel();const modeBox=$('adv_activeRelease');if(modeBox)modeBox.disabled=!j.canEdit;if(meta){const bt=j.basicCurve||{};meta.innerHTML='Single settings source · core curve: S1 <b>'+esc(bt.stage1WeightG)+'g</b> → settle <b>'+esc(bt.releaseSettleSeconds)+'s</b> → soak <b>'+esc(bt.soakSeconds)+'s</b> → S2→S3 <b>'+esc(bt.stage2WeightG)+'g</b> → final <b>'+esc(bt.finalWeightG)+'g</b> · GHC timeout <b>'+esc(bt.ghcConfirmTimeoutSeconds)+'s</b>.'+(j.directStartTest?'<br><b>DIRECT DRIVER TEST: '+esc(j.directStartTest.status)+'</b>':'')}}catch(e){const meta=$('advancedmeta');if(meta)meta.textContent='Settings load error: '+e}}
 async function saveAdvancedSettings(){const preflight=await fetch(base+'/advanced-settings');if(!preflight.ok){alert('Settings availability check failed');return}const eligibility=await preflight.json();if(!eligibility.canEdit){alert('Change settings only while idle');return}const payload={};for(const k of ADV_FIELDS){const q=$('adv_'+k);if(!q)continue;if(q.type==='checkbox'){payload[ADV_SETTING_KEYS[k]]=q.checked;continue}if(k==='adaptiveLearningLevel'){payload[ADV_SETTING_KEYS[k]]=q.value;continue}const v=Number(q.value);if(!Number.isFinite(v)){alert('Invalid setting: '+k);return}payload[ADV_SETTING_KEYS[k]]=k==='liveFlowTrimLevel'?String(v):v}if(!confirm('Save these values to the normal HyperEx plugin Settings?\\n\\nThis uses the same settings source shown on the Plugins page and reloads HyperEx once.'))return;const r=await fetch(coreSettings,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});if(!r.ok){alert('Save failed: '+await r.text());return}alert('Settings saved. HyperEx is reloading; reopen DIAG / CAL if this page closes.');setTimeout(()=>location.reload(),1200)}
-async function loadCal(){try{const r=await fetch(base+'/calibration-status');const c=await r.json();renderLearningHistory(c.learningHistory);latestManualCurveSource=c.commandFlows&&c.commandFlows.manualCurveSource||null;renderCurveEditor(c.curveEditor);renderAppliedCommands(c.commandFlows||{},c.profileTruth||{});renderBasketContext(c);latestAutoApplyEnabled=c.autoApplyNextShot!==false;latestAutoApplyStatus=c.autoApplyLastStatus||null;renderAutoApplyBox();renderAdaptive(latestAdaptiveSummary);renderNextDecision(latestAdaptiveSummary);const ok=c.calibrationUsable;const b1=$("step1badge"),b2=$("step2badge");if(b1){b1.textContent=ok?"CAL READY":"REQUIRED FIRST";b1.className="stepBadge "+(ok?"good":"bad")}if(b2){b2.textContent=ok?"ACTIVE · AUTO NEXT SHOT":"WAITING FOR VALID LUT";b2.className="stepBadge "+(ok?"good":"bad")}const hs=c.persistentHistory||{},hb=$("historystatus");if(hb){if(hs.available===true){hb.style.background="#173b25";hb.style.color="#9ff0b5";hb.innerHTML='<b>ADAPTIVE HISTORY · PERSISTENT</b> · '+esc(hs.savedShots)+' saved shot(s), '+esc(hs.compatibleShots)+' compatible with the current calibration/LUT and basket context. '+esc(hs.baselineReferenceShots||0)+' empty/pre-upgrade baseline references retained; coffee consensus accumulates from normal coffees.'}else if(hs.available===false){hb.style.background="#4a2024";hb.style.color="#ffb4b8";hb.innerHTML='<b>ADAPTIVE HISTORY · SESSION ONLY</b> · '+esc(hs.status)+'<br>Shot-to-shot adaptation still works in this session, but cross-reload/version regression is disabled.'}else{hb.style.background="#3b2d16";hb.style.color="#ffd58a";hb.innerHTML='<b>ADAPTIVE HISTORY</b> · checking pluginStorage write/readback…'}}if($("t1")){ $("t1").value=c.commandFlows&&c.commandFlows.stage1DesiredGS!=null?c.commandFlows.stage1DesiredGS:""; $("t2").value=c.commandFlows&&c.commandFlows.stage2DesiredGS!=null?c.commandFlows.stage2DesiredGS:""; $("t3").value=c.commandFlows&&c.commandFlows.stage3DesiredGS!=null?c.commandFlows.stage3DesiredGS:"";}if(calmode){calmode.innerHTML=(c.calibrationModes||[{id:'low',label:'Low Water'},{id:'full',label:'Full'}]).map(x=>'<button class="b s '+(c.calibrationMode===x.id?'active':'')+'" data-mode="'+esc(x.id)+'">'+esc(x.label)+(x.id==='low'?' · DEFAULT':'')+'</button>').join('');calmode.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-mode',{mode:q.dataset.mode});await loadCal()})}if(waterwarn){const w=c.waterPreflight||{};const wc=w.status==='ok'?'#163b26':w.status==='warn'?'#3b2d16':'#4a2024';const fg=w.status==='ok'?'#9ff0b5':w.status==='warn'?'#ffd58a':'#ffb4b8';waterwarn.style.background=wc;waterwarn.style.color=fg;let tank='Tank level unavailable';if(w.available)tank='Tank: <b>'+esc(w.currentLevelMm)+' mm</b> · refill threshold: <b>'+esc(w.refillLevelMm)+' mm</b> · margin: <b>'+esc(w.marginMm)+' mm</b>';waterwarn.innerHTML='<b>WATER / VESSEL / TANK PREFLIGHT · '+esc(c.calibrationModeLabel)+' · '+esc((w.status||'unknown').toUpperCase())+'</b><br>'+tank+'<br>Prime: '+esc(c.primeFlow)+' ml/s × '+esc(c.primeSeconds)+' s · '+esc(c.calibrationSteps)+' calibration plateaus × '+esc(c.calibrationStepSeconds)+' s · nominal DE1 command water <b>≈'+esc(c.nominalCommandWaterMl)+' ml</b>.<br>Use a <b>'+esc(c.recommendedContainerMl)+' ml or larger</b> catch vessel. Plugin actively stops around <b>'+esc(c.calibrationHardStopG)+' g</b> actual collected water. '+esc(w.message||'');}calstatus.innerHTML='<b class="'+(ok?'good':'bad')+'">'+(ok?'CALIBRATION READY':'CALIBRATION NOT READY')+'</b><br>Mode: <b>'+esc(c.calibrationModeLabel)+'</b> · Profile: <b>'+esc(c.calibrationProfileTitle)+'</b><br>Scope: <b>'+esc(c.scopeLabel)+'</b> · DE1 multiplier: <b>'+esc(c.currentFlowMultiplier)+'</b> · map base: <b>'+esc(c.calibrationBaseMultiplier)+'</b> · suggested: <b>'+esc(c.suggestedFlowMultiplier)+'</b><br>'+esc(c.calibrationStaleReason||'LUT valid')+(c.lastCalibrationValid===false?'<br><b class="bad">LAST CAL RUN INVALID — previous valid LUT retained</b>':c.lastCalibrationValid===true?'<br><b class="good">LAST CAL RUN VALID</b>':'')+'<br>Real→command: S1 '+esc(c.commandFlows&&c.commandFlows.stage1DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage1CommandMlS)+' · S2 '+esc(c.commandFlows&&c.commandFlows.stage2DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage2CommandMlS)+' · S3 '+esc(c.commandFlows&&c.commandFlows.stage3DesiredGS)+'→'+appliedS3Text(c.commandFlows||{})+'<br>Test mode: <b>'+esc((c.commandFlows&&c.commandFlows.manualTestStatus)||'none')+'</b>';renderTestCommands(c.commandFlows||{},latestAdvisorySummary||{});scope.innerHTML=['off','hyperex','global'].map(x=>'<button class="b s '+(c.scope===x?'active':'')+'" data-scope="'+x+'">'+(x==='off'?'OFF':x==='hyperex'?'HYPEREX ONLY':'GLOBAL')+'</button>').join('');scope.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-scope',{scope:q.dataset.scope});await loadCal()});const last=c.lastCalibration||null;const rows=last&&Array.isArray(last.plateauResults)?last.plateauResults:[];const anchors=last&&last.map&&Array.isArray(last.map.targetAnchors)?last.map.targetAnchors:[];const anchorHtml=anchors.length?'<div style="margin:8px 0"><b>TARGET LUT:</b> '+anchors.map(a=>esc(a.blockId)+' '+esc(a.actualFlow)+' g/s → '+esc(a.commandFlow)+' ml/s ('+esc(a.quality)+')').join(' · ')+'</div>':'';map.innerHTML=rows.length?anchorHtml+'<table><tr><th>Frame</th><th>Block / target</th><th>DE1 cmd</th><th>RAW real g/s</th><th>DE1 flow</th><th>R²</th><th>Status</th></tr>'+rows.map(p=>'<tr><td>'+esc(p.frame)+'</td><td>'+esc((p.blockId||'—')+(p.targetReal!=null?' / '+p.targetReal:'') )+'</td><td>'+esc(p.commandFlow)+'</td><td>'+esc(p.actualFlow)+'</td><td>'+esc(p.machineFlow)+'</td><td>'+esc(p.r2)+'</td><td class="'+(p.acceptedInMap?'good':(p.valid?'':'bad'))+'">'+esc(p.acceptedInMap?'ANCHOR SOURCE':(p.reason||'REJECTED'))+'</td></tr>').join('')+'</table><div style="margin-top:8px">'+esc(c.profileSyncStatus||'')+'</div>':'No calibration run yet. Low Water automatically searches the three HyperEx real-flow targets and generates the LUT only when all targets pass. Full remains the wide engineering staircase.';const cur=c.stage1StartupCorrection||1;startupbox.innerHTML='<b>Stable skip topology:</b> scale feedback is advisory only. Optional S3 DECAY COMP may use 5 profile frames, but S3 subframes advance only by their own timers and never add plugin skipStep calls.'+(Number(cur)!==1?(' <br><span class="bad">Legacy S1 startup factor '+esc(cur)+'× is stored but ignored in v${PLUGIN_VERSION}.</span> <button id=clearstartup class="b s">CLEAR LEGACY</button>'):'');const cl=$("clearstartup");if(cl)cl.onclick=async()=>{try{await post('startup-clear',{});await loadCal()}catch(e){alert('Clear failed: '+e)}};}catch(e){calstatus.textContent='Calibration status error: '+e}}
+async function loadCal(){try{const r=await fetch(base+'/calibration-status');const c=await r.json();renderLearningHistory(c.learningHistory);latestManualCurveSource=c.commandFlows&&c.commandFlows.manualCurveSource||null;renderCurveEditor(c.curveEditor);renderAppliedCommands(c.commandFlows||{},c.profileTruth||{});renderBasketContext(c);latestAutoApplyEnabled=c.autoApplyNextShot!==false;latestAutoApplyStatus=c.autoApplyLastStatus||null;renderAutoApplyBox();renderAdaptive(latestAdaptiveSummary);renderNextDecision(latestAdaptiveSummary);const ok=c.calibrationUsable;const b1=$("step1badge"),b2=$("step2badge");if(b1){b1.textContent=ok?"CAL READY":"REQUIRED FIRST";b1.className="stepBadge "+(ok?"good":"bad")}if(b2){b2.textContent=ok?"ACTIVE · AUTO NEXT SHOT":"WAITING FOR VALID LUT";b2.className="stepBadge "+(ok?"good":"bad")}const hs=c.persistentHistory||{},hb=$("historystatus");if(hb){if(hs.available===true){hb.style.background="#173b25";hb.style.color="#9ff0b5";hb.innerHTML='<b>ADAPTIVE HISTORY · PERSISTENT</b> · '+esc(hs.savedShots)+' saved shot(s), '+esc(hs.compatibleShots)+' compatible with the current calibration/LUT and basket context. '+esc(hs.baselineReferenceShots||0)+' empty/pre-upgrade baseline references retained; coffee consensus accumulates from normal coffees.'}else if(hs.available===false){hb.style.background="#4a2024";hb.style.color="#ffb4b8";hb.innerHTML='<b>ADAPTIVE HISTORY · SESSION ONLY</b> · '+esc(hs.status)+'<br>Shot-to-shot adaptation still works in this session, but cross-reload/version regression is disabled.'}else{hb.style.background="#3b2d16";hb.style.color="#ffd58a";hb.innerHTML='<b>ADAPTIVE HISTORY</b> · checking pluginStorage write/readback…'}}if($("t1")){ $("t1").value=c.commandFlows&&c.commandFlows.stage1DesiredGS!=null?c.commandFlows.stage1DesiredGS:""; $("t2").value=c.commandFlows&&c.commandFlows.stage2DesiredGS!=null?c.commandFlows.stage2DesiredGS:""; $("t3").value=c.commandFlows&&c.commandFlows.stage3DesiredGS!=null?c.commandFlows.stage3DesiredGS:"";}if(calmode){calmode.innerHTML=(c.calibrationModes||[{id:'low',label:'Low Water'},{id:'full',label:'Full'}]).map(x=>'<button class="b s '+(c.calibrationMode===x.id?'active':'')+'" data-mode="'+esc(x.id)+'">'+esc(x.label)+(x.id==='low'?' · DEFAULT':'')+'</button>').join('');calmode.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-mode',{mode:q.dataset.mode});await loadCal()})}if(waterwarn){const w=c.waterPreflight||{};const wc=w.status==='ok'?'#163b26':w.status==='warn'?'#3b2d16':'#4a2024';const fg=w.status==='ok'?'#9ff0b5':w.status==='warn'?'#ffd58a':'#ffb4b8';waterwarn.style.background=wc;waterwarn.style.color=fg;let tank='Tank level unavailable';if(w.available)tank='Tank: <b>'+esc(w.currentLevelMm)+' mm</b> · refill threshold: <b>'+esc(w.refillLevelMm)+' mm</b> · margin: <b>'+esc(w.marginMm)+' mm</b>';waterwarn.innerHTML='<b>WATER / VESSEL / TANK PREFLIGHT · '+esc(c.calibrationModeLabel)+' · '+esc((w.status||'unknown').toUpperCase())+'</b><br>'+tank+'<br>Prime: '+esc(c.primeFlow)+' ml/s × '+esc(c.primeSeconds)+' s · '+esc(c.calibrationSteps)+' calibration plateaus × '+esc(c.calibrationStepSeconds)+' s · nominal DE1 command water <b>≈'+esc(c.nominalCommandWaterMl)+' ml</b>.<br>Use a <b>'+esc(c.recommendedContainerMl)+' ml or larger</b> catch vessel. Plugin actively stops around <b>'+esc(c.calibrationHardStopG)+' g</b> actual collected water. '+esc(w.message||'');}calstatus.innerHTML='<b class="'+(ok?'good':'bad')+'">'+(ok?'CALIBRATION READY':'CALIBRATION NOT READY')+'</b><br>Mode: <b>'+esc(c.calibrationModeLabel)+'</b> · Profile: <b>'+esc(c.calibrationProfileTitle)+'</b><br>Scope: <b>'+esc(c.scopeLabel)+'</b> · DE1 multiplier: <b>'+esc(c.currentFlowMultiplier)+'</b> · map base: <b>'+esc(c.calibrationBaseMultiplier)+'</b> · suggested: <b>'+esc(c.suggestedFlowMultiplier)+'</b><br>LUT rev <b>'+esc(c.lutRevision||1)+'</b> · points <b>'+esc(c.pointCount)+'</b>'+(Array.isArray(c.actualRange)?' · range <b>'+esc(c.actualRange[0])+'..'+esc(c.actualRange[1])+' g/s</b>':'')+(c.lutMerge?' · merged: <b>'+esc(c.lutMerge.retained)+'</b> retained, <b>'+esc(c.lutMerge.added)+'</b> new, <b>'+esc(c.lutMerge.replaced)+'</b> replaced':'')+'<br>'+esc(c.calibrationStaleReason||'LUT valid')+(c.lastCalibrationValid===false?'<br><b class="bad">LAST CAL RUN INVALID — previous valid LUT retained</b>':c.lastCalibrationValid===true?'<br><b class="good">LAST CAL RUN VALID</b>':'')+'<br>Real→command: S1 '+esc(c.commandFlows&&c.commandFlows.stage1DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage1CommandMlS)+' · S2 '+esc(c.commandFlows&&c.commandFlows.stage2DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage2CommandMlS)+' · S3 '+esc(c.commandFlows&&c.commandFlows.stage3DesiredGS)+'→'+appliedS3Text(c.commandFlows||{})+'<br>Test mode: <b>'+esc((c.commandFlows&&c.commandFlows.manualTestStatus)||'none')+'</b>';renderTestCommands(c.commandFlows||{},latestAdvisorySummary||{});scope.innerHTML=['off','hyperex','global'].map(x=>'<button class="b s '+(c.scope===x?'active':'')+'" data-scope="'+x+'">'+(x==='off'?'OFF':x==='hyperex'?'HYPEREX ONLY':'GLOBAL')+'</button>').join('');scope.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-scope',{scope:q.dataset.scope});await loadCal()});const last=c.lastCalibration||null;const rows=last&&Array.isArray(last.plateauResults)?last.plateauResults:[];const anchors=last&&last.map&&Array.isArray(last.map.targetAnchors)?last.map.targetAnchors:[];const anchorHtml=anchors.length?'<div style="margin:8px 0"><b>TARGET LUT:</b> '+anchors.map(a=>esc(a.blockId)+' '+esc(a.actualFlow)+' g/s → '+esc(a.commandFlow)+' ml/s ('+esc(a.quality)+')').join(' · ')+'</div>':'';map.innerHTML=rows.length?anchorHtml+'<table><tr><th>Frame</th><th>Block / target</th><th>DE1 cmd</th><th>RAW real g/s</th><th>DE1 flow</th><th>R²</th><th>Status</th></tr>'+rows.map(p=>'<tr><td>'+esc(p.frame)+'</td><td>'+esc((p.blockId||'—')+(p.targetReal!=null?' / '+p.targetReal:'') )+'</td><td>'+esc(p.commandFlow)+'</td><td>'+esc(p.actualFlow)+'</td><td>'+esc(p.machineFlow)+'</td><td>'+esc(p.r2)+'</td><td class="'+(p.acceptedInMap?'good':(p.valid?'':'bad'))+'">'+esc(p.acceptedInMap?'ANCHOR SOURCE':(p.reason||'REJECTED'))+'</td></tr>').join('')+'</table><div style="margin-top:8px">'+esc(c.profileSyncStatus||'')+'</div>':'No calibration run yet. Low Water automatically searches the three HyperEx real-flow targets and generates the LUT only when all targets pass. Full remains the wide engineering staircase.';const cur=c.stage1StartupCorrection||1;startupbox.innerHTML='<b>Stable skip topology:</b> scale feedback is advisory only. Optional S3 DECAY COMP may use 5 profile frames, but S3 subframes advance only by their own timers and never add plugin skipStep calls.'+(Number(cur)!==1?(' <br><span class="bad">Legacy S1 startup factor '+esc(cur)+'× is stored but ignored in v${PLUGIN_VERSION}.</span> <button id=clearstartup class="b s">CLEAR LEGACY</button>'):'');const cl=$("clearstartup");if(cl)cl.onclick=async()=>{try{await post('startup-clear',{});await loadCal()}catch(e){alert('Clear failed: '+e)}};}catch(e){calstatus.textContent='Calibration status error: '+e}}
 // Daily charts show extraction only. Full original telemetry remains in CSV/run data.
 function extractionChartRows(run,rows){
  if(run.kind==='calibration')return(rows||[]).map(s=>({...s,_chartSegment:0,_chartGroup:'calibration'}));
@@ -5075,6 +5082,8 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       targetAnchors: map && Array.isArray(map.targetAnchors) ? map.targetAnchors : null,
       actualRange: map ? map.actualRange : null,
       pointCount: calibrationPoints().length,
+      lutRevision: map && Number(map.revision || 0) > 0 ? Number(map.revision) : null,
+      lutMerge: map && map.merge ? map.merge : null,
       commandFlows: commandFlowSummary(),
       profileTruth: runtimeProfileTruthPayload(),
       persistentHistory: historyStatusPayload(),
@@ -5109,6 +5118,77 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
     log(`Flow Calibration started (${calibrationModeConfig().label}) at flowMultiplier=${Number.isFinite(current) ? current.toFixed(3) : 'unknown'}. EMPTY BASKET; actual-water safety cap=${calibrationModeConfig().hardStopG} g.`);
   }
 
+  // A recalibration is a re-measurement of the same machine. Merge its points into
+  // the existing map instead of replacing it: the covered range keeps learning, and
+  // a new run can only extend or refine the curve. The map keeps its identity
+  // (createdAt) so command overrides and adaptive history stay bound to it; a
+  // genuinely different machine state shows up as a new flowMultiplier, which the
+  // learning fingerprint does check.
+  function mergeCalibrationMap(previous, next) {
+    if (!next || next.valid !== true || !Array.isArray(next.points) || next.points.length < 2) return next;
+    const usablePrevious = previous && previous.valid === true && Number(previous.schema || 0) >= 3 && Array.isArray(previous.points) && previous.points.length >= 2;
+    if (!usablePrevious) return next;
+    const near = value => Math.max(0.05, Math.abs(Number(value)) * 0.02);
+    const fresh = next.points.map(p => ({ ...p, source: "new" }));
+    let replaced = 0, added = 0;
+    const kept = previous.points.map(p => {
+      const clash = fresh.find(q => Math.abs(Number(q.actualFlow) - Number(p.actualFlow)) <= near(p.actualFlow));
+      if (clash) { replaced += 1; return { ...clash }; }
+      return { ...p, source: p.source || "retained" };
+    });
+    for (const q of fresh) {
+      if (!kept.some(m => Math.abs(Number(m.actualFlow) - Number(q.actualFlow)) <= near(q.actualFlow))) { kept.push({ ...q }); added += 1; }
+    }
+    kept.sort((a, b) => Number(a.actualFlow) - Number(b.actualFlow));
+    const monotonic = [];
+    let dropped = 0;
+    for (const p of kept) {
+      const last = monotonic[monotonic.length - 1];
+      if (last && Number(p.commandFlow) <= Number(last.commandFlow) + 1e-6) {
+        dropped += 1;
+        if (p.source === "new" && last.source !== "new") monotonic[monotonic.length - 1] = p;
+        continue;
+      }
+      monotonic.push(p);
+    }
+    const retained = monotonic.filter(p => p.source !== "new").length;
+    return {
+      ...next,
+      createdAt: previous.createdAt || next.createdAt,
+      baseFlowMultiplier: Number.isFinite(Number(next.baseFlowMultiplier)) ? next.baseFlowMultiplier : previous.baseFlowMultiplier,
+      suggestedFlowMultiplier: Number.isFinite(Number(next.suggestedFlowMultiplier)) ? next.suggestedFlowMultiplier : previous.suggestedFlowMultiplier,
+      revisedAt: new Date().toISOString(),
+      revision: Number(previous.revision || 1) + 1,
+      points: monotonic,
+      actualRange: [Number(monotonic[0].actualFlow), Number(monotonic[monotonic.length - 1].actualFlow)],
+      merge: {
+        at: new Date().toISOString(),
+        previousRevision: Number(previous.revision || 1),
+        retained,
+        added,
+        replaced,
+        droppedNonMonotonic: dropped
+      }
+    };
+  }
+
+  function adoptCalibrationMap(next) {
+    const merged = mergeCalibrationMap(state.calibrationMap, next);
+    state.calibrationMap = merged;
+    state.calibrationPendingMultiplier = null;
+    storageWrite(STORAGE_CAL, merged);
+    // Only a brand-new LUT identity drops the learned commands. A merge keeps them:
+    // the adaptive evidence is bound to the machine context, not to the point list.
+    if (!merged.merge) {
+      state.testOverrides = null;
+      state.adaptiveHistory = [];
+      storageWrite(STORAGE_TEST_OVERRIDES, "");
+      storageWrite(STORAGE_PENDING_MULT, "");
+    }
+    recomputeCalibrationUsability();
+    return merged;
+  }
+
   async function finalizeCalibrationRun(result) {
     if (!state.calibrationActive || state.calibrationFinalizeBusy) return;
     state.calibrationFinalizeBusy = true;
@@ -5140,17 +5220,10 @@ async function poll(){try{const r=await fetch(base+'/status');paint(await r.json
       state.phase = 'idle';
 
       if (analysis.valid) {
-        state.calibrationMap = analysis.map;
-        state.calibrationPendingMultiplier = null;
-        storageWrite(STORAGE_CAL, analysis.map);
-        // A new LUT invalidates any old static manual-test command. Never carry
-        // an experiment across a calibration map change.
-        state.testOverrides = null;
-        state.adaptiveHistory = [];
-        storageWrite(STORAGE_TEST_OVERRIDES, '');
-        storageWrite(STORAGE_PENDING_MULT, '');
-        recomputeCalibrationUsability();
-        log(`Flow Calibration VALID: ${analysis.map.points.length} LUT points (${analysis.map.algorithm}), real-flow range ${analysis.map.actualRange[0]}..${analysis.map.actualRange[1]} g/s. Suggested DE1 flowMultiplier=${analysis.map.suggestedFlowMultiplier ?? 'n/a'}.`);
+        const map = adoptCalibrationMap(analysis.map);
+        log(`Flow Calibration VALID: ${map.points.length} LUT points (${map.algorithm}), real-flow range ${map.actualRange[0]}..${map.actualRange[1]} g/s.` +
+          (map.merge ? ` Merged with revision ${map.merge.previousRevision}: ${map.merge.retained} retained, ${map.merge.added} new, ${map.merge.replaced} replaced.` : ` New LUT identity.`) +
+          ` Suggested DE1 flowMultiplier=${map.suggestedFlowMultiplier ?? 'n/a'}.`);
         if (state.cfg.calibrationAutoSync) {
           try { await syncHyperExProfile(false); }
           catch (error) { state.profileSyncStatus = `Auto-sync failed: ${error.message || error}`; log(state.profileSyncStatus); }

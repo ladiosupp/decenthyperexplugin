@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.1.3";
+  const PLUGIN_VERSION = "2.2.0";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -81,6 +81,14 @@ function createPlugin(host) {
   const S2_REFILL_DEFAULTS=Object.freeze({startDelayMs:0,targetPercent:160,cutoffPercent:85,maxDurationMs:4000,approachMs:200});
   const S2_REFILL_BASES=Object.freeze(["pump-command","cup-target"]);
   const S2_REFILL_LIMITS=Object.freeze({startDelayMs:[0,1500,50],targetPercent:[100,160,1],cutoffPercent:[50,99,1],maxDurationMs:[500,4000,100],approachMs:[200,6000,100]});
+  const GAIN_MEMORY_SCHEMA=1;
+  const GAIN_MEMORY_ALPHA=.35;
+  const GAIN_MEMORY_DEVIATION_ALPHA=.55;
+  const GAIN_MEMORY_DEVIATION=.15;
+  const GAIN_MEMORY_BUCKET_RADIUS=.12;
+  const GAIN_MEMORY_HYSTERESIS=1.25;
+  const GAIN_MEMORY_MIN_SAMPLES=10;
+  const GAIN_MEMORY_MAX_BUCKETS=12;
   const STORAGE_AUTO_APPLY = "autoApplyNextShot";
   const STORAGE_ADAPTIVE_HISTORY = "adaptiveHistoryV1"; // legacy migration source
   const STORAGE_HISTORY_FILE = "adaptiveHistoryFileV2";
@@ -249,6 +257,8 @@ function createPlugin(host) {
     sequenceStartedAtMs: 0,
     stage1DumpSent: false,
     stage2SkipSent: false,
+    stage3StartedAtMs: 0,
+    stage3PlannedMs: 0,
     finalStopSent: false,
     completionTimer: null,
     abortResetTimer: null,
@@ -431,6 +441,8 @@ function createPlugin(host) {
       noScaleTimeoutSeconds: clampNumber(settings.NoScaleTimeoutSeconds, 1, 30, 5.0),
       liveFlowTrimTest: b(settings.LiveFlowTrimTest, true),
       liveFlowTrimLevel: [1,2,3,4].includes(Number(settings.LiveFlowTrimLevel)) ? Number(settings.LiveFlowTrimLevel) : 3,
+      liveTrimDecisionModel: b(settings.LiveTrimDecisionModel, true),
+      s3DriftModel: b(settings.S3DriftModel, true),
       directDriverStartTest: b(settings.DirectDriverStartTest, false),
       ghcConfirmTimeoutSeconds: clampNumber(settings.GHCConfirmTimeoutSeconds, 1, 60, 20.0),
       autoArmRetry1Seconds: clampNumber(settings.AutoArmRetry1Seconds, 0, 30, 3.0),
@@ -714,10 +726,28 @@ function createPlugin(host) {
 
   function s3ShapeStatus() {
     const os = testOverrideStatus();
-    const out = { enabled: false, reason: os.valid ? "flat S3" : os.reason, earlyCommand: null, earlySeconds: null, midCommand: null, midSeconds: null, lateCommand: null };
+    const out = { enabled: false, model: "legacy", reason: os.valid ? "flat S3" : os.reason, earlyCommand: null, earlySeconds: null, midCommand: null, midSeconds: null, lateCommand: null, earlyFactor: null, drift: null, manual: false, manualTilt: null };
     if (!os.valid || !os.s3ShapeActive) return out;
     const q = state.testOverrides && state.testOverrides.s3Shape;
     if (!q || typeof q !== "object") return out;
+    if (String(q.model || "") === "drift") {
+      const mid = Number(q.midCommand), earlyFactor = Number(q.earlyFactor), drift = Number(q.drift);
+      const earlySeconds = Number(q.earlySeconds), midSeconds = Number(q.midSeconds);
+      if (![mid, earlyFactor, drift, earlySeconds, midSeconds].every(Number.isFinite)) return { ...out, reason: "stored S3 drift shape rejected: non-finite value" };
+      const early = mid * earlyFactor, late = mid * drift;
+      const manual = q.manual === true, manualTilt = Number(q.manualTilt);
+      if (manual && (!Number.isFinite(manualTilt) || manualTilt < -1 || manualTilt > 1)) return { ...out, reason: "stored S3 manual tilt outside -1…+1" };
+      if (earlyFactor < 0.50 || earlyFactor > 2.00 || drift < 0.50 || drift > 2.00) return { ...out, reason: "stored S3 drift shape rejected: factor outside 0.50–2.00" };
+      if (![early, mid, late].every(v => v >= LIMITS.commandFlowMin && v <= LIMITS.commandFlowMax)) return { ...out, reason: "stored S3 drift shape rejected: command outside hard limits" };
+      if (earlySeconds < 3 || earlySeconds > 30 || midSeconds < 3 || midSeconds > 30) return { ...out, reason: "stored S3 drift shape rejected: timing outside 3–30 s" };
+      return {
+        enabled: true, model: "drift", reason: "DRIFT MODEL",
+        earlyCommand: round(early, 3), earlyFactor: round(earlyFactor, 4), earlySeconds: round(earlySeconds, 1),
+        midCommand: round(mid, 3), midSeconds: round(midSeconds, 1),
+        lateCommand: round(late, 3), drift: round(drift, 4),
+        manual, manualTilt: manual && Number.isFinite(manualTilt) ? round(manualTilt, 3) : null
+      };
+    }
     const early = Number(q.earlyCommand), mid = Number(q.midCommand), late = Number(q.lateCommand);
     const earlySeconds = Number(q.earlySeconds), midSeconds = Number(q.midSeconds);
     if (![early,mid,late,earlySeconds,midSeconds].every(Number.isFinite)) return { ...out, reason: "stored S3 shape rejected: non-finite value" };
@@ -735,15 +765,19 @@ function createPlugin(host) {
       return { ...out, reason: "stored S3 shape rejected: adjacent rise exceeds test bound" };
     }
     return {
-      enabled: true, reason: "DECAY COMP TEST",
+      enabled: true, model: "legacy", reason: "DECAY COMP TEST",
       earlyCommand: round(early,3),
       earlySeconds: round(earlySeconds,1),
       midCommand: round(mid,3),
       midSeconds: round(midSeconds,1),
-      lateCommand: round(late,3)
+      lateCommand: round(late,3), earlyFactor:null, drift:null, manual:false, manualTilt:null
     };
   }
 
+  function manualS3ShapeLocked() {
+    const q=state.testOverrides&&state.testOverrides.s3Shape;
+    return !!(q&&q.enabled===true&&q.model==="drift"&&q.manual===true);
+  }
   function manualTestCommand(stage) {
     const status = testOverrideStatus();
     if (!status.valid) return null;
@@ -784,6 +818,224 @@ function createPlugin(host) {
   function learningAdmission(run) {
     const factor=learningPolicy(run&&run.config&&run.config.adaptiveLearningLevel).qualityWidth;
     return {factor,r2:base=>round(1-(1-base)*factor,6),seconds:base=>base/factor,samples:base=>Math.ceil(base/factor),spread:base=>base*factor};
+  }
+  function emptyGainMemory() {
+    return {schema:GAIN_MEMORY_SCHEMA,buckets:[],seq:0,lastBucketId:null,updatedAt:null};
+  }
+  function normalizeGainMemory(raw) {
+    const out=emptyGainMemory();
+    if(!raw||typeof raw!=="object")return out;
+    const seen=new Set();
+    for(const row of Array.isArray(raw.buckets)?raw.buckets:[]){
+      if(!row||typeof row!=="object")continue;
+      const center=Number(row.center),radius=Number(row.radius);
+      if(!Number.isFinite(center)||center<=0)continue;
+      const id=String(row.id||"");if(!id||seen.has(id))continue;
+      const stages={};
+      for(const key of ["s2","s3"]){
+        const x=row.stages&&row.stages[key];
+        const r=Number(x&&x.r);
+        if(!(r>0.05&&r<=8))continue;
+        stages[key]={r:round(r,4),n:Math.max(1,Math.floor(Number(x.n)||1)),
+          lastDeviation:Number.isFinite(Number(x.lastDeviation))?round(Number(x.lastDeviation),4):null,
+          lastObservedR:Number.isFinite(Number(x.lastObservedR))?round(Number(x.lastObservedR),4):null,
+          drift:Number.isFinite(Number(x.drift))?round(Number(x.drift),4):null,
+          lastRunId:x.lastRunId==null?null:String(x.lastRunId),updatedAt:x.updatedAt||null};
+      }
+      if(!Object.keys(stages).length)continue;
+      seen.add(id);
+      out.buckets.push({id,center:round(center,4),radius:Number.isFinite(radius)&&radius>0?round(radius,4):GAIN_MEMORY_BUCKET_RADIUS,stages,createdAt:row.createdAt||null,updatedAt:row.updatedAt||null});
+    }
+    out.buckets=out.buckets.slice(0,GAIN_MEMORY_MAX_BUCKETS);
+    out.seq=Math.max(Number(raw.seq)||0,out.buckets.length);
+    out.lastBucketId=out.buckets.some(x=>x.id===raw.lastBucketId)?String(raw.lastBucketId):null;
+    out.updatedAt=raw.updatedAt||null;
+    return out;
+  }
+  function gainMemoryState(create) {
+    if(!state.persistentHistoryFile&&create){
+      state.persistentHistoryFile={schema:2,kind:"HyperExAdaptiveHistory",writerVersion:PLUGIN_VERSION,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),shots:[]};
+    }
+    const file=state.persistentHistoryFile;
+    if(!file||typeof file!=="object")return null;
+    if(!file.gainMemory&&!create)return null;
+    const normalized=normalizeGainMemory(file.gainMemory);
+    file.gainMemory=normalized;
+    return normalized;
+  }
+  function gainConfidence(stageState) {
+    if(!stageState||!(Number(stageState.r)>0))return "LOW";
+    const n=Number(stageState.n)||1,deviation=Number(stageState.lastDeviation);
+    if(n>=3&&(!Number.isFinite(deviation)||deviation<=GAIN_MEMORY_DEVIATION))return "HIGH";
+    if(n>=2)return "MEDIUM";
+    return "LOW";
+  }
+  function gainBackfillAlpha(run,deviation) {
+    let alpha=GAIN_MEMORY_ALPHA;
+    const trim=run&&run.liveFlowTrim;
+    if(trim){
+      if(Number(trim.rescueWrites)>0)alpha=.5;
+      else if(Number(trim.normalWrites)>0)alpha=.12;
+    }
+    if(Number(deviation)>GAIN_MEMORY_DEVIATION)alpha=Math.max(alpha,GAIN_MEMORY_DEVIATION_ALPHA);
+    return alpha;
+  }
+  function gainRegimeForRun(run) {
+    const rows=((run&&run.samples)||[]).filter(x=>x&&x.phase==="stage2").sort((a,b)=>Number(a.tMs)-Number(b.tMs));
+    if(rows.length<GAIN_MEMORY_MIN_SAMPLES)return null;
+    const late=rows.slice(Math.floor(rows.length*.4)),values=[];
+    for(const x of late){
+      const pressure=Number(x.pressureBar),flow=Number(x.machineFlowMlS);
+      if(!Number.isFinite(pressure)||!Number.isFinite(flow)||Math.abs(flow)<.15)continue;
+      if(x.machineTelemetryValid===false)continue;
+      if(Number.isFinite(Number(x.machineAgeMs))&&Number(x.machineAgeMs)>600)continue;
+      const ratio=pressure/flow;
+      if(Number.isFinite(ratio)&&ratio>0.05&&ratio<=5)values.push({pressure,flow,ratio});
+    }
+    if(values.length<GAIN_MEMORY_MIN_SAMPLES)return null;
+    const signature=median(values.map(x=>x.ratio));
+    if(!(signature>0.05))return null;
+    return {signature:round(signature,4),samples:values.length,
+      pressureBar:round(median(values.map(x=>x.pressure)),3),
+      machineFlowMlS:round(median(values.map(x=>x.flow)),3),
+      basis:"S2 late 40% pressure / machine flow"};
+  }
+  function selectGainBucket(memory,signature) {
+    const buckets=memory&&Array.isArray(memory.buckets)?memory.buckets:[];
+    const last=buckets.find(b=>b.id===(memory&&memory.lastBucketId));
+    const within=(bucket,multiplier)=>bucket&&Math.abs(signature-bucket.center)<=bucket.radius*multiplier;
+    if(within(last,GAIN_MEMORY_HYSTERESIS))return {bucket:last,hysteresis:true};
+    let best=null,bestDistance=Infinity;
+    for(const bucket of buckets){
+      const distance=Math.abs(signature-bucket.center);
+      if(distance<=bucket.radius&&distance<bestDistance){best=bucket;bestDistance=distance;}
+    }
+    return {bucket:best||null,hysteresis:false};
+  }
+  function createGainBucket(memory,signature) {
+    const id="g"+String(Math.max(1,Number(memory.seq)||0)+1);
+    memory.seq=Number(id.slice(1))||memory.buckets.length+1;
+    const bucket={id,center:round(signature,4),radius:GAIN_MEMORY_BUCKET_RADIUS,stages:{},createdAt:new Date().toISOString(),updatedAt:null};
+    memory.buckets.push(bucket);
+    while(memory.buckets.length>GAIN_MEMORY_MAX_BUCKETS){
+      const index=memory.buckets.findIndex(x=>x.id!==bucket.id&&x.id!==memory.lastBucketId);
+      if(index<0)break;
+      memory.buckets.splice(index,1);
+    }
+    return bucket;
+  }
+  function gainStageObservation(run,evidence,stage) {
+    const cfg=run&&run.config||{};
+    if(stage==="s2"){
+      if(String(cfg.stage2CommandOrigin||"")==="manual")return null;
+      if(evidence&&evidence.liveTrimChain&&evidence.liveTrimChain.usable===false)return null;
+      const quality=controlOutputQuality(run,"stage2");
+      if(!quality||quality.available!==true||!(Number(quality.tailMeanGS)>0)||Number(quality.tailRippleCVPct)>20)return null;
+      const command=Number(cfg.stage2CommandMlS),measured=Number(quality.tailMeanGS);
+      if(!(command>0&&measured>0))return null;
+      const r=measured/command;
+      if(!(r>=.2&&r<=3))return null;
+      return {r,command,measured,source:"S2 steady tail"};
+    }
+    if(stage==="s3"){
+      if(String(cfg.stage3CommandOrigin||"")==="manual")return null;
+      if(!evidence||evidence.stallQualitative||!Array.isArray(evidence.source)||evidence.source.length!==3)return null;
+      const mid=evidence.source[1],late=evidence.source[2];
+      const command=Number(mid&&mid.command),measured=Number(mid&&mid.measured);
+      if(!(command>0&&measured>0))return null;
+      const r=measured/command;
+      if(!(r>=.2&&r<=3))return null;
+      const drift=Number(late&&late.measured)>0?Number(late.measured)/measured:null;
+      return {r,drift:Number.isFinite(drift)&&drift>0&&drift<=3?drift:null,command,measured,source:"S3 MID"};
+    }
+    return null;
+  }
+  function gainMemoryQualityGuard(run,phase) {
+    const cfg=run&&run.config||{};
+    if(cfg.basketContext!=="coffee")return {eligible:true,reason:"Empty/legacy context",relaxed:true};
+    const limit=finiteOrNull(cfg[phase+"PressureLimit"]);
+    const onset=phase==="stage2"?stage2CupOnset(run):null;
+    const all=(run.samples||[]).filter(x=>x.phase===phase&&finiteOrNull(x.tMs)!==null&&(!onset||onset.detected&&Number(x.tMs)>=onset.startMs));
+    if(!all.length||limit===null||limit<=0)return {eligible:false,reason:"Gain-memory quality evidence missing"};
+    const start=Math.min(...all.map(x=>Number(x.tMs))),rows=all.filter(x=>Number(x.tMs)-start>=1000);
+    let usable=0,nearLimit=0,underCommand=0;
+    for(const row of rows){
+      const pressure=finiteOrNull(row.pressureBar),flow=finiteOrNull(row.machineFlowMlS);
+      let command=finiteOrNull(cfg[phase+"CommandMlS"]);
+      if(phase==="stage3"&&cfg.stage3Shape&&cfg.stage3Shape.enabled){
+        const frame=finiteOrNull(row.profileFrame);
+        command=frame===2?finiteOrNull(cfg.stage3Shape.earlyCommand):frame===3?finiteOrNull(cfg.stage3Shape.midCommand):frame===4?finiteOrNull(cfg.stage3Shape.lateCommand):null;
+      }
+      if(row.machineTelemetryValid!==true||finiteOrNull(row.machineAgeMs)===null||Number(row.machineAgeMs)>1000||pressure===null||pressure<0||flow===null||flow<0||command===null||command<=0)continue;
+      usable++;
+      if(pressure>=limit*.95)nearLimit++;
+      if(flow<command*.70)underCommand++;
+    }
+    const coverage=rows.length?usable/rows.length:0,pressureFraction=usable?nearLimit/usable:1,underFraction=usable?underCommand/usable:1;
+    const eligible=usable>=4&&coverage>=.60&&pressureFraction<.35&&underFraction<.40;
+    return {eligible,relaxed:true,samples:usable,expectedSamples:rows.length,coverage:round(coverage,3),pressureLimitedFraction:round(pressureFraction,3),underCommandFraction:round(underFraction,3),
+      reason:!eligible?"Gain-memory quality evidence below relaxed floor": "Gain-memory quality evidence passed relaxed floor"};
+  }
+  function updateGainMemoryFromRun(run,evidence) {
+    if(!run||!evidence)return null;
+    const regime=gainRegimeForRun(run);
+    if(!regime)return {status:"no-regime",reason:"S2 late pressure/machine-flow signature unavailable"};
+    const memory=gainMemoryState(true);
+    if(!memory)return null;
+    const selected=selectGainBucket(memory,regime.signature);
+    const bucket=selected.bucket||createGainBucket(memory,regime.signature);
+    const now=new Date().toISOString(),out={status:"updated",bucketId:bucket.id,bucketCreated:!selected.bucket,hysteresis:!!selected.hysteresis,center:bucket.center,radius:bucket.radius,signature:regime.signature,regime,stages:{},updatedAt:now};
+    for(const stage of ["s2","s3"]){
+      const observation=gainStageObservation(run,stage==="s3"&&evidence.s3?evidence.s3:evidence,stage);
+      if(!observation){out.stages[stage]={status:"no-observation"};continue;}
+      let current=bucket.stages[stage],deviation=null,alpha=null;
+      if(!current||!(Number(current.r)>0)){
+        current=bucket.stages[stage]={r:round(observation.r,4),n:1,lastDeviation:null,lastObservedR:round(observation.r,4),drift:observation.drift==null?null:round(observation.drift,4),lastRunId:run.runId,updatedAt:now};
+      }else{
+        deviation=Math.abs(observation.r-current.r)/current.r;
+        alpha=gainBackfillAlpha(run,deviation);
+        current.r=round(current.r+alpha*(observation.r-current.r),4);
+        current.n=(Number(current.n)||1)+1;
+        current.lastDeviation=round(deviation,4);
+        current.lastObservedR=round(observation.r,4);
+        if(Number(observation.drift)>0)current.drift=round(Number(current.drift)>0?current.drift+alpha*(observation.drift-current.drift):observation.drift,4);
+        current.lastRunId=run.runId;current.updatedAt=now;
+      }
+      out.stages[stage]={status:"updated",r:current.r,n:current.n,observedR:current.lastObservedR,
+        deviationPct:current.lastDeviation==null?null:round(current.lastDeviation*100,1),alpha,
+        confidence:gainConfidence(current),source:observation.source,drift:current.drift==null?null:round(current.drift,4)};
+    }
+    if(!Object.values(out.stages).some(x=>x.status==="updated")){
+      if(!selected.bucket)memory.buckets=memory.buckets.filter(x=>x.id!==bucket.id);
+      return {...out,status:"no-observation"};
+    }
+    memory.lastBucketId=bucket.id;memory.updatedAt=now;bucket.updatedAt=now;run.gainMemoryBucketId=bucket.id;
+    return out;
+  }
+  function gainMemorySuggestion(run,stage) {
+    const memory=gainMemoryState(false);
+    if(!memory)return null;
+    const regime=gainRegimeForRun(run);
+    if(!regime)return null;
+    let bucket=run&&run.gainMemoryBucketId?memory.buckets.find(x=>x.id===run.gainMemoryBucketId):null;
+    if(!bucket)bucket=selectGainBucket(memory,regime.signature).bucket;
+    const stateRow=bucket&&bucket.stages&&bucket.stages[stage];
+    if(!stateRow||!(Number(stateRow.r)>0))return null;
+    const cfg=run&&run.config||{};
+    const target=stage==="s2"?Number(cfg.stage2Flow):Number(cfg.stage3Flow);
+    const lut=stage==="s2"?Number(cfg.stage2LutCommandMlS):Number(cfg.stage3LutCommandMlS);
+    if(!(target>0))return null;
+    const local=Number(stateRow.lastDeviation)>GAIN_MEMORY_DEVIATION&&Number(stateRow.lastObservedR)>0;
+    const r=local?Number(stateRow.lastObservedR):Number(stateRow.r);
+    if(!(r>0.05))return null;
+    const ceiling=Math.min(LIMITS.commandFlowMax,Number.isFinite(lut)&&lut>0?lut*2:LIMITS.commandFlowMax);
+    const command=Math.max(LIMITS.commandFlowMin,Math.min(ceiling,target/r));
+    return {stage,bucketId:bucket.id,center:bucket.center,radius:bucket.radius,bucketSamples:stateRow.n,
+      r:round(r,4),smoothedR:round(stateRow.r,4),observedR:stateRow.lastObservedR,
+      deviationPct:stateRow.lastDeviation==null?null:round(stateRow.lastDeviation*100,1),local,
+      confidence:gainConfidence(stateRow),targetGS:round(target,3),lutCommandMlS:Number.isFinite(lut)?round(lut,3):null,
+      commandMlS:round(command,3),drift:stateRow.drift==null?null:round(stateRow.drift,4),
+      sourceRunId:stateRow.lastRunId||null,applied:false};
   }
   function scalarLearningSuggestion(label,key,current,previous,policy,steadyLarge) {
     const opt={deadbandPct:policy.deadband,maxVariability:policy.rank===0?(key==="s1"?.18:.15):.25,gain:policy.gain,maxFraction:policy[key][0],maxAbs:policy[key][1],
@@ -865,6 +1117,45 @@ function createPlugin(host) {
     if(changed)out.suggestedShape={earlyCommand:round(raw[0],3),earlySeconds:current.earlySeconds,midCommand:round(raw[1],3),midSeconds:current.midSeconds,lateCommand:round(raw[2],3)};
     return out;
   }
+  function driftShapeSuggestion(run,current,previous,policy) {
+    if(!run||!run.config||run.config.s3DriftModel!==true)return null;
+    if(!current||current.stall||current.stallQualitative||!Array.isArray(current.source)||current.source.length!==3)return null;
+    if(policy.rank<2&&!previous)return null;
+    const target=Number(current.targetGS);
+    if(!(target>0))return null;
+    const gains=current.source.map(x=>{const c=Number(x.command),m=Number(x.measured);return c>0&&m>0?m/c:null;});
+    if(!gains.every(v=>Number(v)>0.05))return null;
+    const midNow=Number(current.source[1].command);
+    if(!(midNow>0))return null;
+    let midTarget=target/gains[1],earlyFactor=gains[1]/gains[0],drift=gains[1]/gains[2];
+    if(previous&&Array.isArray(previous.source)&&previous.source.length===3){
+      const priorGains=previous.source.map(x=>{const c=Number(x.command),m=Number(x.measured);return c>0&&m>0?m/c:null;});
+      if(priorGains.every(v=>Number(v)>0.05)){
+        midTarget=(midTarget+target/priorGains[1])/2;
+        earlyFactor=(earlyFactor+priorGains[1]/priorGains[0])/2;
+        drift=(drift+priorGains[1]/priorGains[2])/2;
+      }
+    }
+    const currentEarlyFactor=Number(current.source[0].command)/midNow,currentDrift=Number(current.source[2].command)/midNow;
+    earlyFactor=Math.max(currentEarlyFactor*.80,Math.min(currentEarlyFactor*1.20,earlyFactor));
+    drift=Math.max(currentDrift*.80,Math.min(currentDrift*1.20,drift));
+    earlyFactor=Math.max(.50,Math.min(2.00,earlyFactor));drift=Math.max(.50,Math.min(2.00,drift));
+    const [fraction,absolute]=policy.s3;
+    const midCommand=Math.max(midNow*(1-fraction),midNow-absolute,Math.min(midNow*(1+fraction),midNow+absolute,midTarget));
+    const lut=Number(run.config.stage3LutCommandMlS),ceiling=Math.min(LIMITS.commandFlowMax,Number.isFinite(lut)&&lut>0?lut*2:LIMITS.commandFlowMax);
+    const early=midCommand*earlyFactor,late=midCommand*drift;
+    if(![midCommand,early,late].every(v=>Number.isFinite(v)&&v>=LIMITS.commandFlowMin&&v<=ceiling))return null;
+    const changed=Math.abs(midCommand-midNow)>=.005||Math.abs(earlyFactor-currentEarlyFactor)>=.01||Math.abs(drift-currentDrift)>=.01;
+    if(!changed)return null;
+    return {
+      model:"drift", midCommand:round(midCommand,3), earlyFactor:round(earlyFactor,4), drift:round(drift,4),
+      earlyCommand:round(early,3), lateCommand:round(late,3),
+      earlySeconds:current.earlySeconds, midSeconds:current.midSeconds,
+      confidence:previous?"MEDIUM":"LOW", targetGS:round(target,3),
+      maxStepRule:policy.name+": MID ≤"+(fraction*100).toFixed(1)+"% / "+absolute+" ml/s; earlyFactor/drift ≤20% per shot",
+      reason:"S3 MID level and per-frame gain ratios solved as MID × earlyFactor / MID / MID × drift"
+    };
+  }
 
 
   function stageCommandOrigin(stage, shape) {
@@ -943,7 +1234,7 @@ function createPlugin(host) {
   function historyExportPayload() {
     const file = state.persistentHistoryFile || null;
     const shots = file && Array.isArray(file.shots) ? file.shots : [];
-    return { kind: "HyperExHistoryExport", schema: 1, pluginVersion: PLUGIN_VERSION, exportedAt: new Date().toISOString(), writerVersion: file && file.writerVersion || null, count: shots.length, shots: shots.slice() };
+    return { kind: "HyperExHistoryExport", schema: 1, pluginVersion: PLUGIN_VERSION, exportedAt: new Date().toISOString(), writerVersion: file && file.writerVersion || null, gainMemory: gainMemoryState(false), count: shots.length, shots: shots.slice() };
   }
 
   function commandFlowSummary() {
@@ -1482,7 +1773,11 @@ function createPlugin(host) {
         const allFrame = timed.filter(x => Number(x.profileFrame) === spec.frame);
         if (!allFrame.length) return { ...spec, slope: null, r2: null, seconds: null, samples: 0 };
         const f0 = allFrame[0].x;
-        const useFrame = allFrame.filter(x => x.x - f0 >= 0.75);
+        const duration = Number(allFrame[allFrame.length - 1].x) - f0;
+        const settle = run.config.s3DriftModel === true && String(shapeCfg.model || "") === "drift" && spec.frame === 2
+          ? Math.max(0.75, duration * 0.50)
+          : 0.75;
+        const useFrame = allFrame.filter(x => x.x - f0 >= settle);
         const use = useFrame.length >= 6 ? useFrame : allFrame;
         const reg = regressionForRawSamples(use);
         return {
@@ -1878,7 +2173,7 @@ function createPlugin(host) {
     const refillBase=estimate?estimate.command:base;
     const plan={schema:5,strategy:"refill-85",enabled:false,reason:"S2 refill assist disabled",baseCommandMlS:base,
       refillPumpBaseMlS:round(refillBase,4),refillTargetFraction:settings.targetPercent/100,cutoffFraction:settings.cutoffPercent/100,
-      startDelayMs:settings.startDelayMs,predictionSeconds:.4,holdMs:settings.maxDurationMs,dispatchWindowMs:settings.startDelayMs+4000,approachMs:settings.approachMs,approachWriteIntervalMs:750,settings:{...settings},
+      startDelayMs:settings.startDelayMs,predictionSeconds:2.0,holdMs:settings.maxDurationMs,dispatchWindowMs:settings.startDelayMs+4000,approachMs:settings.approachMs,approachWriteIntervalMs:750,settings:{...settings},
       sourceRunIds:estimate?[estimate.sourceRunId]:[],learningLevel:learningPolicy().name};
     if(settings.basis==="cup-target"){plan.refillTargetGS=round(cupTarget,3);if(estimate)plan.referenceTailGS=estimate.referenceTailGS;plan.commandBasis=estimate?estimate.basis:"target-cup-flow base fallback (no observed tail)";}
     if(!state.cfg.s2StartupAssist||!state.cfg.liveFlowTrimTest)return plan;
@@ -1925,8 +2220,9 @@ function createPlugin(host) {
     if(Date.now()-p.startedAt>=plan.holdMs)return "S2 refill maximum duration reached";
     if(Date.now()-state.latestScaleAtMs>600)return "S2 refill scale became stale";
     const flow=s2RefillFlowEstimate(t),threshold=t.run.config.stage2Flow*plan.cutoffFraction;
-    if(flow&&flow.slope>=threshold){
-      p.cutoff={rawGS:round(flow.slope,3),predictedGS:round(flow.predicted,3),thresholdGS:round(threshold,3),atMs:Date.now()};
+    const decisionFlow=flow?Number(flow.predicted):null;
+    if(flow&&Number.isFinite(decisionFlow)&&decisionFlow>=threshold){
+      p.cutoff={rawGS:round(flow.slope,3),predictedGS:round(flow.predicted,3),decisionGS:round(decisionFlow,3),thresholdGS:round(threshold,3),atMs:Date.now()};
       return "S2 refill reached configured cup-flow cutoff";
     }
     return null;
@@ -2553,6 +2849,7 @@ function createPlugin(host) {
   }
 
   function restoreAdaptiveHistoryFromPersistentFile() {
+    gainMemoryState(true);
     refreshLearningStage();
     const fpKey = numericLearningFingerprintKey(adaptiveHistoryFingerprint());
     const compatible = row => row && row.profileTruthSchema === 3 && row.fingerprint &&
@@ -2574,6 +2871,11 @@ function createPlugin(host) {
   function rememberAdaptiveEvidence(run) {
     const truthVerified = trustedAdaptiveRun(run);
     const ev = truthVerified ? { runId:run && run.runId, profileTruthSchema:3, fingerprint:run.config.adaptiveFingerprint, learningIntegrity:assessRunLearningIntegrity(run), s1:stage1AdaptiveEvidence(run), s2:stage2AdaptiveEvidence(run), s3:stage3AdaptiveEvidence(run) } : null;
+    if (truthVerified && ev) {
+      const gainMemory = updateGainMemoryFromRun(run, ev);
+      if (gainMemory) ev.gainMemory = gainMemory;
+      if (run.summary) run.summary.nextShotAdaptive = nextShotAdaptiveSuggestion(run);
+    }
     if (!truthVerified) {
       appendPersistentHistoryShot(run, null);
       if (run && run.kind === "hyperex") log(`Adaptive evidence excluded: workflow profile truth was not verified at shot start (${run.runId || 'unknown run'}).`);
@@ -2823,6 +3125,8 @@ function createPlugin(host) {
       }
     }
     const singleS3=stage3SingleSuggestion(s3ev,s3Search.evidence,policy);if(singleS3)s3=singleS3;else if(s3ev&&!s3Search.evidence&&policy.rank<2)s3.reason="Selected learning policy requires another comparable S3 observation; command and timing changes remain usable";
+    const driftS3=driftShapeSuggestion(run,s3ev,s3Search.evidence,policy);
+    if(driftS3){s3.driftShape=driftS3;s3.usable=true;s3.action="DRIFT + LEVEL";s3.confidence=driftS3.confidence;s3.reason=driftS3.reason;}
     if(s3.suggestedShape&&s3ev&&Array.isArray(s3ev.source)){
       const keys=["earlyCommand","midCommand","lateCommand"],old=s3ev.source.map(x=>Number(x.command)),[fraction,absolute]=policy.s3;
       let requested=Array.isArray(s3.rawProposedCommands)?s3.rawProposedCommands.slice():keys.map(k=>Number(s3.suggestedShape[k]));
@@ -2875,16 +3179,49 @@ function createPlugin(host) {
       }
     };
     addGain(s2ev,gainS2,"s2",policy.s2);addGain(s3ev,gainS3,"s3",policy.s3);
+    const memoryS2=gainMemorySuggestion(run,"s2"),memoryS3=gainMemorySuggestion(run,"s3");
+    if(memoryS2){
+      const actual=Number.isFinite(Number(s2.currentCommandMlS))?Number(s2.currentCommandMlS):Number(run.config&&run.config.stage2CommandMlS);
+      s2.gainMemory={...memoryS2};
+      if(/SATURATED|LIMITED|VARIABLE|MIXED/.test(String(s2.action||""))){
+        s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory withheld because the current evidence is not admissible";
+      }else if(Number.isFinite(actual)&&Math.abs(memoryS2.commandMlS-actual)>=.005){
+        s2.usable=true;s2.action=s2.action==="LUT COMPENSATE"?"LUT COMPENSATE":"ADJUST";
+        s2.suggestedCommandMlS=memoryS2.commandMlS;s2.gainMemory.applied=true;
+        s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory "+memoryS2.bucketId+" maps "+memoryS2.targetGS+" g/s to "+memoryS2.commandMlS+" ml/s (r="+memoryS2.r+", n="+memoryS2.bucketSamples+", "+memoryS2.confidence+")";
+      }else if(s2.action==="ADJUST"||s2.action==="LUT COMPENSATE"){
+        s2.action="HOLD";delete s2.suggestedCommandMlS;
+        s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory already maps to the current command";
+      }
+    }
+    if(memoryS3){
+      s3.gainMemory={...memoryS3,applied:false};
+      s3.reason=(s3.reason?String(s3.reason)+"; ":"")+"S3 level memory recorded (r="+memoryS3.r+", n="+memoryS3.bucketSamples+"); shape application remains the separate S3 drift step";
+    }
     s1.evidenceBasis=s1ev&&s1ev.measurementBasis||"startup 20–80%";
     s1.historySearch=searchAudit(s1Search);s2.historySearch=searchAudit(s2Search);s3.historySearch=searchAudit(s3Search);
     const actuatorGuards={stage1:stageActuatorEvidence(run,"stage1"),stage2:stageActuatorEvidence(run,"stage2"),stage3:stageActuatorEvidence(run,"stage3")};
     for (const [key,guard] of [["s1",actuatorGuards.stage1],["s2",actuatorGuards.stage2],["s3",actuatorGuards.stage3]]) {
       const decision=key==="s1"?s1:key==="s2"?s2:s3;
-      if (!guard.eligible) Object.assign(decision,{usable:false,action:"LIMITED / HOLD",confidence:"INSUFFICIENT",reason:guard.reason,actuatorGuard:guard});
+      if (!guard.eligible) {
+        const relaxed=decision.gainMemory?gainMemoryQualityGuard(run,key==="s2"?"stage2":key==="s3"?"stage3":"stage1"):null;
+        if(relaxed&&relaxed.eligible){
+          decision.memoryGuardBypass={hard:guard,relaxed};
+          decision.reason=(decision.reason?String(decision.reason)+"; ":"")+"gain memory kept by relaxed quality guard";
+        }else{
+          Object.assign(decision,{usable:false,action:"LIMITED / HOLD",confidence:"INSUFFICIENT",reason:guard.reason,actuatorGuard:guard});
+          if(decision.gainMemory)decision.gainMemory.applied=false;
+        }
+      }
     }
-    const actionable=!!((s1.usable&&s1.action==="ADJUST"&&Number.isFinite(Number(s1.suggestedCommandMlS)))||(s2.usable&&(s2.action==="ADJUST"||s2.action==="LUT COMPENSATE")&&Number.isFinite(Number(s2.suggestedCommandMlS)))||(s3.usable&&s3.suggestedShape));
     if(liveS2.applicable)s2.outputQuality=liveS2.outputQuality;
     if(liveS3.applicable){s3.outputQuality=liveS3.outputQuality;s3.evidenceBasis=liveS3.basis;if(liveS3.eligible)s3.reason=liveS3.reason+"; "+s3.reason;}
+    if(manualS3ShapeLocked()){
+      s3.manualLocked=true;s3.usable=false;s3.action="MANUAL DRIFT LOCK";
+      delete s3.suggestedShape;delete s3.driftShape;if(s3.gainMemory)s3.gainMemory.applied=false;
+      s3.reason="Manual S3 drift shape is locked; automatic S3 updates withheld";
+    }
+    const actionable=!!((s1.usable&&s1.action==="ADJUST"&&Number.isFinite(Number(s1.suggestedCommandMlS)))||(s2.usable&&(s2.action==="ADJUST"||s2.action==="LUT COMPENSATE")&&Number.isFinite(Number(s2.suggestedCommandMlS)))||(s3.usable&&(s3.suggestedShape||s3.driftShape)));
     return {usable:!!(s1.usable||s2.usable||s3.usable),actionable,basketContext:run.config.basketContext||"unknown",actuatorGuards,runId:run.runId,mode:"SHOT-TO-SHOT ONLY",learningLevel:policy.name,s1,s2,s3,note:run.config.experimentalLiveTrim?"Experimental live trim ran in this shot. This table proposes NEXT-SHOT changes only; normalized response is a local model. Actual RAW tracking metrics remain separate; LUT unchanged.":"All three stages use completed-shot evidence only. No running-shot scale control, no extra skipStep calls, and the calibration LUT is never rewritten."};
   }
 
@@ -2930,7 +3267,11 @@ function createPlugin(host) {
     let s3Shape = sourceShape && sourceShape.enabled === true
       ? JSON.parse(JSON.stringify(sourceShape))
       : (os.valid && state.testOverrides && state.testOverrides.s3Shape ? JSON.parse(JSON.stringify(state.testOverrides.s3Shape)) : { enabled:false });
-    if (suggestion.s3 && suggestion.s3.usable && suggestion.s3.suggestedShape) {
+    if (suggestion.s3 && suggestion.s3.usable && suggestion.s3.driftShape) {
+      const q = suggestion.s3.driftShape, mid = clampCommandFlow(Number(q.midCommand));
+      const earlyFactor = Math.max(.50, Math.min(2.00, Number(q.earlyFactor))), drift = Math.max(.50, Math.min(2.00, Number(q.drift)));
+      s3Shape = { enabled:true, model:"drift", origin:"adaptive", midCommand:round(mid,3), midSeconds:round(Math.max(3,Math.min(30,Number(q.midSeconds))),1), earlySeconds:round(Math.max(3,Math.min(30,Number(q.earlySeconds))),1), earlyFactor:round(earlyFactor,4), drift:round(drift,4), earlyCommand:round(clampCommandFlow(mid*earlyFactor),3), lateCommand:round(clampCommandFlow(mid*drift),3) };
+    } else if (suggestion.s3 && suggestion.s3.usable && suggestion.s3.suggestedShape) {
       const q = suggestion.s3.suggestedShape;
       s3Shape = { enabled:true,origin:"adaptive", earlyCommand:round(clampCommandFlow(Number(q.earlyCommand)),3), earlySeconds:round(Math.max(3,Math.min(30,Number(q.earlySeconds))),1), midCommand:round(clampCommandFlow(Number(q.midCommand)),3), midSeconds:round(Math.max(3,Math.min(30,Number(q.midSeconds))),1), lateCommand:round(clampCommandFlow(Number(q.lateCommand)),3) };
     }
@@ -2956,7 +3297,16 @@ function createPlugin(host) {
           throw new Error(`S2 adaptive readback mismatch: expected ${expectedS2}, got ${actualS2}`);
         }
       }
-      if (suggestion.s3 && suggestion.s3.usable && suggestion.s3.suggestedShape) {
+      if (suggestion.s3 && suggestion.s3.usable && suggestion.s3.driftShape) {
+        const actual = s3ShapeStatus();
+        const same = actual.enabled === true && actual.model === "drift" &&
+          Math.abs(Number(actual.midCommand) - Number(s3Shape.midCommand)) <= 0.001 &&
+          Math.abs(Number(actual.earlyFactor) - Number(s3Shape.earlyFactor)) <= 0.001 &&
+          Math.abs(Number(actual.drift) - Number(s3Shape.drift)) <= 0.001 &&
+          Math.abs(Number(actual.earlySeconds) - Number(s3Shape.earlySeconds)) <= 0.01 &&
+          Math.abs(Number(actual.midSeconds) - Number(s3Shape.midSeconds)) <= 0.01;
+        if (!same) throw new Error("S3 drift shape readback mismatch: " + JSON.stringify(actual));
+      } else if (suggestion.s3 && suggestion.s3.usable && suggestion.s3.suggestedShape) {
         const expected = suggestion.s3.suggestedShape;
         const actual = s3ShapeStatus();
         const same = actual.enabled === true &&
@@ -3040,7 +3390,12 @@ function createPlugin(host) {
         const q=proposal[key];
         if (q && q.usable && (q.action==="ADJUST"||q.action==="LUT COMPENSATE")) proposalMatchesWorkflow=proposalMatchesWorkflow && close(commands&&commands[field],q.suggestedCommandMlS);
       }
-      if (proposal.s3 && proposal.s3.usable && proposal.s3.suggestedShape) {
+      if (proposal.s3 && proposal.s3.usable && proposal.s3.driftShape) {
+        const shape=commands && commands.s3Shape,q=proposal.s3.driftShape;
+        proposalMatchesWorkflow=proposalMatchesWorkflow && !!(shape&&shape.enabled&&shape.model==="drift") &&
+          close(shape.midCommand,q.midCommand) && close(shape.earlyFactor,q.earlyFactor) && close(shape.drift,q.drift) &&
+          close(shape.earlySeconds,q.earlySeconds) && close(shape.midSeconds,q.midSeconds);
+      } else if (proposal.s3 && proposal.s3.usable && proposal.s3.suggestedShape) {
         const shape=commands && commands.s3Shape;
         proposalMatchesWorkflow=proposalMatchesWorkflow && !!(shape&&shape.enabled) &&
           ["earlyCommand","earlySeconds","midCommand","midSeconds","lateCommand"].every(k=>close(shape[k],proposal.s3.suggestedShape[k]));
@@ -3764,9 +4119,9 @@ function clearChartEl(el){if(!el)return;if(el.tagName&&el.tagName.toLowerCase()=
 function renderChartAny(el,series,ymin,ymax,markers,tickVals){if(!el)return;if(el.tagName&&el.tagName.toLowerCase()==="canvas")return drawChartCanvas(el,series,ymin,ymax,markers,tickVals);return renderChart(el,series,ymin,ymax,markers,tickVals);}
 function renderChart(svg,series,ymin,ymax,markers,tickVals){if(!svg)return;let all=[];series.forEach(s=>all=all.concat(s.points));all=all.filter(p=>Number.isFinite(p[0])&&Number.isFinite(p[1]));if(!all.length){svg.innerHTML='';return}const xs=all.map(p=>p[0]).filter(Number.isFinite),ys=all.map(p=>p[1]).filter(Number.isFinite);const xmin=Math.min(...xs),xmax=Math.max(...xs);if(ymin==null)ymin=Math.min(...ys);if(ymax==null)ymax=Math.max(...ys);if(ymax-ymin<.01)ymax=ymin+1;let h='<line x1="18" y1="187" x2="782" y2="187" stroke="#3a3f47"/><line x1="18" y1="18" x2="18" y2="187" stroke="#3a3f47"/>';for(const tv of (tickVals||[])){if(!Number.isFinite(tv)||tv<=ymin||tv>=ymax)continue;const ty=187-(tv-ymin)/Math.max(.001,ymax-ymin)*169;h+='<line x1="18" y1="'+ty+'" x2="782" y2="'+ty+'" stroke="#3a3f47" stroke-dasharray="3 3" opacity=".4"/><text x="24" y="'+(ty+3.5)+'" fill="#aeb6c2" font-size="10">'+Number(tv).toFixed(1)+'</text>';}for(const s of series){const path=svgPath(s.points,xmin,xmax,ymin,ymax);if(path)h+='<path d="'+path+'" fill="none" stroke="'+s.stroke+'" stroke-width="'+(s.width||1.7)+'" opacity="'+(s.opacity||1)+'"/>'}h+='<text x="24" y="16" fill="#aeb6c2" font-size="10">'+Number(ymax).toFixed(1)+'</text><text x="24" y="184" fill="#aeb6c2" font-size="10">'+Number(ymin).toFixed(1)+'</text>';const mkList=(Array.isArray(markers)&&markers.length>160)?(function(){const o=[],step=markers.length/160;for(let i=0;i<160;i++)o.push(markers[Math.min(markers.length-1,Math.floor(i*step))]);if(o[o.length-1]!==markers[markers.length-1])o.push(markers[markers.length-1]);return o;})():(markers||[]);for(const q of mkList){if(!Number.isFinite(q.x))continue;const xx=18+(q.x-xmin)/Math.max(.001,xmax-xmin)*764;const yy=Number.isFinite(q.y)?187-(q.y-ymin)/Math.max(.001,ymax-ymin)*169:181;const title='<title>'+esc(q.label||'')+'</title>';const tip=' data-tip="'+esc(q.label||'').replace(/"/g,'&quot;')+'"';if(q.shape==='up'||q.shape==='down'){const sign=q.shape==='up'?-1:1,sz=q.size||5,tpos=yy+sign*sz,hbase=tpos-sign*5;h+='<path d="M '+xx+' '+(yy-sign*sz)+' L '+xx+' '+tpos+' M '+(xx-4)+' '+hbase+' L '+xx+' '+tpos+' L '+(xx+4)+' '+hbase+'" fill="none" stroke="'+q.color+'" stroke-width="1.8"'+tip+'>'+title+'</path>';}else if(q.shape==='retry'||q.shape==='unknown')h+='<text x="'+xx+'" y="'+(yy+4)+'" text-anchor="middle" fill="'+q.color+'" font-size="13"'+tip+'>'+title+(q.shape==='retry'?'↻':'·')+'</text>';else if(q.shape==='diamond')h+='<path d="M '+xx+' '+(yy-4)+' l 4 4 l -4 4 l -4 -4 Z" fill="'+q.color+'"'+tip+'>'+title+'</path>';else if(q.shape==='square')h+='<rect x="'+(xx-3)+'" y="'+(yy-3)+'" width="6" height="6" fill="'+q.color+'"'+tip+'>'+title+'</rect>';else h+='<circle cx="'+xx+'" cy="'+yy+'" r="3" fill="'+q.color+'"'+tip+'>'+title+'</circle>'}svg.innerHTML=h}
 function liveTrimMarkers(run){return(run.liveFlowTrim&&run.liveFlowTrim.trace||[]).filter(x=>['check','write','machine-target-response'].includes(x.kind)).map(x=>{const delta=Number.isFinite(x.previousMlS)&&Number.isFinite(x.commandMlS)?x.commandMlS-x.previousMlS:null;const direction=x.kind==='write'?(x.retry?'retry':delta===null?'unknown':delta>0?'up':delta<0?'down':'retry'):null;return {x:x.tMs/1000,y:x.kind==='check'?x.rawGS:(Number.isFinite(Number(x.rawGS))?Number(x.rawGS):x.commandMlS),size:delta===null?null:Math.max(2,Math.round(Math.abs(delta)*48)),shape:x.kind==='write'?direction:x.kind==='machine-target-response'?'square':'circle',color:x.kind==='write'?'#ff9c45':x.kind==='machine-target-response'?'#f4e6a5':x.rawGS==null?'#7c8795':'#63d89b',label:(x.kind==='write'?(direction==='retry'?'同值重试 ↻':direction==='up'?'上调指令 ↑':direction==='down'?'下调指令 ↓':'写入指令（方向未知）'):x.kind)+' @ '+(x.tMs/1000).toFixed(2)+'s · '+(x.kind==='check'?(x.rawGS==null?'no valid RAW regression':x.rawGS+' g/s')+' · '+(x.reason||x.decision):x.commandMlS+' ml/s')+(delta!==null&&x.kind==='write'?' · '+x.previousMlS+' → '+x.commandMlS+' ml/s':'')+(x.startupAction?' · '+(x.startupAction==='return'?'补水收回':'补水增强')+(x.startupReason?' · '+x.startupReason:''):'')}})}
-function renderLiveTrim(run){const q=$('livetrimstatus');if(!q)return;const x=run&&run.liveFlowTrim;if(!x){q.textContent='';return}q.textContent='EXPERIMENTAL LIVE FLOW TRIM · level '+(x.level||1)+' · '+x.status+' · checks '+x.checks+'/'+(x.maxChecks||50)+' · writes '+x.writes+'/'+(x.maxWrites||50)+' · driver ACK '+x.acks+' · trend confirms '+x.targetConfirmations+' · unresponsive '+(x.targetMisses||0)+' / streak '+(x.consecutiveTargetMisses||0)+' · vector redispatch '+(x.retries||0)+' · interval '+x.periodMs+' ms'+(x.zeroDegreeShare===null?'':' · 0° share '+Math.round(x.zeroDegreeShare*100)+'% · mean angle '+x.meanAngleDeg+'°')+' · vector angle '+(x.vectorAngleDeg==null?'—':x.vectorAngleDeg+'°')+' · big-angle streak '+(x.bigAngleStreak||0)+' · next-shot band ±'+esc(x.learningBand||8)+'%; confirmed windows pooled with labelled seed-normalization model';}
+function renderLiveTrim(run){const q=$('livetrimstatus');if(!q)return;const x=run&&run.liveFlowTrim;if(!x){q.textContent='';return}q.textContent='EXPERIMENTAL LIVE FLOW TRIM · level '+(x.level||1)+' · model '+(x.decisionModel||'legacy')+' · '+x.status+' · checks '+x.checks+'/'+(x.maxChecks||50)+' · writes '+x.writes+'/'+(x.maxWrites||50)+' · driver ACK '+x.acks+' · trend confirms '+x.targetConfirmations+' · unresponsive '+(x.targetMisses||0)+' / streak '+(x.consecutiveTargetMisses||0)+' · vector redispatch '+(x.retries||0)+' · interval '+x.periodMs+' ms'+' · normal/rescue '+(x.normalWrites||0)+'/'+(x.rescueWrites||0)+' · silence holds '+(x.silenceHolds||0)+' · S3 writes '+(x.s3NormalWrites||0)+'/'+(x.s3RescueWrites||0)+(x.zeroDegreeShare===null?'':' · 0° share '+Math.round(x.zeroDegreeShare*100)+'% · mean angle '+x.meanAngleDeg+'°')+' · vector angle '+(x.vectorAngleDeg==null?'—':x.vectorAngleDeg+'°')+' · big-angle streak '+(x.bigAngleStreak||0)+' · next-shot band ±'+esc(x.learningBand||8)+'%; confirmed windows pooled with labelled seed-normalization model';}
 function renderCharts(run){if(!run)return;lastChartRun=run;const chart=extractionChartData(run),combined=chart.combined,raw=chart.raw,chartRun={...run,liveFlowTrim:{...(run.liveFlowTrim||{}),trace:chart.trace}};const target=extractionChartPoints(combined,'targetFlowMlS'),machine=extractionChartPoints(combined,'machineFlowMlS'),decaid=extractionChartPoints(combined,'decaidWeightFlowGS');const cupTarget=extractionChartPoints(combined,'desiredRealFlowGS');const rawSlope=[];let rawSegment=null,segmentStart=0;for(let i=0;i<raw.length;i++){if(rawSegment!==raw[i]._chartSegment){if(rawSegment!==null){const prev=raw[i-1];if(prev&&prev._chartGroup==='stage1'&&raw[i]._chartGroup==='brew')rawSlope.push([Number(prev.tMs)/1000,0],[Number(raw[i].tMs)/1000,0]);else rawSlope.push([Number(raw[i].tMs)/1000,NaN]);}rawSegment=raw[i]._chartSegment;segmentStart=i;}let j=i-1;while(j>segmentStart&&Number(raw[i].tMs)-Number(raw[j].tMs)<900)j--;if(j>=segmentStart){let reset=false;for(let k=j+1;k<=i;k++)if(raw[k].tareReset){reset=true;break}const dt=(Number(raw[i].scaleTimestampSeconds)-Number(raw[j].scaleTimestampSeconds));if(!reset&&Number.isFinite(dt)&&dt>.25){rawSlope.push([Number(raw[i].tMs)/1000,(Number(raw[i].weightG)-Number(raw[j].weightG))/dt])}}}const trendPts=[];for(const x of (chart.trace||[]))if((x.kind==='check'||x.kind==='write')&&Number.isFinite(Number(x.rawGS)))trendPts.push([Number(x.tMs)/1000,Number(x.rawGS)]);const trendSmooth=trendPts.map((p,i)=>{const a=trendPts.slice(Math.max(0,i-1),Math.min(trendPts.length,i+2));return [p[0],a.reduce((s,q)=>s+q[1],0)/a.length]});const flowYs=[...target,...machine,...decaid,...rawSlope].map(p=>p[1]).filter(v=>Number.isFinite(v)&&v>-1&&v<20);const fymax=Math.max(6,flowYs.length?Math.min(12,Math.ceil(Math.max(...flowYs)+.5)):8);renderChartAny($('flowchart'),[{key:'cup',points:cupTarget,stroke:'#f58d9a',width:1.3},{key:'target',points:target,stroke:'#f0c75e',width:1.4},{key:'machine',points:machine,stroke:'#71a7ff',width:1.8},{key:'decaid',points:decaid,stroke:'#c77dff',width:1.5,opacity:.8},{key:'raw',points:rawSlope,stroke:'#63d89b',width:2.1},{key:'trend',points:trendSmooth,stroke:'#8fd7ff',width:1.3,opacity:.9},{key:'writes',points:extractionChartPoints(chart.trace.filter(x=>x.kind==='write'),'commandMlS'),stroke:'#ff9c45',width:2}].filter(x=>flowSeriesVisible[x.key]),0,fymax,liveTrimMarkers(chartRun).filter(x=>x.shape==='circle'?flowSeriesVisible.raw:x.shape==='square'?flowSeriesVisible.target:flowSeriesVisible.writes));const anglePts=[];for(const x of (chart.trace||[]))if(x.kind==='check'&&Number.isFinite(Number(x.trendAngleDeg)))anglePts.push([Number(x.tMs)/1000,Number(x.trendAngleDeg)]);if($('anglechart')){if(anglePts.length)renderChartAny($('anglechart'),[{key:'angle',points:anglePts,stroke:'#ffd166',width:1.8}],0,180,null,[90]);else clearChartEl($('anglechart'));}const wp=extractionChartPoints(raw,'weightG');if(wp.length){const wy=wp.map(p=>p[1]).filter(Number.isFinite);renderChartAny($('weightchart'),[{points:wp,stroke:'#e5e8ed',width:2}],Math.min(...wy),Math.max(...wy))}else if($('weightchart'))clearChartEl($('weightchart'))}
-function renderNextDecision(s){const el=$('nextdecision');if(!el)return;const a=s&&s.nextShotAdaptive;if(!a){el.textContent=s&&(s.learningReview&&s.learningReview.excluded||s.learningIntegrity&&s.learningIntegrity.eligible===false)?'Shot excluded from learning; see history review.':'尚无完整杯数据；请按正常流程出杯。';return}const manual=latestManualCurveSource&&String(latestManualCurveSource.afterRunId||'')===String(a.runId||''),st=latestAutoApplyStatus||{},matching=String(st.runId||'')===String(a.runId||'');let h='<b>下一杯决策 · 输出偏差与调整资格分别判断</b>';for(const [label,key] of [['S1','s1'],['S2','s2'],['S3','s3']]){const x=a[key]||{},p=s['stage'+label.slice(1)]||{};let status=manual?'手动曲线已替代此杯建议':x.usable!==false&&(x.action==='ADJUST'||x.action==='LUT COMPENSATE'||x.suggestedShape)?(matching&&['applied','manual-applied'].includes(st.status)?'已校验应用':matching&&st.status==='error'?'应用失败，保留原曲线':latestAutoApplyEnabled?'有调整建议，等待校验应用':'有调整建议，自动应用已关闭'):x.action==='HOLD'?(x.actualDirectionGuard&&x.actualDirectionGuard.blocked?'实测与模型方向冲突，保持':'保持当前指令'):String(x.action||'').includes('SATURATED')?'加码未触发杯流响应，保持下一杯指令':String(x.action||'').includes('VARIABLE')?'杯间差异较大，暂不自动追调':String(x.action||'').includes('LIMITED')?'受压力／执行条件限制':'等待可比学习证据';h+='<div class="m"><b>'+label+' · '+esc(p.validationStatus||'—')+' '+(p.rawErrorPct==null?'':esc(p.rawErrorPct)+'%')+' → '+esc(status)+'</b><br>'+esc(x.reason||'尚无学习证据')+(x.historySearch?'<br><span class="small">History checked: '+esc(x.historySearch.checked)+' · missing stage: '+esc(x.historySearch.missingStage)+' · context mismatch: '+esc(x.historySearch.skippedContext)+' · command mismatch: '+esc(x.historySearch.incompatibleCommands)+' · storage excluded: '+esc(x.historySearch.skippedStorage)+' · basis mismatch: '+esc(x.historySearch.incompatibleBasis||0)+' · nearby command comparisons: '+esc(x.historySearch.nearbyCommandComparisons||0)+' · matched run: '+esc(x.historySearch.matchedRunId||'none')+'</span>':'')+'</div>'}if(!manual)h+='<div class="small">若需主动调整，可使用上方“下一杯 · 曲线编辑”；修改后需应用并校验。</div>';const selected=s.learningPolicy||{};h+='<div class="small">Learning strength: '+esc(selected.name||'—')+' · Admission width: '+esc(selected.qualityWidth||1)+'×</div>';const audit=s.historyPersistence||{};h+='<div class="m"><b>History persistence</b><br>'+esc(audit.status||'—')+' · '+esc(audit.records||0)+' records · '+esc(audit.bytes||0)+' bytes<br>'+esc(audit.detail||'')+'</div>';const m=s.stage2Startup||{},plan=s.stage2StartupNext||{},execution=s.liveFlowTrim&&s.liveFlowTrim.startupExecution||{};h+='<div class="m"><b>S2 startup response</b><br>'+esc(m.reason||'S2 startup data insufficient')+'<br>Response delay: '+esc(m.firstResponseDelayS==null?'—':m.firstResponseDelayS)+' s · 20–80% rise: '+esc(m.rise20to80S==null?'—':m.rise20to80S)+' s · Rise basis: '+esc(m.riseBasis||'target')+' · Tail error: '+esc(m.tailErrorPct==null?'—':m.tailErrorPct)+'%<br>Next startup: '+esc(plan.reason||'S2 startup needs two comparable clean shots')+(plan.enabled?(plan.strategy==='refill-85'?' · '+esc(plan.baseCommandMlS)+' → '+esc(plan.boostCommandMlS)+' ml/s · '+esc(Math.round((plan.refillTargetFraction||1)*100))+'% base pump flow · '+esc(Math.round(plan.cutoffFraction*100))+'% cutoff · max '+esc(plan.holdMs)+' ms':' · +'+esc(plan.boostQuanta)+'/16 ml/s × '+esc(plan.holdMs)+' ms'):'')+(plan.returnCommandMlS!=null?' · 接管指令 '+esc(plan.returnCommandMlS)+' ml/s':'')+(s.stage2CupOnset?'<br>'+(s.stage2CupOnset.detected?'S2有效称流起点：'+esc((s.stage2CupOnset.startMs/1000).toFixed(2))+' s · 出液前等待 '+esc(s.stage2CupOnset.delayS)+' s，不计入合格与学习窗口':'S2尚未检测到持续有效出液；暂不计算流量合格判定'):'')+'<br>Executed startup boost: '+esc(m.pulseUsed?'YES':'NO')+' · '+esc(execution.status||'not-planned')+'<br>'+esc(execution.reason||'')+'</div>';const tl=s.s2RefillTimeline||{};if(tl.stage2StartMs!=null||tl.onsetMs!=null){const pct=plan.cutoffFraction!=null?Math.round(plan.cutoffFraction*100):null,relS=v=>v==null?'—':Number(v).toFixed(2)+' s';h+='<div class="m"><b>S2 补水节点</b><br>帧确认 0.00 s · onset '+relS(tl.relative&&tl.relative.onsetS)+'（S2 起点）'+(tl.cutoffAtMs!=null?' · 杯流 '+esc(pct==null?'—':pct)+'% '+relS(tl.relative&&tl.relative.cutoffS):'')+(tl.relative&&tl.relative.returnS!=null?' · 收回 '+relS(tl.relative&&tl.relative.returnS):'')+(tl.relative&&tl.relative.completeS!=null?' · 确认 '+relS(tl.relative&&tl.relative.completeS):'')+'<br>'+(tl.overlap?'S2 与补水重叠 '+esc(tl.overlap.seconds)+' s（onset → 收回）':'S2 与补水无重叠')+'</div>'}const gains=[['S2',a.s2&&a.s2.gainFeedForward],['S3',a.s3&&a.s3.gainFeedForward]].filter(x=>x[1]);if(gains.length)h+='<div class="m">'+gains.map(([n,g])=>g.k==null?'<b>'+n+' 稳态增益 k</b><br>样本 '+esc(g.samples||0)+' 杯 · 需 ≥2 杯同段干净记录':'<b>'+n+' 稳态增益 k</b><br>k '+esc(g.k)+' · 样本 '+esc(g.samples)+' · 离散 '+esc(Number(g.spread*100).toFixed(1))+'%<br>当前指令 '+esc(g.currentCommandMlS)+' → 目标折算 '+esc(g.targetCommandMlS)+' · 限幅后 '+esc(g.boundedCommandMlS)+' ml/s'+(g.applied?' · 已应用':'')).join('<br>')+'</div>';el.innerHTML=h}
+function renderNextDecision(s){const el=$('nextdecision');if(!el)return;const a=s&&s.nextShotAdaptive;if(!a){el.textContent=s&&(s.learningReview&&s.learningReview.excluded||s.learningIntegrity&&s.learningIntegrity.eligible===false)?'Shot excluded from learning; see history review.':'尚无完整杯数据；请按正常流程出杯。';return}const manual=latestManualCurveSource&&String(latestManualCurveSource.afterRunId||'')===String(a.runId||''),st=latestAutoApplyStatus||{},matching=String(st.runId||'')===String(a.runId||'');let h='<b>下一杯决策 · 输出偏差与调整资格分别判断</b>';for(const [label,key] of [['S1','s1'],['S2','s2'],['S3','s3']]){const x=a[key]||{},p=s['stage'+label.slice(1)]||{};let status=manual?'手动曲线已替代此杯建议':x.usable!==false&&(x.action==='ADJUST'||x.action==='LUT COMPENSATE'||x.suggestedShape||x.driftShape)?(matching&&['applied','manual-applied'].includes(st.status)?'已校验应用':matching&&st.status==='error'?'应用失败，保留原曲线':latestAutoApplyEnabled?'有调整建议，等待校验应用':'有调整建议，自动应用已关闭'):x.action==='HOLD'?(x.actualDirectionGuard&&x.actualDirectionGuard.blocked?'实测与模型方向冲突，保持':'保持当前指令'):String(x.action||'').includes('SATURATED')?'加码未触发杯流响应，保持下一杯指令':String(x.action||'').includes('VARIABLE')?'杯间差异较大，暂不自动追调':String(x.action||'').includes('LIMITED')?'受压力／执行条件限制':'等待可比学习证据';h+='<div class="m"><b>'+label+' · '+esc(p.validationStatus||'—')+' '+(p.rawErrorPct==null?'':esc(p.rawErrorPct)+'%')+' → '+esc(status)+'</b><br>'+esc(x.reason||'尚无学习证据')+(x.historySearch?'<br><span class="small">History checked: '+esc(x.historySearch.checked)+' · missing stage: '+esc(x.historySearch.missingStage)+' · context mismatch: '+esc(x.historySearch.skippedContext)+' · command mismatch: '+esc(x.historySearch.incompatibleCommands)+' · storage excluded: '+esc(x.historySearch.skippedStorage)+' · basis mismatch: '+esc(x.historySearch.incompatibleBasis||0)+' · nearby command comparisons: '+esc(x.historySearch.nearbyCommandComparisons||0)+' · matched run: '+esc(x.historySearch.matchedRunId||'none')+'</span>':'')+'</div>'}if(!manual)h+='<div class="small">若需主动调整，可使用上方“下一杯 · 曲线编辑”；修改后需应用并校验。</div>';const selected=s.learningPolicy||{};h+='<div class="small">Learning strength: '+esc(selected.name||'—')+' · Admission width: '+esc(selected.qualityWidth||1)+'×</div>';const audit=s.historyPersistence||{};h+='<div class="m"><b>History persistence</b><br>'+esc(audit.status||'—')+' · '+esc(audit.records||0)+' records · '+esc(audit.bytes||0)+' bytes<br>'+esc(audit.detail||'')+'</div>';const m=s.stage2Startup||{},plan=s.stage2StartupNext||{},execution=s.liveFlowTrim&&s.liveFlowTrim.startupExecution||{};h+='<div class="m"><b>S2 startup response</b><br>'+esc(m.reason||'S2 startup data insufficient')+'<br>Response delay: '+esc(m.firstResponseDelayS==null?'—':m.firstResponseDelayS)+' s · 20–80% rise: '+esc(m.rise20to80S==null?'—':m.rise20to80S)+' s · Rise basis: '+esc(m.riseBasis||'target')+' · Tail error: '+esc(m.tailErrorPct==null?'—':m.tailErrorPct)+'%<br>Next startup: '+esc(plan.reason||'S2 startup needs two comparable clean shots')+(plan.enabled?(plan.strategy==='refill-85'?' · '+esc(plan.baseCommandMlS)+' → '+esc(plan.boostCommandMlS)+' ml/s · '+esc(Math.round((plan.refillTargetFraction||1)*100))+'% base pump flow · '+esc(Math.round(plan.cutoffFraction*100))+'% cutoff · max '+esc(plan.holdMs)+' ms':' · +'+esc(plan.boostQuanta)+'/16 ml/s × '+esc(plan.holdMs)+' ms'):'')+(plan.returnCommandMlS!=null?' · 接管指令 '+esc(plan.returnCommandMlS)+' ml/s':'')+(s.stage2CupOnset?'<br>'+(s.stage2CupOnset.detected?'S2有效称流起点：'+esc((s.stage2CupOnset.startMs/1000).toFixed(2))+' s · 出液前等待 '+esc(s.stage2CupOnset.delayS)+' s，不计入合格与学习窗口':'S2尚未检测到持续有效出液；暂不计算流量合格判定'):'')+'<br>Executed startup boost: '+esc(m.pulseUsed?'YES':'NO')+' · '+esc(execution.status||'not-planned')+'<br>'+esc(execution.reason||'')+'</div>';const tl=s.s2RefillTimeline||{};if(tl.stage2StartMs!=null||tl.onsetMs!=null){const pct=plan.cutoffFraction!=null?Math.round(plan.cutoffFraction*100):null,relS=v=>v==null?'—':Number(v).toFixed(2)+' s';h+='<div class="m"><b>S2 补水节点</b><br>帧确认 0.00 s · onset '+relS(tl.relative&&tl.relative.onsetS)+'（S2 起点）'+(tl.cutoffAtMs!=null?' · 杯流 '+esc(pct==null?'—':pct)+'% '+relS(tl.relative&&tl.relative.cutoffS):'')+(tl.relative&&tl.relative.returnS!=null?' · 收回 '+relS(tl.relative&&tl.relative.returnS):'')+(tl.relative&&tl.relative.completeS!=null?' · 确认 '+relS(tl.relative&&tl.relative.completeS):'')+'<br>'+(tl.overlap?'S2 与补水重叠 '+esc(tl.overlap.seconds)+' s（onset → 收回）':'S2 与补水无重叠')+'</div>'}const gains=[['S2',a.s2&&a.s2.gainFeedForward],['S3',a.s3&&a.s3.gainFeedForward]].filter(x=>x[1]);const gainMemories=[['S2',a.s2&&a.s2.gainMemory],['S3',a.s3&&a.s3.gainMemory]].filter(x=>x[1]);if(gainMemories.length)h+='<div class="m"><b>杯间增益记忆</b><br>'+gainMemories.map(([n,g])=>'<b>'+n+'</b> · 桶 '+esc(g.bucketId)+' · r '+esc(g.r)+' · 样本 '+esc(g.bucketSamples)+' · '+esc(g.confidence)+(g.deviationPct==null?'':' · 偏差 '+esc(g.deviationPct)+'%')+(g.local?' · 当杯局部估计':'')+' · 反算基值 '+esc(g.commandMlS)+' ml/s'+(g.applied?' · 已采用':(g.stage==='s3'?' · 仅记录（形状下一步）':' · 未采用'))).join('<br>')+'</div>';if(gains.length)h+='<div class="m">'+gains.map(([n,g])=>g.k==null?'<b>'+n+' 稳态增益 k</b><br>样本 '+esc(g.samples||0)+' 杯 · 需 ≥2 杯同段干净记录':'<b>'+n+' 稳态增益 k</b><br>k '+esc(g.k)+' · 样本 '+esc(g.samples)+' · 离散 '+esc(Number(g.spread*100).toFixed(1))+'%<br>当前指令 '+esc(g.currentCommandMlS)+' → 目标折算 '+esc(g.targetCommandMlS)+' · 限幅后 '+esc(g.boundedCommandMlS)+' ml/s'+(g.applied?' · 已应用':'')).join('<br>')+'</div>';el.innerHTML=h}
 function validationClass(x){return x==='HIT'?'good':x==='NEAR'||x==='TRANSIENT'?'':'bad'}
 function validationRow(label,p){if(!p)return '<tr><td>'+label+'</td><td colspan=7>—</td></tr>';return '<tr><td>'+label+'</td><td>'+esc(p.desiredRealFlowGS)+'</td><td>'+esc(p.machineFlowAvg)+'</td><td>'+esc(p.gflowAvg)+'</td><td><b>'+esc(p.rawRegressionGS)+'</b></td><td>'+esc(p.rawRegressionR2)+'</td><td>'+esc(p.rawRegressionSeconds)+'s</td><td class="'+validationClass(p.validationStatus)+'">'+esc(p.validationStatus)+' '+(p.rawErrorPct==null?'':('('+p.rawErrorPct+'%)'))+'</td></tr>'}
 function advisoryClass(a){return !a?'':a.action==='HOLD'?'good':a.confidence==='INSUFFICIENT'?'bad':''}
@@ -3775,7 +4130,7 @@ function segCell(x){if(!x||x.slope==null)return '—';return '<b>'+esc(x.slope)+
 function renderStability(s){if(!stability)return;const m=s&&s.stage1Startup,st=s&&s.stage3Stability;if(!m&&!st){stability.innerHTML='<span class="small">No S1/S3 stability diagnostics available yet.</span>';return}let h='';if(m){const cls=m.confidence==='INSUFFICIENT'?'bad':m.confidence==='MEDIUM'?'good':'';h+='<div style="margin-bottom:10px"><b>S1 STARTUP</b> · confidence <span class="'+cls+'">'+esc(m.confidence)+'</span><br>First cup rise: <b>'+esc(m.firstRiseDelayS)+' s</b> · 20–80% flow: <b>'+esc(m.midFlowGS)+' g/s</b> · R² '+esc(m.midR2)+' · transit '+esc(m.transit20to80S)+' s · active avg '+esc(m.activeFlowGS)+' g/s · collected '+esc(m.gainG)+' g<br><span class="small">Quality: '+esc(m.qualityReason||'—')+' · 20–80% samples '+esc(m.midSampleCount??'—')+' · active '+esc(m.activeSeconds)+' s</span></div>'}if(st){const sc=st.status==='STABLE'?'good':'bad';h+='<div><b>S3 STABILITY</b> · <span class="'+sc+'">'+esc(st.status)+'</span> · late/early '+esc(st.lateToEarlyRatio)+'<table><tr><th>EARLY 25%</th><th>MID 50%</th><th>LATE 25%</th><th>Stall window</th></tr><tr><td>'+segCell(st.early)+'</td><td>'+segCell(st.mid)+'</td><td>'+segCell(st.late)+'</td><td>'+(st.stall&&st.stall.suspected?'<span class="bad"><b>YES</b> '+esc(st.stall.startS)+'–'+esc(st.stall.endS)+'s · RAW '+esc(st.stall.rawSlopeGS)+' g/s while DE1 '+esc(st.stall.machineFlowMlS)+' ml/s</span>':'<span class="good">none</span>')+'</td></tr></table>'+(Array.isArray(st.shapeFrames)?'<div style="margin-top:8px"><b>LATEST SHOT · S3 FRAME MEASUREMENTS</b><div class="small">The Command column is the command captured for this completed shot, not the current NEXT SHOT profile.</div><table><tr><th>Frame</th><th>SHOT command</th><th>MEASURED RAW regression</th><th>R²</th><th>Window</th></tr>'+st.shapeFrames.map(x=>'<tr><td>'+esc(x.name)+'</td><td>'+esc(x.commandMlS)+' ml/s</td><td>'+esc(x.slope)+' g/s</td><td>'+esc(x.r2)+'</td><td>'+esc(x.seconds)+' s</td></tr>').join('')+'</table></div>':'')+'</div>'}stability.innerHTML=h}
 function renderAdvisory(s){if(!advisory)return;const a=s&&s.advisory;if(!a){advisory.innerHTML='<span class="small">No advisory available yet. Run a complete HyperEx shot.</span>';return}advisory.innerHTML='<table><tr><th>Stage</th><th>Confidence</th><th>Action</th><th>Current cmd</th><th>Mid ref</th><th>Reference Range</th><th>Advice</th></tr>'+advisoryRow('S1',a.stage1)+advisoryRow('S2',a.stage2)+advisoryRow('S3',a.stage3)+'</table><div class="small" style="margin-top:8px">Range is deliberately only a partial step toward the theoretical correction. LOW confidence may still show a broad manual-test range; INSUFFICIENT never shows a numeric range.</div>'}
 function stageTestRow(label,key,c,a){const mode=(c&&c[key+'Mode'])||'auto',origin=c&&c[key+'Origin']||(mode==='auto'?'original':'retained');const lut=c&&c[key+'LutCommandMlS']!=null?c[key+'LutCommandMlS']:'—',eff=c&&c[key+'CommandMlS']!=null?c[key+'CommandMlS']:lut,editor=key==='stage3'&&c&&c.stage3FlatCommandMlS!=null?c.stage3FlatCommandMlS:eff,shaped=key==='stage3'&&c&&c.s3Shape&&c.s3Shape.enabled,applied=shaped?appliedS3Text(c):esc(eff)+' ml/s',adv=a&&a[key],rr=adv&&adv.referenceRangeMlS&&adv.referenceRangeMlS.length===2?adv.referenceRangeMlS[0]+'–'+adv.referenceRangeMlS[1]:'—',keep=shaped||['adaptive','retained'].includes(origin);return '<tr><td>'+label+'</td><td>'+esc(c&&c[key+'DesiredGS'])+'</td><td>'+esc(lut)+'</td><td>'+esc(rr)+'</td><td><select id="mode_'+key+'">'+(keep?'<option value="keep" selected>'+commandModeLabel(mode,origin)+'</option>':'')+'<option value="auto" '+(!keep&&origin==='original'?'selected':'')+'>ORIGINAL / LUT</option><option value="manual" '+(!keep&&origin==='manual'?'selected':'')+'>MANUAL</option></select></td><td><input id="cmd_'+key+'" type="number" min="0.10" max="8.00" step="0.01" value="'+esc(editor)+'" style="width:85px" data-origin-stage="'+key+'"></td><td><b>'+applied+'</b></td></tr>'}
-function shapeSuggestion(c,st){const a=latestNextShotAdaptive&&latestNextShotAdaptive.s3;if(a&&a.usable&&a.suggestedShape){const q=a.suggestedShape;return {early:Number(q.earlyCommand),earlySeconds:Number(q.earlySeconds),mid:Number(q.midCommand),midSeconds:Number(q.midSeconds),late:Number(q.lateCommand),source:'NEXT SHOT ADAPTIVE'}}if(a&&a.action&&String(a.action).includes('REPEAT'))return null;const cur=Number(c&&c.stage3CommandMlS);if(!Number.isFinite(cur))return null;let early=cur,mid=cur,late=cur;if(st&&(st.status==='LATE DECAY'||(st.stall&&st.stall.suspected))){early=Math.max(.10,cur*.97);late=Math.min(8,cur*(st.stall&&st.stall.suspected?1.15:1.08));}return {early:Number(early.toFixed(3)),earlySeconds:8,mid:Number(mid.toFixed(3)),midSeconds:14,late:Number(late.toFixed(3)),source:'FALLBACK'}}
+function shapeSuggestion(c,st){const a=latestNextShotAdaptive&&latestNextShotAdaptive.s3;if(a&&a.usable&&a.driftShape){const q=a.driftShape;return {early:Number(q.earlyCommand),earlySeconds:Number(q.earlySeconds),mid:Number(q.midCommand),midSeconds:Number(q.midSeconds),late:Number(q.lateCommand),source:'DRIFT MODEL'}}if(a&&a.usable&&a.suggestedShape){const q=a.suggestedShape;return {early:Number(q.earlyCommand),earlySeconds:Number(q.earlySeconds),mid:Number(q.midCommand),midSeconds:Number(q.midSeconds),late:Number(q.lateCommand),source:'NEXT SHOT ADAPTIVE'}}if(a&&a.action&&String(a.action).includes('REPEAT'))return null;const cur=Number(c&&c.stage3CommandMlS);if(!Number.isFinite(cur))return null;let early=cur,mid=cur,late=cur;if(st&&(st.status==='LATE DECAY'||(st.stall&&st.stall.suspected))){early=Math.max(.10,cur*.97);late=Math.min(8,cur*(st.stall&&st.stall.suspected?1.15:1.08));}return {early:Number(early.toFixed(3)),earlySeconds:8,mid:Number(mid.toFixed(3)),midSeconds:14,late:Number(late.toFixed(3)),source:'FALLBACK'}}
 function renderAdaptive(s){
   latestAdaptiveSummary=s||null;
   if(!adaptive)return;
@@ -3829,9 +4184,22 @@ async function readRawWorkflow(){
 }
 if($('readworkflow'))$('readworkflow').onclick=readRawWorkflow;
 function renderAutoApplyBox(){const box=$('autoapplybox');if(!box)return;const on=!!latestAutoApplyEnabled;const st=latestAutoApplyStatus||{};let status=st.message?('<span class="small">Auto apply state: <b>'+esc(st.status||'unknown')+'</b> · '+esc(st.message)+(st.runId?' · '+esc(st.runId):'')+'</span>'):'';box.innerHTML='<div class="row"><button id="autoapplytoggle" class="b '+(on?'primaryAction':'tertiaryAction')+'">AUTO APPLY NEXT SHOT: '+(on?'ON':'OFF')+'</button><span class="small" style="align-self:center">'+(on?'Default mode · verified actionable suggestions apply automatically.':'Manual mode · enter DIAG and press APPLY NEXT SHOT when a numeric suggestion is available.')+'</span></div>'+status;const q=$('autoapplytoggle');if(q)q.onclick=async()=>{const next=!latestAutoApplyEnabled;if(!confirm((next?'Enable':'Disable')+' AUTO APPLY NEXT SHOT?\\n\\n'+(next?'Verified actionable suggestions will apply automatically after completed HyperEx shots.':'The plugin will return to the v0.1.39 manual APPLY NEXT SHOT workflow.')))return;try{const r=await post('adaptive-auto-set',{enabled:next});latestAutoApplyEnabled=!!r.autoApplyNextShot;latestAutoApplyStatus=r.autoApplyLastStatus||null;renderAutoApplyBox();renderAdaptive(latestAdaptiveSummary)}catch(e){alert('AUTO APPLY setting failed: '+e)}}}
-function renderS3Shape(c,st){if(!s3shape)return;const saved=c&&c.s3Shape&&c.s3Shape.enabled?c.s3Shape:null;const sug=shapeSuggestion(c,st);const q=saved||sug||{early:c.stage3CommandMlS,earlySeconds:8,mid:c.stage3CommandMlS,midSeconds:14,late:c.stage3CommandMlS};const ap=latestNextShotAdaptive&&latestNextShotAdaptive.s3;const hint=(ap&&ap.action&&(ap.action==='REPEAT SAME SHAPE'||ap.action==='VARIABLE / REPEAT'))?('NEXT SHOT: '+ap.action+' · keep the current shape unchanged until repeated evidence is consistent.'):('Suggested '+(sug&&sug.source==='NEXT SHOT ADAPTIVE'?'from NEXT SHOT ADAPTIVE':'from latest LATE DECAY')+': '+(sug?(sug.early+' × '+sug.earlySeconds+'s → '+sug.mid+' × '+sug.midSeconds+'s → '+sug.late):'—'));s3shape.innerHTML='<b>S3 SHAPE OVERRIDE EDITOR</b> · profile-time only, no extra skipStep<div class="small">'+(saved?'<span class="good"><b>APPLIED SHAPE</b></span> · inputs below are loaded from the current applied override.':'<b>NOT APPLIED</b> · inputs below are only a TEST/PROPOSED editor until APPLY TEST COMMANDS succeeds.')+'</div><table><tr><th>Mode</th><th>EARLY cmd</th><th>EARLY time</th><th>MID cmd</th><th>MID time</th><th>LATE cmd</th></tr><tr><td><select id="s3shape_mode"><option value="off" '+(!saved?'selected':'')+'>FLAT</option><option value="decay" '+(saved?'selected':'')+'>DECAY COMP TEST</option></select></td><td><input id="s3shape_early" type="number" min=".10" max="8" step=".01" value="'+esc(q.earlyCommand??q.early)+'" style="width:76px"></td><td><input id="s3shape_early_s" type="number" min="3" max="30" step="1" value="'+esc(q.earlySeconds)+'" style="width:62px"> s</td><td><input id="s3shape_mid" type="number" min=".10" max="8" step=".01" value="'+esc(q.midCommand??q.mid)+'" style="width:76px"></td><td><input id="s3shape_mid_s" type="number" min="3" max="30" step="1" value="'+esc(q.midSeconds)+'" style="width:62px"> s</td><td><input id="s3shape_late" type="number" min=".10" max="8" step=".01" value="'+esc(q.lateCommand??q.late)+'" style="width:76px"></td></tr></table><div class="small">Commands must be non-decreasing. Adjacent rises are bounded to ≤35% and ≤0.25 ml/s. '+hint+' The shape is enabled automatically only when AUTO APPLY is ON and a verified actionable adaptive suggestion passes all safety checks.</div>'}
+function renderS3Shape(c,st){if(!s3shape)return;const saved=c&&c.s3Shape&&c.s3Shape.enabled?c.s3Shape:null;const sug=shapeSuggestion(c,st);const q=saved||sug||{early:c.stage3CommandMlS,earlySeconds:8,mid:c.stage3CommandMlS,midSeconds:14,late:c.stage3CommandMlS};const manualOn=q.manual===true;const earlyNow=Number.isFinite(Number(q.earlyFactor))?Number(q.earlyFactor):(Number(q.earlyCommand)/Number(q.midCommand)||1);const driftNow=Number.isFinite(Number(q.drift))?Number(q.drift):(Number(q.lateCommand)/Number(q.midCommand)||1);const derivedTilt=Math.max(-1,Math.min(1,(earlyNow-1)/0.45));const tiltValue=manualOn&&Number.isFinite(Number(q.manualTilt))?Math.max(-1,Math.min(1,Number(q.manualTilt))):derivedTilt;const ap=latestNextShotAdaptive&&latestNextShotAdaptive.s3;const hint=(ap&&ap.action&&(ap.action==='REPEAT SAME SHAPE'||ap.action==='VARIABLE / REPEAT'))?('NEXT SHOT: '+ap.action+' · keep the current shape unchanged until repeated evidence is consistent.'):('Suggested '+(sug&&sug.source==='NEXT SHOT ADAPTIVE'?'from NEXT SHOT ADAPTIVE':'from latest LATE DECAY')+': '+(sug?(sug.early+' × '+sug.earlySeconds+'s → '+sug.mid+' × '+sug.midSeconds+'s → '+sug.late):'—'));s3shape.innerHTML='<b>S3 SHAPE OVERRIDE EDITOR</b> · profile-time only, no extra skipStep<div class="small">'+(saved?'<span class="good"><b>APPLIED SHAPE</b></span> · inputs below are loaded from the current applied override.':'<b>NOT APPLIED</b> · inputs below are only a TEST/PROPOSED editor until APPLY TEST COMMANDS succeeds.')+'</div><table><tr><th>Mode</th><th>EARLY cmd</th><th>EARLY time</th><th>MID cmd</th><th>MID time</th><th>LATE cmd</th></tr><tr><td><select id="s3shape_mode"><option value="off" '+(!saved?'selected':'')+'>FLAT</option><option value="decay" '+(saved?'selected':'')+'>DECAY COMP TEST</option></select></td><td><input id="s3shape_early" type="number" min=".10" max="8" step=".01" value="'+esc(q.earlyCommand??q.early)+'" style="width:76px"></td><td><input id="s3shape_early_s" type="number" min="3" max="30" step="1" value="'+esc(q.earlySeconds)+'" style="width:62px"> s</td><td><input id="s3shape_mid" type="number" min=".10" max="8" step=".01" value="'+esc(q.midCommand??q.mid)+'" style="width:76px"></td><td><input id="s3shape_mid_s" type="number" min="3" max="30" step="1" value="'+esc(q.midSeconds)+'" style="width:62px"> s</td><td><input id="s3shape_late" type="number" min=".10" max="8" step=".01" value="'+esc(q.lateCommand??q.late)+'" style="width:76px"></td></tr></table><div class="row" style="align-items:center;gap:8px;margin-top:8px"><label class="small"><input id="s3manual" type="checkbox" '+(manualOn?'checked':'')+'> 手动形状</label><input id="s3tilt" type="range" min="-1" max="1" step="0.05" value="'+tiltValue+'" '+(manualOn?'':'disabled')+' style="flex:1;min-width:120px"><span id="s3tiltreadout" class="small">early ×'+Number(manualOn?1+0.45*tiltValue:earlyNow).toFixed(2)+' / drift ×'+Number(manualOn?1-0.20*tiltValue:driftNow).toFixed(2)+'</span></div><div class="small">Legacy manual shape requires non-decreasing commands; adaptive drift shapes may use early > MID or late < MID. '+hint+' The shape is enabled automatically only when AUTO APPLY is ON and a verified actionable adaptive suggestion passes all safety checks.</div>';;const manualBox=$('s3manual'),tiltBox=$('s3tilt'),tiltReadout=$('s3tiltreadout');const syncTilt=()=>{const on=!!(manualBox&&manualBox.checked),t=Number(tiltBox&&tiltBox.value)||0;if(tiltBox)tiltBox.disabled=!on;if(tiltReadout)tiltReadout.textContent=on?'early ×'+(1+0.45*t).toFixed(2)+' / drift ×'+(1-0.20*t).toFixed(2):'early ×'+Number(earlyNow).toFixed(2)+' / drift ×'+Number(driftNow).toFixed(2);};if(manualBox)manualBox.onchange=syncTilt;if(tiltBox)tiltBox.oninput=syncTilt;syncTilt();}
 function renderTestCommands(c,a){if(!testcommands)return;testcommands.innerHTML='<table><tr><th>Stage</th><th>Target g/s</th><th>LUT cmd</th><th>Ref range</th><th>Editor mode</th><th>Editor flat cmd</th><th>CURRENTLY APPLIED</th></tr>'+stageTestRow('S1','stage1',c,a)+stageTestRow('S2','stage2',c,a)+stageTestRow('S3','stage3',c,a)+'</table><div class="small" style="margin-top:7px">DE1 command hard limit: 0.10–8.00 ml/s. MANUAL changes only the HyperEx profile command; calibration LUT data remains untouched. If S3 DECAY COMP is enabled, its three shape commands override the flat S3 command.</div>';renderS3Shape(c,latestStage3Stability)}
-async function applyTestCommands(){const stages={};for(const key of ['stage1','stage2','stage3']){const mode=$('mode_'+key).value;const command=Number($('cmd_'+key).value);if(mode==='manual'&&(!Number.isFinite(command)||command<0.10||command>8.00)){alert(key.toUpperCase()+' manual command must be 0.10–8.00 ml/s.');return}stages[key]={mode,command}}const sm=$('s3shape_mode');const s3Shape={enabled:!!sm&&sm.value==='decay',earlyCommand:Number($('s3shape_early').value),earlySeconds:Number($('s3shape_early_s').value),midCommand:Number($('s3shape_mid').value),midSeconds:Number($('s3shape_mid_s').value),lateCommand:Number($('s3shape_late').value)};if(s3Shape.enabled){if([s3Shape.earlyCommand,s3Shape.midCommand,s3Shape.lateCommand].some(x=>!Number.isFinite(x)||x<.10||x>8)){alert('S3 shape commands must be 0.10–8.00 ml/s.');return}if(s3Shape.earlyCommand>s3Shape.midCommand||s3Shape.midCommand>s3Shape.lateCommand){alert('S3 DECAY COMP commands must be non-decreasing: EARLY ≤ MID ≤ LATE.');return}if(!Number.isFinite(s3Shape.earlySeconds)||s3Shape.earlySeconds<3||s3Shape.earlySeconds>30||!Number.isFinite(s3Shape.midSeconds)||s3Shape.midSeconds<3||s3Shape.midSeconds>30){alert('S3 EARLY/MID times must be 3–30 seconds.');return}}if(!confirm('Apply these TEST commands to HyperEx?\\n\\nS1/S2/manual flat commands are static. S3 DECAY COMP, if enabled, advances only by profile time and adds NO plugin skipStep calls. Calibration LUT remains unchanged. Changes apply to the next normal shot only.'))return;try{const r=await post('test-command-set',{stages,s3Shape,revision:curveLatest&&curveLatest.revision});if(r.verified!==true)throw Error('下一杯曲线未校验');await loadDiag()}catch(e){alert('Apply failed: '+e)}}
+async function applyTestCommands(){const stages={};for(const key of ['stage1','stage2','stage3']){const mode=$('mode_'+key).value;const command=Number($('cmd_'+key).value);if(mode==='manual'&&(!Number.isFinite(command)||command<0.10||command>8.00)){alert(key.toUpperCase()+' manual command must be 0.10–8.00 ml/s.');return}stages[key]={mode,command}}const sm=$('s3shape_mode'),manualBox=$('s3manual'),tiltBox=$('s3tilt'),manualShape=!!(manualBox&&manualBox.checked),manualTilt=manualShape?Math.max(-1,Math.min(1,Number(tiltBox&&tiltBox.value)||0)):null;let s3Shape;
+if(manualShape){
+ const mid=Number($('s3shape_mid').value),earlyFactor=1+0.45*manualTilt,drift=1-0.20*manualTilt,earlySeconds=Number($('s3shape_early_s').value),midSeconds=Number($('s3shape_mid_s').value);
+ if(![mid,earlySeconds,midSeconds].every(Number.isFinite)||mid<.10||mid>8||earlySeconds<3||earlySeconds>30||midSeconds<3||midSeconds>30){alert('S3 manual drift needs MID 0.10–8.00 ml/s and times 3–30 s.');return}
+ if(![mid*earlyFactor,mid*drift].every(v=>v>=.10&&v<=8)){alert('S3 drift-derived command outside 0.10–8.00 ml/s.');return}
+ s3Shape={enabled:true,model:'drift',manual:true,manualTilt,midCommand:mid,earlyFactor,drift,earlySeconds,midSeconds};
+}else{
+ s3Shape={enabled:!!sm&&sm.value==='decay',earlyCommand:Number($('s3shape_early').value),earlySeconds:Number($('s3shape_early_s').value),midCommand:Number($('s3shape_mid').value),midSeconds:Number($('s3shape_mid_s').value),lateCommand:Number($('s3shape_late').value)};
+ if(s3Shape.enabled){
+  if([s3Shape.earlyCommand,s3Shape.midCommand,s3Shape.lateCommand].some(x=>!Number.isFinite(x)||x<.10||x>8)){alert('S3 shape commands must be 0.10–8.00 ml/s.');return}
+  if(s3Shape.earlyCommand>s3Shape.midCommand||s3Shape.midCommand>s3Shape.lateCommand){alert('S3 DECAY COMP commands must be non-decreasing: EARLY ≤ MID ≤ LATE.');return}
+  if(!Number.isFinite(s3Shape.earlySeconds)||s3Shape.earlySeconds<3||s3Shape.earlySeconds>30||!Number.isFinite(s3Shape.midSeconds)||s3Shape.midSeconds<3||s3Shape.midSeconds>30){alert('S3 EARLY/MID times must be 3–30 seconds.');return}
+ }
+}if(!confirm('Apply these TEST commands to HyperEx?\\n\\nS1/S2/manual flat commands are static. S3 DECAY COMP, if enabled, advances only by profile time and adds NO plugin skipStep calls. Calibration LUT remains unchanged. Changes apply to the next normal shot only.'))return;try{const r=await post('test-command-set',{stages,s3Shape,revision:curveLatest&&curveLatest.revision});if(r.verified!==true)throw Error('下一杯曲线未校验');await loadDiag()}catch(e){alert('Apply failed: '+e)}}
 async function returnAllToLut(){if(!confirm('Return S1/S2/S3 to AUTO / LUT and clear all manual test overrides, including S3 shape?'))return;try{await post('test-command-clear',{});await loadDiag()}catch(e){alert('Reset failed: '+e)}}
 
 let csvLoaded=false;async function ensureCsv(){if(csvLoaded)return;csvLoaded=true;try{const cr=await fetch(base+'/diagnostics-csv');if(cr.ok)csv.value=await cr.text()}catch(_){}}
@@ -5583,6 +5951,8 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     state.commandBusy = false;
     state.stage1DumpSent = false;
     state.stage2SkipSent = false;
+    state.stage3StartedAtMs = 0;
+    state.stage3PlannedMs = 0;
     state.finalStopSent = false;
     state.sequenceStartedAtMs = 0;
     state.soakPromptStartedAtMs = 0;
@@ -5636,6 +6006,8 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     state.hardPressureSamples = 0;
     state.stage1DumpSent = false;
     state.stage2SkipSent = false;
+    state.stage3StartedAtMs = 0;
+    state.stage3PlannedMs = 0;
     state.finalStopSent = false;
     state.sequenceStartedAtMs = Date.now();
     state.soakSecondsRemaining = 0;
@@ -6201,6 +6573,35 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
   // ceiling (4 -> 6 -> 8 native quanta) so fewer writes and less time close the angle.
   // The base±20% envelope and the trend gates keep the resulting wave amplitude bounded.
   function vectorStepCount(errGS,sameSideStreak,target){const rel=target>0?Math.abs(errGS/target):1;const head=rel<=.10?1:Math.min(8,4+Math.floor((sameSideStreak||0)/3)*2);return Math.max(1,Math.min(head,Math.round(Math.abs(errGS)*8)));}
+  function robustLinearRegression(points) {
+    const sorted=(points||[]).slice().sort((a,b)=>a.x-b.x);
+    if(sorted.length<8)return linearRegression(sorted);
+    const trim=Math.max(1,Math.floor(sorted.length*.15));
+    const kept=sorted.slice(trim,sorted.length-trim);
+    return kept.length>=4?linearRegression(kept):linearRegression(sorted);
+  }
+  function liveTrimMemoryCandidate(phase,run) {
+    const stageKey=phase==="stage2"?"s2":phase==="stage3"?"s3":null;
+    if(!stageKey)return null;
+    for(const candidate of [state.diagnosticLast,run,state.diagnosticCurrent]){
+      if(!candidate)continue;
+      const gm=gainMemorySuggestion(candidate,stageKey);
+      if(gm&&Number.isFinite(Number(gm.commandMlS))&&Number(gm.commandMlS)>0)return gm;
+    }
+    return null;
+  }
+  function liveTrimControlCenter(phase,fallbackBase,run) {
+    const gm=liveTrimMemoryCandidate(phase,run);
+    const target=phase==="stage2"?state.cfg.stage2Flow:phase==="stage3"?state.cfg.stage3Flow:null;
+    if(gm&&Number(gm.r)>0&&Number.isFinite(Number(target))&&Number(target)>0)return {commandMlS:Number(target)/Number(gm.r),r:Number(gm.r),source:"gain-memory",bucketId:gm.bucketId,confidence:gm.confidence};
+    const mapped=Number.isFinite(Number(target))?mappedCommandForReal(target):null;
+    if(Number.isFinite(Number(mapped))&&Number(mapped)>0)return {commandMlS:Number(mapped),r:null,source:"lut"};
+    return {commandMlS:Number(fallbackBase),r:null,source:"profile-base"};
+  }
+  function predictiveStepQuanta(errGS,r,min,max) {
+    if(!(Number(r)>0)||!Number.isFinite(errGS))return min;
+    return Math.max(min,Math.min(max,Math.round(Math.abs(errGS)/r*16)));
+  }
   function closeLiveTrim(t) {
     if(!t)return;clearS2StartupTimers(t);if(!t.handle)return;const h=t.handle;t.handle=null;
     host.transport.close(h).catch(()=>{});
@@ -6222,14 +6623,15 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     const level=[1,2,3,4].includes(state.cfg.liveFlowTrimLevel)?state.cfg.liveFlowTrimLevel:3;
     const budget=[50,150,200,250][level-1];
     const period=level===1?Math.max(300,Math.round(seconds*1000/50)):[0,300,250,200][level-1];
-    const report={enabled:true,status:c.activeRelease===false?"armed-for-S1":"armed-for-S2",level,plannedDurationMs:Math.round(seconds*1000),periodMs:period,maxChecks:2000,maxWrites:budget,
-      checks:0,writes:0,acks:0,targetConfirmations:0,targetMissTolerance:3,targetMisses:0,consecutiveTargetMisses:0,retries:0,feedbackReleases:0,feedbackPolicy:"trend-vector-response",degradedRetryIntervalMs:3000,minWriteIntervalMs:50,responseTimeoutMs:2000,deadbandPct:4,trace:[],zeroDegreeShare:null,meanAngleDeg:null,sameSignStreak:0,bigAngleStreak:0,vectorAngleDeg:null,adaptiveMode:"trend-confirmed-window-and-dynamic-exposure-learning"};
+    const report={enabled:true,status:c.activeRelease===false?"armed-for-S1":"armed-for-S2",level,decisionModel:state.cfg.liveTrimDecisionModel!==false?"predictive":"legacy",plannedDurationMs:Math.round(seconds*1000),periodMs:period,maxChecks:2000,maxWrites:budget,
+      checks:0,writes:0,normalWrites:0,rescueWrites:0,silenceHolds:0,s3NormalWrites:0,s3RescueWrites:0,acks:0,targetConfirmations:0,targetMissTolerance:3,targetMisses:0,consecutiveTargetMisses:0,retries:0,feedbackReleases:0,feedbackPolicy:"trend-vector-response",degradedRetryIntervalMs:3000,minWriteIntervalMs:50,responseTimeoutMs:2000,deadbandPct:4,trace:[],zeroDegreeShare:null,meanAngleDeg:null,sameSignStreak:0,bigAngleStreak:0,vectorAngleDeg:null,adaptiveMode:"trend-confirmed-window-and-dynamic-exposure-learning"};
     report.learningBand=learningPolicy(c.adaptiveLearningLevel).deadband;report.learningLevel=learningPolicy(c.adaptiveLearningLevel).name;
     report.s2StartupPlan=c.s2StartupPlan||null;report.startupExecution={status:c.s2StartupPlan&&c.s2StartupPlan.enabled?"armed":"not-planned",reason:c.s2StartupPlan&&c.s2StartupPlan.reason||"S2 startup assist disabled"};
     run.liveFlowTrim=report;
     state.liveTrim={active:true,started:false,handle:null,run,report,phase:null,frame:null,frameAt:0,
       startup:{status:c.s2StartupPlan&&c.s2StartupPlan.enabled?"armed":"disabled",plan:c.s2StartupPlan||{enabled:false}},
-      commands:{},pending:null,retry:null,lastDecisionStamp:{},lastWriteAt:null,sameSignStreak:0,lastSign:0,bigAngleStreak:0,lastCheckGS:null,lastCheckAtMs:0,profile:JSON.parse(JSON.stringify(profileObject()))};
+      commands:{},pending:null,retry:null,lastDecisionStamp:{},lastWriteAt:null,sameSignStreak:0,lastSign:0,bigAngleStreak:0,lastCheckGS:null,lastCheckAtMs:0,
+      rescueMode:false,rescueAngleStreak:0,rescueCalmStreak:0,phaseWrites:{stage1:0,stage2:0,stage3:0},phaseRescueWrites:{stage1:0,stage2:0,stage3:0},profile:JSON.parse(JSON.stringify(profileObject()))};
     liveTrimRecord("armed",{periodMs:report.periodMs});
   }
   async function startLiveTrim() {
@@ -6290,7 +6692,10 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         t.startup.status="frame-ended";
       }
     }
-    if(frame!==t.frame||state.phase!==t.phase){t.frame=frame;t.phase=state.phase;t.frameAt=Date.now();}
+    if(frame!==t.frame||state.phase!==t.phase){
+      if(state.phase!==t.phase){t.rescueMode=false;t.rescueAngleStreak=0;t.rescueCalmStreak=0;t.phaseWrites[state.phase]=0;t.phaseRescueWrites[state.phase]=0;}
+      t.frame=frame;t.phase=state.phase;t.frameAt=Date.now();
+    }
     if(state.phase==="stage2"&&frame===1&&t.startup&&!Number.isFinite(t.startup.frameConfirmedAt))t.startup.frameConfirmedAt=Date.now();
     kickS2Refill(t);
     const p=t.pending||t.retry;
@@ -6348,10 +6753,11 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     return bytes.map(x=>x.toString(16).padStart(2,"0").toUpperCase()).join("");
   }
   function liveTrimRegression(t) {
-    // S3's machine pump responds with a 2-4 s lag (measured on 1.80ds field data),
-    // so a 1.6 s regression is mostly noise there. Use a 3 s window, a 1.2 s tail
-    // and a 2 s forecast horizon for S3; keep S2 at 1.6 s / 0.5 s.
-    const isS3=state.phase==="stage3",windowMs=isS3?3000:1600,tailSec=isS3?1.2:.75,headSec=isS3?1.2:.65,horizon=isS3?2:.5;
+    // Predictive mode uses the same physical window but separates the forecast
+    // horizon: S2 is reliable at 2 s, while S3 needs a longer robust window and a
+    // shorter 1.2 s horizon. Legacy mode keeps the old 1.6/0.5 and 3/2 behaviour.
+    const predictive=state.cfg.liveTrimDecisionModel!==false,isS3=state.phase==="stage3";
+    const windowMs=isS3?3000:1600,tailSec=isS3?1.2:.75,headSec=isS3?1.2:.65,horizon=isS3?(predictive?1.2:2):(predictive?2:.5);
     const now=Date.now(),raw=state.phase==="stage2"?phaseRawSamples(t.run,"stage2"):t.run.rawScaleSamples||[],seen=new Set(),points=[];
     for(const x of raw){
       if(x.phase!==state.phase||Number(x.profileFrame)!==t.frame||x.tMs<t.frameAt-t.run.startedAtMs||now-t.run.startedAtMs-x.tMs>windowMs)continue;
@@ -6362,15 +6768,16 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       seen.add(stamp);points.push({x:stamp,y:weight});
     }
     if(points.length<6||points[points.length-1].x-points[0].x<1.2)return null;
-    const r=linearRegression(points),end=points[points.length-1].x;
+    const r=predictive&&isS3?robustLinearRegression(points):linearRegression(points),end=points[points.length-1].x;
     const tail=points.filter(p=>end-p.x<=tailSec),head=points.filter(p=>end-p.x>=headSec);
     const fit=a=>a.length>=4&&a[a.length-1].x-a[0].x>=.45?linearRegression(a):null;
     const fast=fit(tail),early=fit(head);
     const fastSlope=fast&&fast.r2>=.90&&fast.slope>=0?fast.slope:null;
     const predicted=fastSlope!==null&&early&&early.r2>=.90?Math.max(0,fastSlope+Math.max(0,fastSlope-early.slope)*horizon):fastSlope;
-    return r&&r.r2>=0.90&&r.slope>0?{...r,fastSlope,predicted,sourceEndStamp:end}:null;
+    return r&&r.r2>=0.90&&r.slope>0?{...r,fastSlope,predicted,sourceEndStamp:end,predictive,windowMs,horizon}:null;
   }
   async function liveTrimTick(t) {
+    const predictiveMode=state.cfg.liveTrimDecisionModel!==false;
     const live=()=>state.liveTrim===t&&t.active&&state.diagnosticCurrent===t.run&&liveTrimPhaseAllowed(t);
     if(!live()){
       if(state.liveTrim===t&&t.active&&state.diagnosticCurrent===t.run&&["soak","restart_wait"].includes(state.phase))scheduleLiveTrimTick(t);
@@ -6448,7 +6855,11 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       if(state.stage2SkipSent&&state.phase==="stage2"){row.reason="stage-transition";return;}
       const frame=finiteOrNull(state.lastFrame);
       if(frame===null||!Number.isInteger(frame)||(state.phase==="stage1"?frame!==0:state.phase==="stage2"?frame!==1:frame<2||frame>=t.profile.steps.length)){row.reason="frame-not-confirmed";return;}
-      if(frame!==t.frame||state.phase!==t.phase){t.frame=frame;t.phase=state.phase;t.frameAt=Date.now();row.reason="frame-settle";return;}
+      if(frame!==t.frame||state.phase!==t.phase){
+        if(state.phase!==t.phase){t.rescueMode=false;t.rescueAngleStreak=0;t.rescueCalmStreak=0;t.phaseWrites[state.phase]=0;t.phaseRescueWrites[state.phase]=0;}
+        t.frame=frame;t.phase=state.phase;t.frameAt=Date.now();row.reason="frame-settle";return;
+      }
+      const predictive=predictiveMode&&(state.phase==="stage2"||state.phase==="stage3");
       if(Date.now()-t.frameAt<1600||Date.now()-state.latestScaleAtMs>600||Date.now()-state.lastMachineAtMs>600||!state.lastMachineTelemetryValid||state.lastMachineState!=="espresso"||!["preinfusion","pouring"].includes(state.lastSubstate)){row.reason="settling-or-stale-telemetry";return;}
       const reg=liveTrimRegression(t);if(!reg){row.reason="raw-regression-insufficient";return;}
       if(t.lastWriteAt!==null&&Date.now()-t.lastWriteAt<50){row.reason="minimum-write-interval";return;}
@@ -6472,9 +6883,10 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         // rise keeps the direction angle from overshooting while the trend is still climbing.
         if(reg.fastSlope!==null&&reg.fastSlope!==undefined&&(reg.fastSlope>=target*.98||reg.predicted>=target)){row.reason="S3 rising response; hold upward correction";return;}
       }
-      row.rawGS=round(reg.slope,3);row.targetGS=target;row.errorPct=round((reg.slope/target-1)*100,2);row.r2=round(reg.r2,4);
+      const decisionGS=predictive&&Number.isFinite(Number(reg.predicted))?Number(reg.predicted):reg.slope;
+      row.rawGS=round(reg.slope,3);row.predictedGS=round(decisionGS,3);row.windowMs=reg.windowMs;row.horizonS=reg.horizon;row.targetGS=target;row.errorPct=round((reg.slope/target-1)*100,2);row.r2=round(reg.r2,4);
       const deadband=(Number(t.report.deadbandPct)||4)/100;
-      if(Math.abs(reg.slope/target-1)<=deadband+1e-9){row.reason="inside-"+Math.round(deadband*100)+"pct-band";return;}
+      if(Math.abs(decisionGS/target-1)<=deadband+1e-9){row.reason="inside-"+Math.round(deadband*100)+"pct-band";return;}
       if(t.retry&&t.retry.frame!==frame){
         liveTrimRecord("unconfirmed-frame-ended",{frame:t.retry.frame,commandMlS:t.retry.command,nextFrame:frame});
         t.retry=null; // Never carry an unresponsive vector across a frame transition.
@@ -6483,7 +6895,11 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       const step=t.profile.steps[frame],base=Math.floor(Number(step.flow)*16+0.5)/16;
       const command=Number.isFinite(t.commands[frame])?t.commands[frame]:base;
       const limiter=Number(step.limiter&&step.limiter.value);
-      if(reg.slope<target&&(!Number.isFinite(limiter)||state.lastPressure>=0.95*limiter||state.lastFlow<command*0.7)){row.reason="pressure-or-actuator-limited";return;}
+      const pressureLimited=!Number.isFinite(limiter)||state.lastPressure>=0.95*limiter;
+      const actuatorLow=state.lastFlow<command*0.7;
+      if(!predictive&&reg.slope<target&&(pressureLimited||actuatorLow)){row.reason="pressure-or-actuator-limited";return;}
+      if(predictive&&pressureLimited&&decisionGS<target){row.reason="pressure-limited-upward-blocked";return;}
+      if(predictive&&actuatorLow&&decisionGS<target&&!rescueActive){row.reason="actuator-low-normal-hold";return;}
       // A stale direction is held, not blindly retried after the cup error reverses.
       if(retry&&Math.sign(retry.command-command)!==Math.sign(target-reg.slope)){row.reason="unconfirmed-target-direction-changed";return;}
       // One quantum only from a confirmed command; unresolved attempts repeat the same target.
@@ -6492,8 +6908,8 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       // PD-style bounded amplitude: the sign steers the trajectory direction angle toward
       // the setpoint line; the capped 1/16-quantized amplitude accelerates a wide angle and
       // tapers as the line is approached. Anti-overshoot stays in the statistics gates above.
-      const errGS=target-reg.slope;
-      const dir=reg.slope<target?-1:reg.slope>target?1:0;
+      const errGS=target-decisionGS;
+      const dir=decisionGS<target?-1:decisionGS>target?1:0;
       if(dir!==0&&dir===t.lastSign)t.sameSignStreak=(t.sameSignStreak||0)+1;else{t.sameSignStreak=dir!==0?1:0;t.lastSign=dir;}
       t.report.sameSignStreak=t.sameSignStreak;
       // Continuous large trend angle (previous check -> current regression vs the
@@ -6511,6 +6927,24 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       }
       if(angleDeg!==null&&angleDeg>=45)t.bigAngleStreak=(t.bigAngleStreak||0)+1;else t.bigAngleStreak=0;
       t.report.bigAngleStreak=t.bigAngleStreak;t.report.vectorAngleDeg=angleDeg===null?null:round(angleDeg,1);
+      const predictedRel=target>0?Math.abs(target-decisionGS)/target:1;
+      if(predictive){
+        if(angleDeg!==null&&angleDeg>=120)t.rescueAngleStreak=(t.rescueAngleStreak||0)+1;else t.rescueAngleStreak=0;
+        const remainingS=Math.max(0,(state.cfg.finalWeight-state.cumulativeWeight)/Math.max(.1,decisionGS));
+        const cannotReturn=!Number.isFinite(remainingS)||remainingS<2||
+          (decisionGS<target&&Number(reg.predicted)<target*.75)||
+          (decisionGS>target&&Number(reg.predicted)>target*1.25);
+        const rescueHot=t.rescueAngleStreak>=2&&predictedRel>.25&&cannotReturn;
+        if(rescueHot){t.rescueMode=true;t.rescueCalmStreak=0;}
+        else if(t.rescueMode){
+          if(predictedRel<.06||(angleDeg!==null&&angleDeg<90))t.rescueCalmStreak=(t.rescueCalmStreak||0)+1;else t.rescueCalmStreak=0;
+          if(t.rescueCalmStreak>=2)t.rescueMode=false;
+        }
+      }else{
+        t.rescueAngleStreak=0;t.rescueMode=false;t.rescueCalmStreak=0;
+      }
+      const rescueActive=predictive&&!!t.rescueMode&&predictedRel>=.08;
+      row.rescue=rescueActive;row.rescueAngleStreak=t.rescueAngleStreak||0;row.predictedErrorPct=round(predictedRel*100,1);
       // Explicit trim states (user 2026-10-30): coast = the trend is closing on
       // its own; lut-compensate = parallel/weak offset with pressure headroom;
       // vector = the existing bounded controller.
@@ -6520,19 +6954,52 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       // rarely crosses the band even when the cup is already flat (field data:
       // coast fired once per shot).
       const trendFlat=Number.isFinite(trendSlope)&&Math.abs(trendSlope)<0.1;
-      const trimMode=Math.abs(errGS/target)<=0.06&&(closing||trendFlat)?"coast":(errGS>0&&angleDeg!==null&&angleDeg>=55&&angleDeg<=125?"lut-compensate":"vector");
+      const trimMode=predictive?(rescueActive?"rescue":"vector"):(Math.abs(errGS/target)<=0.06&&(closing||trendFlat)?"coast":(errGS>0&&angleDeg!==null&&angleDeg>=55&&angleDeg<=125?"lut-compensate":"vector"));
       row.trimMode=trimMode;
       if(trimMode==="coast"){row.reason="coast-trend-stable";return;}
-      const steps=trimMode==="lut-compensate"?Math.max(2,vectorStepCount(errGS,t.bigAngleStreak,target)):vectorStepCount(errGS,t.bigAngleStreak,target);
-      const raw=Math.round((command+Math.sign(errGS)*steps/16)*16)/16;
-      // Hard envelope first (base ±20% at native 1/16 quanta): the PD amplitude adapts
-      // inside it, so a wide angle never breaks the bounds. No room inside the envelope
-      // reports a bound instead of an empty write.
-      let lo=Math.ceil(base*0.8*16)/16,hi=Math.floor(base*1.2*16)/16;
-      if(trimMode==="lut-compensate"){
-        const mapped=mappedCommandForReal(target);
-        if(Number.isFinite(mapped))hi=Math.max(hi,Math.floor(Math.min(mapped*0.9,LIMITS.commandFlowMax)*16)/16);
+      if(predictive){
+        if(state.phase==="stage3"){
+          const normal=(t.phaseWrites&&t.phaseWrites.stage3)||0,rescue=(t.phaseRescueWrites&&t.phaseRescueWrites.stage3)||0;
+          if(rescueActive&&rescue>=2){row.reason="S3 rescue write budget";return;}
+          if(!rescueActive&&normal>=4){row.reason="S3 normal write budget";return;}
+          const progress=state.stage3PlannedMs>0?Math.min(1,Math.max(0,(Date.now()-state.stage3StartedAtMs)/state.stage3PlannedMs)):0;
+          if(!rescueActive&&progress>=.55){row.reason="S3 late-phase coast";return;}
+        }
+        const silenceMs=rescueActive?800:1200;
+        if(t.lastWriteAt!==null&&Date.now()-t.lastWriteAt<silenceMs){
+          t.report.silenceHolds=(t.report.silenceHolds||0)+1;
+          row.silenceMs=silenceMs;row.reason="predictive-write-silence";return;
+        }
       }
+      let steps=0,controlCenter=null;
+      if(predictive){
+        controlCenter=liveTrimControlCenter(state.phase,base,t.run);
+        const r=Number(controlCenter.r)>0?Number(controlCenter.r):(state.phase==="stage3"?1.8:1.2);
+        const normalMin=state.phase==="stage3"?(predictedRel>=.08?3:2):1;
+        steps=rescueActive?predictiveStepQuanta(errGS,r,8,24):predictiveStepQuanta(errGS,r,normalMin,4);
+        row.controlCenterMlS=round(controlCenter.commandMlS,3);row.controlSource=controlCenter.source;row.controlR=controlCenter.r;row.controlBucket=controlCenter.bucketId||null;row.stepQuanta=steps;
+      }else{
+        steps=trimMode==="lut-compensate"?Math.max(2,vectorStepCount(errGS,t.bigAngleStreak,target)):vectorStepCount(errGS,t.bigAngleStreak,target);
+      }
+      const raw=Math.round((command+Math.sign(errGS)*steps/16)*16)/16;
+      const mapped=Number.isFinite(Number(target))?mappedCommandForReal(target):null;
+      let lo,hi;
+      if(predictive){
+        const center=Number.isFinite(Number(controlCenter&&controlCenter.commandMlS))?Number(controlCenter.commandMlS):base;
+        if(rescueActive){
+          lo=LIMITS.commandFlowMin;
+          hi=Math.floor((Number.isFinite(Number(mapped))?Math.min(LIMITS.commandFlowMax,Number(mapped)*2):LIMITS.commandFlowMax)*16)/16;
+        }else{
+          const floor=Number.isFinite(Number(mapped))?Number(mapped):center;
+          lo=Math.ceil(Math.min(center*.8,floor)*16)/16;
+          hi=Math.floor(Math.max(center*1.2,floor)*16)/16;
+        }
+      }else{
+        // Legacy envelope: base ±20% at native 1/16 quanta.
+        lo=Math.ceil(base*0.8*16)/16;hi=Math.floor(base*1.2*16)/16;
+        if(trimMode==="lut-compensate"&&Number.isFinite(Number(mapped)))hi=Math.max(hi,Math.floor(Math.min(Number(mapped)*0.9,LIMITS.commandFlowMax)*16)/16);
+      }
+      if(!(hi>=lo)){row.reason="control-center-envelope-invalid";return;}
       const candidate=Math.max(lo,Math.min(hi,raw));
       if(candidate===command||candidate<LIMITS.commandFlowMin||candidate>LIMITS.commandFlowMax){row.reason="command-bound-vector";return;}
       if(t.report.writes>=t.report.maxWrites){row.reason=`${t.report.maxWrites}-write-budget`;return;}
@@ -6543,8 +7010,14 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       const p={frame,command:candidate,at:Date.now(),ack:false,targetSeen:false,flowAtWrite:finiteOrNull(state.lastFlow),slopeAtWrite:Number.isFinite(reg.slope)?reg.slope:null};t.pending=p;
       t.lastWriteAt=p.at;t.lastDecisionStamp[frame]=reg.sourceEndStamp;
       if(retry){t.report.retries++;t.retry=null;}
+      if(predictive){
+        if(rescueActive)t.report.rescueWrites++;else t.report.normalWrites++;
+        t.phaseWrites[state.phase]=(t.phaseWrites[state.phase]||0)+1;
+        if(rescueActive)t.phaseRescueWrites[state.phase]=(t.phaseRescueWrites[state.phase]||0)+1;
+        if(state.phase==="stage3"){if(rescueActive)t.report.s3RescueWrites++;else t.report.s3NormalWrites++;}
+      }
       t.report.writes++;state.liveTrimDirty=true;
-      liveTrimRecord("write",{frame,commandMlS:candidate,previousMlS:command,retry:!!retry,rawGS:row.rawGS,targetGS:target,payload});
+      liveTrimRecord("write",{frame,commandMlS:candidate,previousMlS:command,retry:!!retry,rawGS:row.rawGS,predictedGS:row.predictedGS,targetGS:target,rescue:rescueActive,steps,controlCenterMlS:row.controlCenterMlS,controlSource:row.controlSource,controlR:row.controlR,controlBucket:row.controlBucket,payload});
       row.decision="write";row.commandMlS=candidate;
       await host.transport.send(t.handle,{type:"text",data:JSON.stringify({type:"request",operation:"write",characteristicUUID:"A010",payload})});
     }finally{
@@ -6790,6 +7263,8 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       .then(() => {
         if (state.phase === "stage2"&&state.sequenceStartedAtMs===sequenceToken) {
           state.phase = "stage3";
+          state.stage3StartedAtMs = Date.now();
+          state.stage3PlannedMs = Math.max(1000, (state.cfg.finalWeight - state.cumulativeWeight) / Math.max(0.1, state.cfg.stage3Flow) * 1000);
           diagnosticEvent("stage3_start", { targetFlowMlS: state.cfg.stage3Flow });
           diagnosticSample("stage3-start", true);
           log(`START S3: desired real ${state.cfg.stage3Flow.toFixed(2)} g/s, DE1 command ${resolvedStageCommandFlow("stage3", state.cfg.stage3Flow).toFixed(2)} ml/s until ${state.cfg.finalWeight.toFixed(2)} g.`);
@@ -7221,7 +7696,22 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
           const rawShape = request.body && request.body.s3Shape && typeof request.body.s3Shape === "object" ? request.body.s3Shape : {};
           const shapeEnabled = rawShape.enabled === true;
           let s3Shape = { enabled:false };
-          if (shapeEnabled) {
+          if (shapeEnabled && String(rawShape.model || "") === "drift") {
+            const midCommand=Number(rawShape.midCommand);
+            const manual=rawShape.manual===true;
+            const manualTilt=manual&&Number.isFinite(Number(rawShape.manualTilt))?Math.max(-1,Math.min(1,Number(rawShape.manualTilt))):null;
+            let earlyFactor=Number(rawShape.earlyFactor),drift=Number(rawShape.drift);
+            if(manual&&manualTilt!==null){earlyFactor=1+0.45*manualTilt;drift=1-0.20*manualTilt;}
+            const earlySeconds=Number(rawShape.earlySeconds),midSeconds=Number(rawShape.midSeconds);
+            if(![midCommand,earlyFactor,drift,earlySeconds,midSeconds].every(Number.isFinite))throw new Error("S3 drift shape requires finite MID, earlyFactor, drift and timings");
+            if(midCommand<LIMITS.commandFlowMin||midCommand>LIMITS.commandFlowMax)throw new Error("S3 drift MID command outside hard limits");
+            if(earlyFactor<.50||earlyFactor>2.00||drift<.50||drift>2.00)throw new Error("S3 earlyFactor/drift outside 0.50–2.00");
+            if(earlySeconds<3||earlySeconds>30||midSeconds<3||midSeconds>30)throw new Error("S3 shape EARLY/MID times must be 3–30 seconds");
+            const earlyCommand=midCommand*earlyFactor,lateCommand=midCommand*drift;
+            if(![earlyCommand,lateCommand].every(v=>v>=LIMITS.commandFlowMin&&v<=LIMITS.commandFlowMax))throw new Error("S3 drift-derived command outside hard limits");
+            s3Shape={enabled:true,model:"drift",origin:"manual",manual,manualTilt,midCommand:round(midCommand,3),earlyFactor:round(earlyFactor,4),drift:round(drift,4),earlySeconds:round(earlySeconds,1),midSeconds:round(midSeconds,1),earlyCommand:round(earlyCommand,3),lateCommand:round(lateCommand,3)};
+            const previousShape=s3ShapeStatus();if(previousShape.enabled&&previousShape.model==="drift"&&["midCommand","earlyFactor","drift","earlySeconds","midSeconds"].every(k=>Math.abs(Number(previousShape[k])-Number(s3Shape[k]))<.00001))s3Shape.origin=stageCommandOrigin("stage3",true);
+          } else if (shapeEnabled) {
             const earlyCommand = Number(rawShape.earlyCommand), midCommand = Number(rawShape.midCommand), lateCommand = Number(rawShape.lateCommand);
             const earlySeconds = Number(rawShape.earlySeconds), midSeconds = Number(rawShape.midSeconds);
             for (const [label,v] of [["EARLY",earlyCommand],["MID",midCommand],["LATE",lateCommand]]) {
@@ -7529,6 +8019,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
             state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.slice(-HISTORY_FILE_MAX_SHOTS);
             state.persistentHistoryLoaded = true;
             state.learningContextLoaded = true;
+            gainMemoryState(true);
             if (state.storageProbeVerified) { clearTimer('storageProbeTimer'); persistHistoryFile(); }
           } else if (state.pendingHistoryWrite) {
             if (!parsed || adaptiveHistoryFingerprintKey(parsed) !== adaptiveHistoryFingerprintKey(JSON.parse(state.pendingHistoryWrite))) {

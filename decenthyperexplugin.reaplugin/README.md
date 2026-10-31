@@ -1,3 +1,16 @@
+# HyperEx Pulse Filter 2.1.3
+
+在 2.1.2（回退到 2.1.0 行为）基础上，只做两处不改变时机的优化：
+
+- 启动维护读一次 `GET /profiles?includeHidden=true`，把同一份列表传给 HyperEx 同步与两个校准 profile 的 upsert，不再每次 upsert 各自读。
+- 旧校准 profile 迁移成功后按标题记标记，之后跳过。
+- 不延迟、不加冷却：`calibration-status` 仍在页面打开时 verify/repair，启动维护在 `onLoad` 里立即开始，arming 节奏与 2.1.0 完全相同。
+- 实测加载 REST：稳定态 5 → 2（1 次倍数 + 1 次 profile 列表），且全部在 1.5 秒内发生；新装 8 → 5。
+
+验证见 tests/RESULTS_v0213.txt（582/582）。
+
+## Previous release
+
 # HyperEx Pulse Filter 2.1.2
 
 回退 2.1.1 对 `calibration-status` 的「只读」改造，恢复 2.1.0 的行为：

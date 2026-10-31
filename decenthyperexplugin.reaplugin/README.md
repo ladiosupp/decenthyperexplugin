@@ -1,3 +1,16 @@
+# HyperEx Pulse Filter 2.1.0
+
+图表渲染加了 Canvas 2D / SVG 开关，默认 Canvas 2D：
+
+- 「实际秤重曲线」标题下的按钮点一下就在 Canvas 与 SVG 之间切换，切回时用已保存的 `lastChartRun` 原地重绘，不重新取数、不影响导出。
+- Canvas 版沿用同一套坐标与配色：坐标轴、刻度、全部 series、标记（圆点／箭头／方块／↻）都画进位图；点图按最近 12px 命中标记，`#flowpointdetail` 显示与 SVG 相同的文本。
+- 切换状态不落盘，每次打开诊断页都是 Canvas。
+- 同一杯 900 样本下，页面节点 1640 → 1180。
+
+验证见 tests/RESULTS_v0210.txt（578/578）。
+
+## Previous release
+
 # HyperEx Pulse Filter 2.0.2
 
 2.0.2 修三件事：

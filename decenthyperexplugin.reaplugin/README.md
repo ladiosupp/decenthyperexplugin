@@ -1,3 +1,15 @@
+# HyperEx Pulse Filter 2.0.2
+
+2.0.2 修三件事：
+
+- **预设又能保存了**。宿主回读的是存储里的 JSON 文本，旧代码按对象判断，重进页面就把 5 个槽清空；现在统一走 `parseStoredJson`（待应用预设同样）。
+- **诊断页载入后更轻**。图表按像素抽稀到约 380 个顶点（保留峰值），标记层封顶 160 个，三张大图各自成合成层。同一杯 900 样本：flowchart 节点 451→333、路径数据 72→35 KB。
+- **能看到中止原因**。「上一杯 · 验证结果」新增 ABORT 卡，直接显示该杯最后一次中止的 phase 与 reason（原来只在日志里）。
+
+验证见 tests/RESULTS_v0202.txt（574/574）。
+
+## Previous release
+
 # HyperEx Pulse Filter 2.0.1
 
 从 2.0.1 起版本号改用标准 semver，1.9xds 编号作废、不回填。原因是 Decaid 的 GitHub Release 安装要求标签必须是 `X.Y.Z` 或 `vX.Y.Z`，且去掉 v 后与 manifest 的 `version` 完全一致；`v1.93ds` 会被拒绝（`Release tag "v1.93ds" is not X.Y.Z or vX.Y.Z`）。

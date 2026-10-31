@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "1.84ds";
+  const PLUGIN_VERSION = "1.85ds";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -2193,6 +2193,9 @@ function createPlugin(host) {
     if(!fp||typeof fp!=="object")return "";
     const q={...fp,shotSettings:{...(fp.shotSettings||{})}};
     delete q.basketContext;delete q.shotSettings;delete q.targets;
+    // A merged LUT re-samples the same machine: keep the operating qualification
+    // (and its coffee/empty baseline) across point-list changes.
+    delete q.lutPoints;delete q.targetAnchors;delete q.lutSchema;delete q.lutAlgorithm;
     return adaptiveHistoryFingerprintKey(q);
   }
 

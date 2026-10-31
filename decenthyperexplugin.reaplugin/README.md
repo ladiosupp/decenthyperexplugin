@@ -1,3 +1,13 @@
+# HyperEx Pulse Filter 1.85ds
+
+本地开发版（版本号 1.85ds，非严格 semver）。1.85ds 修 1.84ds 的一个上下文判定漏洞：
+
+- 学习阶段判定用的 `qualificationFingerprintKey` 之前仍带着 LUT 点，合并后会把桥接状态翻回 "empty"，咖啡学习记录被暂时挡住。现在它和学习指纹同口径：只认 LUT 身份（createdAt）、篮型与倍率，点列表变化不再影响 operating qualification。
+- 合并后保持 `NORMAL COFFEE · AUTO`，兼容杯数不归零；只有 CLEAR CAL MAP 后的新校准才清空覆盖与历史。
+- 控制与学习数学未改；验证见 tests/RESULTS_v0185ds.txt（546/546）。
+
+## Previous release
+
 # HyperEx Pulse Filter 1.84ds
 
 本地开发版（版本号 1.84ds，非严格 semver）。1.84ds 把校准 LUT 改成可叠加，并把学习证据从“整张 LUT”解耦：

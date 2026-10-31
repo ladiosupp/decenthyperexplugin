@@ -1,3 +1,12 @@
+# HyperEx Pulse Filter 1.91ds
+
+本地开发版（版本号 1.91ds，非严格 semver）。1.91ds 继续统一首屏折叠样式：
+
+- 「下一杯 · 曲线编辑」改为与 STEP 1 / STEP 2 相同的 details + stepHead 折叠块，默认收起；展开后仍是原来的曲线、档位按钮与「应用到下一杯」。
+- 验证见 tests/RESULTS_v0191ds.txt（562/562）。
+
+## Previous release
+
 # HyperEx Pulse Filter 1.90ds
 
 本地开发版（版本号 1.90ds，非严格 semver）。1.90ds 只调整诊断页首屏结构：

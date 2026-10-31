@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.2";
+  const PLUGIN_VERSION = "2.2.3";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -134,7 +134,7 @@ function createPlugin(host) {
         for (const command of commands) {
           steps.push({
             blockId: String(block.id || ""), targetSource: String(block.targetSource || ""), targetReal,
-            commandFlow: clampCommandFlow(command), seconds: Number(m.stepSeconds),
+            commandFlow: snapCommandFlow(command), seconds: Number(m.stepSeconds),
             settleSeconds: Number(m.settleSeconds), windowSeconds: Number(m.windowSeconds)
           });
         }
@@ -142,7 +142,7 @@ function createPlugin(host) {
       return steps;
     }
     return (m.commands || []).map(command => ({
-      blockId: "FULL", targetReal: null, commandFlow: clampCommandFlow(command),
+      blockId: "FULL", targetReal: null, commandFlow: snapCommandFlow(command),
       seconds: Number(m.stepSeconds), settleSeconds: Number(m.settleSeconds), windowSeconds: Number(m.windowSeconds)
     }));
   }
@@ -357,6 +357,29 @@ function createPlugin(host) {
 
   function clampCommandFlow(value) {
     return clampNumber(value, LIMITS.commandFlowMin, LIMITS.commandFlowMax, LIMITS.commandFlowMin);
+  }
+
+  // The stock DE1 only accepts 1/16 ml/s steps: the A010 payload stores
+  // round(command*16) and the firmware quantises profile flow the same way.
+  // Anything written to the machine must already sit on that grid. Keeping a
+  // stored 2.507 or 3.9872 means a later guard compares a command the driver
+  // cannot honour with the readback and rejects it (v2.2.2: the S2 refill
+  // return was dropped and the shot aborted with a missing driver ACK).
+  function toDriverStep(value) {
+    const v = Number(value);
+    return Number.isFinite(v) ? Math.round(v * 16) / 16 : null;
+  }
+
+  function snapCommandFlow(value) {
+    const step = toDriverStep(value);
+    if (step === null) return null;
+    const lo = Math.round(LIMITS.commandFlowMin * 16), hi = Math.round(LIMITS.commandFlowMax * 16);
+    return Math.max(lo, Math.min(hi, Math.round(step * 16))) / 16;
+  }
+
+  function formatCommandFlow(value) {
+    const q = snapCommandFlow(value);
+    return q === null ? snapCommandFlow(LIMITS.commandFlowMin).toFixed(3) : String(q);
   }
 
   function activeReleaseEnabled(config) { return !config || config.activeRelease !== false; }
@@ -2148,11 +2171,19 @@ function createPlugin(host) {
     return {command:estimate,basis:"target-cup-flow observed-tail local model",referenceTailGS:round(q.tailMeanGS,3),sourceRunId:prior.runId,previousCommandMlS:round(previousCommand,4)};
   }
   function boundedRefillControlBase(targetGS,profileBase) {
+    // The driver only accepts 1/16 ml/s steps. A raw target/r base such as
+    // 5/1.254 = 3.9872 can never be written back, and the return used to be
+    // dropped by the quantization guard (field 2.2.2: watchdogs aborted S2
+    // with "base return driver ACK missing" while the pump stayed at the
+    // boost). Snap the control base to the driver grid and derive r from the
+    // value that is actually writable.
     const gm=liveTrimMemoryCandidate("stage2",state.diagnosticLast||state.diagnosticCurrent);
-    if(gm&&Number(gm.r)>0&&Number(targetGS)>0)return {commandMlS:Number(targetGS)/Number(gm.r),r:Number(gm.r),source:"gain-memory",bucketId:gm.bucketId};
+    if(gm&&Number(gm.r)>0&&Number(targetGS)>0){const command=snapCommandFlow(Number(targetGS)/Number(gm.r));if(command)return {commandMlS:command,r:Number(targetGS)/command,source:"gain-memory",bucketId:gm.bucketId};}
     const mapped=Number.isFinite(Number(targetGS))?mappedCommandForReal(targetGS):null;
-    if(Number.isFinite(Number(mapped))&&Number(mapped)>0)return {commandMlS:Number(mapped),r:Number(targetGS)/Number(mapped),source:"lut"};
-    return {commandMlS:Number(profileBase),r:Number(targetGS)/Number(profileBase),source:"profile-base"};
+    if(Number.isFinite(Number(mapped))&&Number(mapped)>0){const command=snapCommandFlow(mapped);if(command)return {commandMlS:command,r:Number(targetGS)/command,source:"lut"};}
+    const command=snapCommandFlow(Number(profileBase));
+    if(!command)return {commandMlS:Number(profileBase),r:Number(targetGS)/Number(profileBase),source:"profile-base"};
+    return {commandMlS:command,r:Number(targetGS)/command,source:"profile-base"};
   }
   function boundedRefillCommand(t) {
     const plan=t&&t.startup&&t.startup.plan;
@@ -2203,7 +2234,7 @@ function createPlugin(host) {
     const plan={schema:5,strategy:"refill-85",enabled:false,reason:"S2 refill assist disabled",baseCommandMlS:base,
       refillPumpBaseMlS:round(refillBase,4),controlBaseMlS:round(controlBase,4),controlGain,controlSource:bounded?(control?control.source:(settings.basis==="cup-target"?"profile-base":"base")):"legacy",
       boundedModel:bounded,refillTargetFraction:settings.targetPercent/100,cutoffFraction:settings.cutoffPercent/100,
-      startDelayMs:settings.startDelayMs,predictionSeconds:2.0,holdMs:settings.maxDurationMs,dispatchWindowMs:settings.startDelayMs+4000,approachMs:settings.approachMs,approachWriteIntervalMs:750,settings:{...settings},
+      startDelayMs:settings.startDelayMs,predictionSeconds:1.5,holdMs:settings.maxDurationMs,dispatchWindowMs:settings.startDelayMs+4000,approachMs:settings.approachMs,approachWriteIntervalMs:750,settings:{...settings},
       sourceRunIds:estimate?[estimate.sourceRunId]:[],learningLevel:learningPolicy().name};
     if(settings.basis==="cup-target"){plan.refillTargetGS=round(cupTarget,3);if(estimate)plan.referenceTailGS=estimate.referenceTailGS;plan.commandBasis=estimate?estimate.basis:"target-cup-flow base fallback (no observed tail)";}
     if(!state.cfg.s2StartupAssist||!state.cfg.liveFlowTrimTest)return plan;
@@ -2215,14 +2246,20 @@ function createPlugin(host) {
     const flowCutoffGS=cupTarget*settings.cutoffPercent/100;
     const requested=bounded?LIMITS.commandFlowMax:refillBase*settings.targetPercent/100;
     if(settings.basis!=="cup-target")plan.commandBasis="base-pump-command multiplier";
-    const ceiling=bounded?LIMITS.commandFlowMax:Math.min(LIMITS.commandFlowMax,refillBase*1.6);
+    // Field fit (12 traced cups): the machine's own flow response is roughly
+    // 0.35 s dead time + 0.85 s ramp + 0.4 s first order, so a 2 ml/s jump needs
+    // about 2 s to arrive and the cup overshoots before the return can bite.
+    // Cap the bounded refill at 1.5x the target-equivalent base instead of the
+    // 8 ml/s ceiling.
+    const boundedCeiling=Math.min(LIMITS.commandFlowMax,Math.floor(refillBase*1.5*16)/16);
+    const ceiling=bounded?boundedCeiling:Math.min(LIMITS.commandFlowMax,refillBase*1.6);
     const boost=Math.floor((Math.min(ceiling,Math.max(refillBase,requested))+1e-9)*16)/16;
     plan.flowMaxGS=round(flowMaxGS,3);plan.flowCutoffGS=round(flowCutoffGS,3);
     plan.requestedCommandMlS=round(requested,4);plan.commandLimited=requested>ceiling;
     plan.controlMaxMlS=bounded?round(boost,4):null;
     plan.refillMaxCommandMlS=boost;
     if(boost<(bounded?refillBase:base)+1/16){plan.reason=requested<=refillBase?"S2 refill target needs no extra command":"S2 refill has no command headroom";return plan;}
-    const holding=bounded&&settings.basis==="cup-target"?{commandMlS:round(refillBase,3),basis:"bounded target-equivalent command",sourceRunId:control&&control.bucketId||null}:s2HoldingReference(base,boost);
+    const holding=bounded&&settings.basis==="cup-target"?{commandMlS:round(refillBase,4),basis:"bounded target-equivalent command",sourceRunId:control&&control.bucketId||null}:s2HoldingReference(base,boost);
     const basisReason=bounded?(settings.basis==="cup-target"?"S2 refill bounded by target-equivalent command; targetPercent is an upper bound":"S2 refill bounded by profile command; targetPercent is an upper bound"):(settings.basis==="cup-target"?(estimate?"S2 refill aims at the S2 cup target using the observed tail":"S2 refill aims at the S2 cup target; profile base pump command, no clean observed tail"):"S2 configurable refill");
     return {...plan,returnCommandMlS:holding.commandMlS,holdingReference:holding,enabled:true,reason:basisReason+"; measured cup-flow cutoff or safety deadline",maximumExtraCommandMl:round(Math.max(0,boost-refillBase)*plan.holdMs/1000,3),
       boostCommandMlS:boost,boostQuanta:Math.round((boost-refillBase)*16)};
@@ -2309,12 +2346,19 @@ function createPlugin(host) {
     }else if(!["boosting","return-unconfirmed"].includes(p.status))return false;
     const boosted=refill?(p.plan.boundedModel===true?boundedRefillCommand(t):p.plan.boostCommandMlS):base+1/16;
     if(refill&&p.plan.boundedModel===true&&!(Number(boosted)>0))return startupBlock(t,"S2 bounded refill command unavailable");
-    const returnFloor=refill&&p.plan.boundedModel===true?Number(p.plan.controlBaseMlS||p.plan.refillPumpBaseMlS):base;
+    const returnFloorRaw=refill&&p.plan.boundedModel===true?Number(p.plan.controlBaseMlS||p.plan.refillPumpBaseMlS):base;
+    const returnFloor=Number.isFinite(returnFloorRaw)?Math.round(returnFloorRaw*16)/16:returnFloorRaw;
     if(refill&&action==="return"&&!Number.isFinite(p.actualReturnCommandMlS)){
       const proposed=finiteOrNull(p.plan.returnCommandMlS),protective=/pressure|stale/i.test(p.returnReason||"");
       p.actualReturnCommandMlS=protective||proposed===null?returnFloor:proposed;
     }
-    const command=action==="boost"?boosted:refill?p.actualReturnCommandMlS:base;
+    // Never drop the return because its command is off the 1/16 grid or just
+    // below the floor: that aborts the shot with a missing driver ACK.
+    if(refill&&action==="return"){
+      const q=Number(p.actualReturnCommandMlS);
+      if(!Number.isFinite(q)||q<returnFloor-1e-9||Math.abs(q*16-Math.round(q*16))>1e-6)p.actualReturnCommandMlS=returnFloor;
+    }
+    const command=toDriverStep(action==="boost"?boosted:refill?p.actualReturnCommandMlS:base);
     if(refill&&action==="return"&&(command<returnFloor||command>Math.min(boosted,returnFloor*1.2)+1e-9||Math.abs(command*16-Math.round(command*16))>1e-6))return false;
     const commandCeiling=refill?Math.min(LIMITS.commandFlowMax,p.plan.boundedModel===true?Number(p.plan.refillMaxCommandMlS||boosted):(Number.isFinite(Number(p.plan.refillPumpBaseMlS))?Number(p.plan.refillPumpBaseMlS):base)*1.6):base*1.08;
     if(!Number.isFinite(command)||command<LIMITS.commandFlowMin||command>LIMITS.commandFlowMax||command>commandCeiling+1e-9)return false;
@@ -4330,9 +4374,9 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
 
   function profileObject() {
     const c = state.cfg;
-    const s1 = clampCommandFlow(resolvedStageCommandFlow("stage1", c.stage1Flow));
-    const s2 = clampCommandFlow(resolvedStageCommandFlow("stage2", c.stage2Flow));
-    const s3 = clampCommandFlow(resolvedStageCommandFlow("stage3", c.stage3Flow));
+    const s1 = snapCommandFlow(resolvedStageCommandFlow("stage1", c.stage1Flow)) ?? LIMITS.commandFlowMin;
+    const s2 = snapCommandFlow(resolvedStageCommandFlow("stage2", c.stage2Flow)) ?? LIMITS.commandFlowMin;
+    const s3 = snapCommandFlow(resolvedStageCommandFlow("stage3", c.stage3Flow)) ?? LIMITS.commandFlowMin;
     const safePressure = value => clampNumber(value, LIMITS.pressureMin, Math.min(LIMITS.pressureMax, c.hardPressureLimit), LIMITS.pressureMin);
     const p1 = safePressure(c.stage1PressureLimit), p2 = safePressure(c.stage2PressureLimit), p3 = safePressure(c.stage3PressureLimit);
     const summary = commandFlowSummary();
@@ -4342,19 +4386,19 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       ? ` Command overrides active for ${manualStages.map(x => x.toUpperCase()).join("/")}; per-stage origins are shown in diagnostics; saved LUT is unchanged.`
       : ` All stages ORIGINAL / LUT.`;
     const calNote = state.calibrationMapUsable
-      ? `Scale-calibrated real-flow feed-forward. Effective commands: ${s1.toFixed(3)}/${s2.toFixed(3)}/${(shape.enabled ? shape.midCommand : s3).toFixed(3)} ml/s at flowMultiplier ${Number(calibrationBaseMultiplier()).toFixed(3)}.${manualNote}`
+      ? `Scale-calibrated real-flow feed-forward. Effective commands: ${formatCommandFlow(s1)}/${formatCommandFlow(s2)}/${formatCommandFlow(shape.enabled ? shape.midCommand : s3)} ml/s at flowMultiplier ${Number(calibrationBaseMultiplier()).toFixed(3)}.${manualNote}`
       : `Direct bounded DE1 flow feed-forward; calibration LUT inactive (${state.calibrationMapStaleReason || "not available"}).${manualNote}`;
     const steps = [
       {
         name: `S1 real ${c.stage1Flow.toFixed(2)} g/s`,
         temperature: c.temperature.toFixed(1), sensor: "coffee", pump: "flow", transition: "fast", pressure: "",
-        flow: s1.toFixed(3), seconds: "120", volume: "0", weight: "0",
+        flow: formatCommandFlow(s1), seconds: "120", volume: "0", weight: "0",
         limiter: { value: p1.toFixed(2), range: Math.max(0.1, p1 * 0.1).toFixed(2) }
       },
       {
         name: `S2 real ${c.stage2Flow.toFixed(2)} g/s`,
         temperature: c.temperature.toFixed(1), sensor: "coffee", pump: "flow", transition: "fast", pressure: "",
-        flow: s2.toFixed(3), seconds: "180", volume: "0", weight: "0",
+        flow: formatCommandFlow(s2), seconds: "180", volume: "0", weight: "0",
         limiter: { value: p2.toFixed(2), range: Math.max(0.1, p2 * 0.1).toFixed(2) }
       }
     ];
@@ -4363,19 +4407,19 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         {
           name: `S3 EARLY real ${c.stage3Flow.toFixed(2)} g/s`,
           temperature: c.temperature.toFixed(1), sensor: "coffee", pump: "flow", transition: "fast", pressure: "",
-          flow: clampCommandFlow(shape.earlyCommand).toFixed(3), seconds: clampNumber(shape.earlySeconds,3,30,8).toFixed(1), volume: "0", weight: "0",
+          flow: formatCommandFlow(shape.earlyCommand), seconds: clampNumber(shape.earlySeconds,3,30,8).toFixed(1), volume: "0", weight: "0",
           limiter: { value: p3.toFixed(2), range: Math.max(0.1, p3 * 0.1).toFixed(2) }
         },
         {
           name: `S3 MID real ${c.stage3Flow.toFixed(2)} g/s`,
           temperature: c.temperature.toFixed(1), sensor: "coffee", pump: "flow", transition: "fast", pressure: "",
-          flow: clampCommandFlow(shape.midCommand).toFixed(3), seconds: clampNumber(shape.midSeconds,3,30,14).toFixed(1), volume: "0", weight: "0",
+          flow: formatCommandFlow(shape.midCommand), seconds: clampNumber(shape.midSeconds,3,30,14).toFixed(1), volume: "0", weight: "0",
           limiter: { value: p3.toFixed(2), range: Math.max(0.1, p3 * 0.1).toFixed(2) }
         },
         {
           name: `S3 LATE real ${c.stage3Flow.toFixed(2)} g/s`,
           temperature: c.temperature.toFixed(1), sensor: "coffee", pump: "flow", transition: "fast", pressure: "",
-          flow: clampCommandFlow(shape.lateCommand).toFixed(3), seconds: "180", volume: "0", weight: "0",
+          flow: formatCommandFlow(shape.lateCommand), seconds: "180", volume: "0", weight: "0",
           limiter: { value: p3.toFixed(2), range: Math.max(0.1, p3 * 0.1).toFixed(2) }
         }
       );
@@ -4383,7 +4427,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       steps.push({
         name: `S3 real ${c.stage3Flow.toFixed(2)} g/s`,
         temperature: c.temperature.toFixed(1), sensor: "coffee", pump: "flow", transition: "fast", pressure: "",
-        flow: s3.toFixed(3), seconds: "180", volume: "0", weight: "0",
+        flow: formatCommandFlow(s3), seconds: "180", volume: "0", weight: "0",
         limiter: { value: p3.toFixed(2), range: Math.max(0.1, p3 * 0.1).toFixed(2) }
       });
     }
@@ -4425,7 +4469,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
             ? `CAL ${step.blockId} target ${Number(step.targetReal).toFixed(1)} - cmd ${Number(step.commandFlow).toFixed(2)}`
             : `CAL ${wp.modeLabel.toUpperCase()} ${i + 1}/${program.length} - ${Number(step.commandFlow).toFixed(2)} ml/s`,
           temperature: c.temperature.toFixed(1), sensor: "coffee", pump: "flow", transition: "fast", pressure: "",
-          flow: Number(step.commandFlow).toFixed(2), seconds: Number(step.seconds).toFixed(1), volume: "0", weight: "0",
+          flow: formatCommandFlow(step.commandFlow), seconds: Number(step.seconds).toFixed(1), volume: "0", weight: "0",
           limiter: { value: calPressure.toFixed(2), range: Math.max(0.1, calPressure * 0.1).toFixed(2) }
         }))
       ],
@@ -6783,13 +6827,14 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
   function encodeLiveFlowFrame(step,frame,command) {
     if(!step||step.pump!=="flow"||step.exit||!Number.isInteger(frame)||frame<0||frame>4)throw new Error("unsupported frame");
     if(!Number.isFinite(command)||command<LIMITS.commandFlowMin||command>LIMITS.commandFlowMax)throw new Error("flow out of bounds");
+    const snapped=toDriverStep(command);
     const temp=Number(step.temperature),seconds=Number(step.seconds),volume=Number(step.volume);
     if(!Number.isFinite(temp)||temp<70||temp>100||!Number.isFinite(seconds)||seconds<0||!Number.isFinite(volume)||volume!==0)throw new Error("unsupported frame metadata");
     // Exactly match Decaid stock-DE1 frame encoding; preserve sensor, transition,
     // temperature, duration and unlimited-volume flag. Extended limiter frame untouched.
     const flags=0x40|0x01|(step.sensor==="water"?0x10:0)|(step.transition==="smooth"?0x20:0);
     const duration=seconds===0?0:seconds>=12.75?(0x80|Math.min(127,Math.floor(seconds+0.5))):Math.floor(seconds*10+0.5);
-    const bytes=[frame,flags,Math.floor(command*16+0.5),Math.floor(temp*2+0.5),duration,0,4,0];
+    const bytes=[frame,flags,Math.round(snapped*16),Math.floor(temp*2+0.5),duration,0,4,0];
     return bytes.map(x=>x.toString(16).padStart(2,"0").toUpperCase()).join("");
   }
   function liveTrimRegression(t) {

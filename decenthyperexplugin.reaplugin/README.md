@@ -1,11 +1,13 @@
-# HyperEx Pulse Filter 1.94ds
+# HyperEx Pulse Filter 2.0.1
 
-本地开发版（版本号 1.94ds，非严格 semver）。1.94ds 给诊断页减压：
+从 2.0.1 起版本号改用标准 semver，1.9xds 编号作废、不回填。原因是 Decaid 的 GitHub Release 安装要求标签必须是 `X.Y.Z` 或 `vX.Y.Z`，且去掉 v 后与 manifest 的 `version` 完全一致；`v1.93ds` 会被拒绝（`Release tag "v1.93ds" is not X.Y.Z or vX.Y.Z`）。
+
+2.0.1 的内容（诊断页减压）：
 
 - STEP 4（上一杯 CSV / 历史 JSON）改成和前几步一致的折叠块，默认收起；「复制 CSV」「导出历史 JSON」按钮仍留在页脚。
 - CSV 改为懒加载：打开 STEP 4 或点「复制 CSV」时才取 `/diagnostics-csv`。整杯 CSV 常有几十万字节，以前一进页面就塞进 textarea 并参与排版。
-- 本机实测（900 样本 + 30 杯历史）：脚本 12→7 ms、布局 6→5 ms，样式计算 4→3 ms；折叠态节点数与页面高度不变。
-- 验证见 tests/RESULTS_v0194ds.txt（569/569）。
+- 本机实测（900 样本 + 30 杯历史）：脚本 12→7 ms、布局 6→5 ms、样式计算 4→3 ms；折叠态节点数与页面高度不变。
+- 验证见 tests/RESULTS_v0201.txt（569/569）。
 
 ## Previous release
 

@@ -1,3 +1,15 @@
+# HyperEx Pulse Filter 2.2.1
+
+2.2.0 真机两杯在 S3 early 中止，trace 明确是 `rescueActive is not initialized`。2.2.1 是热修：
+
+- 修复 S3 预测控制里压力/执行器门在 `rescueActive` 初始化前读取的 TDZ；S3 early 不再因为这个错误 abort 整杯。
+- S2 补水改为**有界控制律**：`targetGS/r`（无 r 时用 LUT）是控制基准，`targetPercent` 只是补水指令上限，不再直接当成固定 boost；实际指令按 2 s 预测秤流量和 `cutoffPercent` 计算，最终仍受 8 ml/s 硬门、压力、ACK 和写入预算约束。
+- 补水收口要求实测斜率至少到 cutoff 的 95% 才接受 2 s 预测，避免 3.99 g/s 实测、13.12 g/s 预测这种提前收回。
+- 杯内控制中心在没有杯间记忆时回到 LUT/目标基准，不再拿手动 profile base 与补水控制基准互相打架。
+- 测试：tests/verify_v0221.cjs 620/620。
+
+## Previous release
+
 # HyperEx Pulse Filter 2.2.0
 
 杯间学习从“绝对指令”改成“相对当杯实际指令的增益记忆”：

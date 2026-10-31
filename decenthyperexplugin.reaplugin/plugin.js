@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.0";
+  const PLUGIN_VERSION = "2.2.1";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -443,6 +443,7 @@ function createPlugin(host) {
       liveFlowTrimLevel: [1,2,3,4].includes(Number(settings.LiveFlowTrimLevel)) ? Number(settings.LiveFlowTrimLevel) : 3,
       liveTrimDecisionModel: b(settings.LiveTrimDecisionModel, true),
       s3DriftModel: b(settings.S3DriftModel, true),
+      s2RefillBoundedModel: b(settings.S2RefillBoundedModel, true),
       directDriverStartTest: b(settings.DirectDriverStartTest, false),
       ghcConfirmTimeoutSeconds: clampNumber(settings.GHCConfirmTimeoutSeconds, 1, 60, 20.0),
       autoArmRetry1Seconds: clampNumber(settings.AutoArmRetry1Seconds, 0, 30, 3.0),
@@ -2146,6 +2147,28 @@ function createPlugin(host) {
     if(!Number.isFinite(estimate)||estimate<LIMITS.commandFlowMin||estimate>LIMITS.commandFlowMax)return null;
     return {command:estimate,basis:"target-cup-flow observed-tail local model",referenceTailGS:round(q.tailMeanGS,3),sourceRunId:prior.runId,previousCommandMlS:round(previousCommand,4)};
   }
+  function boundedRefillControlBase(targetGS,profileBase) {
+    const gm=liveTrimMemoryCandidate("stage2",state.diagnosticLast||state.diagnosticCurrent);
+    if(gm&&Number(gm.r)>0&&Number(targetGS)>0)return {commandMlS:Number(targetGS)/Number(gm.r),r:Number(gm.r),source:"gain-memory",bucketId:gm.bucketId};
+    const mapped=Number.isFinite(Number(targetGS))?mappedCommandForReal(targetGS):null;
+    if(Number.isFinite(Number(mapped))&&Number(mapped)>0)return {commandMlS:Number(mapped),r:Number(targetGS)/Number(mapped),source:"lut"};
+    return {commandMlS:Number(profileBase),r:Number(targetGS)/Number(profileBase),source:"profile-base"};
+  }
+  function boundedRefillCommand(t) {
+    const plan=t&&t.startup&&t.startup.plan;
+    if(!plan||plan.boundedModel!==true)return plan?plan.boostCommandMlS:null;
+    const base=Number(plan.controlBaseMlS),max=Math.min(LIMITS.commandFlowMax,Number(plan.refillMaxCommandMlS||plan.boostCommandMlS));
+    const target=Number(plan.refillTargetGS||(t.run&&t.run.config&&t.run.config.stage2Flow)),cutoff=target*Number(plan.cutoffFraction||.85);
+    const r=Number(plan.controlGain)>0?Number(plan.controlGain):(base>0?target/base:1);
+    if(!(base>0)||!(max>0)||!(target>0))return null;
+    const estimate=s2RefillFlowEstimate(t);
+    let predicted=estimate?Number(estimate.predicted):null;
+    if(!Number.isFinite(predicted))predicted=0;
+    predicted=Math.max(0,Math.min(target*1.5,predicted));
+    let candidate=predicted>0?base+Math.max(0,(cutoff-predicted)/Math.max(.15,r)):max;
+    candidate=Math.max(base,Math.min(max,candidate));
+    return Math.floor((candidate+1e-9)*16)/16;
+  }
   // Active-release restart has a refill transient, separate from steady S2 LEVEL.
   // No extra profile frames or skips: one bounded write to confirmed frame 1.
   function s2HoldingReference(base,boost) {
@@ -2170,9 +2193,14 @@ function createPlugin(host) {
     const cupTarget=Number(state.cfg.stage2Flow);
     const raw=resolvedStageCommandFlow("stage2",state.cfg.stage2Flow),base=Math.round(raw*16)/16;
     const estimate=settings.basis==="cup-target"&&cupTarget>0?s2RefillPumpEstimate(base,cupTarget):null;
-    const refillBase=estimate?estimate.command:base;
+    const bounded=state.cfg.s2RefillBoundedModel===true;
+    const control=bounded&&settings.basis==="cup-target"?boundedRefillControlBase(cupTarget,base):null;
+    const refillBase=bounded?(control?Number(control.commandMlS):base):(estimate?estimate.command:base);
+    const controlBase=refillBase;
+    const controlGain=bounded?(control&&Number(control.r)>0?Number(control.r):(cupTarget>0?cupTarget/refillBase:null)):null;
     const plan={schema:5,strategy:"refill-85",enabled:false,reason:"S2 refill assist disabled",baseCommandMlS:base,
-      refillPumpBaseMlS:round(refillBase,4),refillTargetFraction:settings.targetPercent/100,cutoffFraction:settings.cutoffPercent/100,
+      refillPumpBaseMlS:round(refillBase,4),controlBaseMlS:round(controlBase,4),controlGain,controlSource:bounded?(control?control.source:(settings.basis==="cup-target"?"profile-base":"base")):"legacy",
+      boundedModel:bounded,refillTargetFraction:settings.targetPercent/100,cutoffFraction:settings.cutoffPercent/100,
       startDelayMs:settings.startDelayMs,predictionSeconds:2.0,holdMs:settings.maxDurationMs,dispatchWindowMs:settings.startDelayMs+4000,approachMs:settings.approachMs,approachWriteIntervalMs:750,settings:{...settings},
       sourceRunIds:estimate?[estimate.sourceRunId]:[],learningLevel:learningPolicy().name};
     if(settings.basis==="cup-target"){plan.refillTargetGS=round(cupTarget,3);if(estimate)plan.referenceTailGS=estimate.referenceTailGS;plan.commandBasis=estimate?estimate.basis:"target-cup-flow base fallback (no observed tail)";}
@@ -2186,11 +2214,12 @@ function createPlugin(host) {
     const ceiling=Math.min(LIMITS.commandFlowMax,refillBase*1.6);
     const boost=Math.floor((Math.min(ceiling,Math.max(refillBase,requested))+1e-9)*16)/16;
     plan.requestedCommandMlS=round(requested,4);plan.commandLimited=requested>ceiling;
-    if(boost<base+1/16){plan.reason=requested<=refillBase?"S2 refill target needs no extra command":"S2 refill has no command headroom";return plan;}
-    const holding=s2HoldingReference(base,boost);
-    const basisReason=settings.basis==="cup-target"?(estimate?"S2 refill aims at the S2 cup target using the observed tail":"S2 refill aims at the S2 cup target; profile base pump command, no clean observed tail"):"S2 configurable refill";
-    return {...plan,returnCommandMlS:holding.commandMlS,holdingReference:holding,enabled:true,reason:basisReason+"; measured cup-flow cutoff or safety deadline",maximumExtraCommandMl:round(Math.max(0,boost-base)*plan.holdMs/1000,3),
-      boostCommandMlS:boost,boostQuanta:Math.round((boost-base)*16)};
+    plan.refillMaxCommandMlS=boost;
+    if(boost<(bounded?refillBase:base)+1/16){plan.reason=requested<=refillBase?"S2 refill target needs no extra command":"S2 refill has no command headroom";return plan;}
+    const holding=bounded&&settings.basis==="cup-target"?{commandMlS:round(refillBase,3),basis:"bounded target-equivalent command",sourceRunId:control&&control.bucketId||null}:s2HoldingReference(base,boost);
+    const basisReason=bounded?(settings.basis==="cup-target"?"S2 refill bounded by target-equivalent command; targetPercent is an upper bound":"S2 refill bounded by profile command; targetPercent is an upper bound"):(settings.basis==="cup-target"?(estimate?"S2 refill aims at the S2 cup target using the observed tail":"S2 refill aims at the S2 cup target; profile base pump command, no clean observed tail"):"S2 configurable refill");
+    return {...plan,returnCommandMlS:holding.commandMlS,holdingReference:holding,enabled:true,reason:basisReason+"; measured cup-flow cutoff or safety deadline",maximumExtraCommandMl:round(Math.max(0,boost-refillBase)*plan.holdMs/1000,3),
+      boostCommandMlS:boost,boostQuanta:Math.round((boost-refillBase)*16)};
   }
   function s2RefillFlowEstimate(t) {
     const now=Date.now(),seen=new Set(),points=[];
@@ -2220,9 +2249,10 @@ function createPlugin(host) {
     if(Date.now()-p.startedAt>=plan.holdMs)return "S2 refill maximum duration reached";
     if(Date.now()-state.latestScaleAtMs>600)return "S2 refill scale became stale";
     const flow=s2RefillFlowEstimate(t),threshold=t.run.config.stage2Flow*plan.cutoffFraction;
-    const decisionFlow=flow?Number(flow.predicted):null;
-    if(flow&&Number.isFinite(decisionFlow)&&decisionFlow>=threshold){
-      p.cutoff={rawGS:round(flow.slope,3),predictedGS:round(flow.predicted,3),decisionGS:round(decisionFlow,3),thresholdGS:round(threshold,3),atMs:Date.now()};
+    const observed=flow?Number(flow.slope):null,predicted=flow?Number(flow.predicted):null;
+    const decisionFlow=Number.isFinite(predicted)?predicted:observed;
+    if(flow&&Number.isFinite(observed)&&observed>=threshold*.95&&Number.isFinite(decisionFlow)&&decisionFlow>=threshold){
+      p.cutoff={rawGS:round(flow.slope,3),predictedGS:Number.isFinite(predicted)?round(predicted,3):null,decisionGS:round(decisionFlow,3),thresholdGS:round(threshold,3),atMs:Date.now()};
       return "S2 refill reached configured cup-flow cutoff";
     }
     return null;
@@ -2269,14 +2299,16 @@ function createPlugin(host) {
         return startupBlock(t,"S2 startup cup flow already high; skip late boost");
       }
     }else if(!["boosting","return-unconfirmed"].includes(p.status))return false;
-    const boosted=refill?p.plan.boostCommandMlS:base+1/16;
+    const boosted=refill?(p.plan.boundedModel===true?boundedRefillCommand(t):p.plan.boostCommandMlS):base+1/16;
+    if(refill&&p.plan.boundedModel===true&&!(Number(boosted)>0))return startupBlock(t,"S2 bounded refill command unavailable");
+    const returnFloor=refill&&p.plan.boundedModel===true?Number(p.plan.controlBaseMlS||p.plan.refillPumpBaseMlS):base;
     if(refill&&action==="return"&&!Number.isFinite(p.actualReturnCommandMlS)){
       const proposed=finiteOrNull(p.plan.returnCommandMlS),protective=/pressure|stale/i.test(p.returnReason||"");
-      p.actualReturnCommandMlS=protective||proposed===null?base:proposed;
+      p.actualReturnCommandMlS=protective||proposed===null?returnFloor:proposed;
     }
     const command=action==="boost"?boosted:refill?p.actualReturnCommandMlS:base;
-    if(refill&&action==="return"&&(command<base||command>Math.min(boosted,base*1.2)+1e-9||Math.abs(command*16-Math.round(command*16))>1e-6))return false;
-    const commandCeiling=refill?Math.min(LIMITS.commandFlowMax,(Number.isFinite(Number(p.plan.refillPumpBaseMlS))?Number(p.plan.refillPumpBaseMlS):base)*1.6):base*1.08;
+    if(refill&&action==="return"&&(command<returnFloor||command>Math.min(boosted,returnFloor*1.2)+1e-9||Math.abs(command*16-Math.round(command*16))>1e-6))return false;
+    const commandCeiling=refill?Math.min(LIMITS.commandFlowMax,p.plan.boundedModel===true?Number(p.plan.refillMaxCommandMlS||boosted):(Number.isFinite(Number(p.plan.refillPumpBaseMlS))?Number(p.plan.refillPumpBaseMlS):base)*1.6):base*1.08;
     if(!Number.isFinite(command)||command<LIMITS.commandFlowMin||command>LIMITS.commandFlowMax||command>commandCeiling+1e-9)return false;
     // Returning to the verified base is a decrease, so it must not wait for cup
     // regression, a new scale endpoint, pressure headroom, or the boost target echo.
@@ -3923,7 +3955,7 @@ function curveEnterValue(raw){
 function curveNudge(sign){if(!curveDraft||curveBusy)return;const v=curveDraft.values[curveKeys[curveSelected]],candidate=(Math.round(v*16)+sign)/16,oldShape=curveDraft.shaped;if(curveSelected>=2)curveDraft.shaped=true;const bounds=curveLimits(curveSelected,curveDraft.values);curveDraft.shaped=oldShape;if(candidate<bounds[0]-1e-9||candidate>bounds[1]+1e-9)return;curveInputInvalid=false;if($('curvevalue'))$('curvevalue').setCustomValidity('');curveSetValue(candidate)}
 function curveTime(key,sign){if(!curveDraft||curveBusy)return;curveDraft.shaped=true;curveDraft.values[key]=Math.max(3,Math.min(30,curveDraft.values[key]+sign));curveDirty=!curveSame(curveDraft,curveLatest);renderCurveEditor(curveLatest)}
 function curveShapeToggle(enabled){if(!curveDraft||curveBusy)return;curveDraft.shaped=enabled;if(!enabled){const v=curveDraft.values;v.early=v.late=v.mid}curveDirty=!curveSame(curveDraft,curveLatest);renderCurveEditor(curveLatest)}
-const refillControlFields=[['startDelayMs','启动延时','s'],['targetPercent','基础泵流量倍率','%'],['cutoffPercent','称流速收回阈值','%'],['maxDurationMs','最长补水','s'],['approachMs','接管渐进时间','s']];
+const refillControlFields=[['startDelayMs','启动延时','s'],['targetPercent','补水指令上限','%'],['cutoffPercent','称流速收回阈值','%'],['maxDurationMs','最长补水','s'],['approachMs','接管渐进时间','s']];
 function curveRefillBasisChange(value){if(!curveDraft||curveBusy)return;const basis=String(value);if(basis!=="pump-command"&&basis!=="cup-target")return;curveDraft.refill.basis=basis;curveDirty=!curveSame(curveDraft,curveLatest);renderCurveEditor(curveLatest)}
 function curveRefillChange(key,value){
  if(!curveDraft||curveBusy||!curveLatest.refillLimits||!curveLatest.refillLimits[key])return;
@@ -6894,12 +6926,6 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       const retry=t.retry;
       const step=t.profile.steps[frame],base=Math.floor(Number(step.flow)*16+0.5)/16;
       const command=Number.isFinite(t.commands[frame])?t.commands[frame]:base;
-      const limiter=Number(step.limiter&&step.limiter.value);
-      const pressureLimited=!Number.isFinite(limiter)||state.lastPressure>=0.95*limiter;
-      const actuatorLow=state.lastFlow<command*0.7;
-      if(!predictive&&reg.slope<target&&(pressureLimited||actuatorLow)){row.reason="pressure-or-actuator-limited";return;}
-      if(predictive&&pressureLimited&&decisionGS<target){row.reason="pressure-limited-upward-blocked";return;}
-      if(predictive&&actuatorLow&&decisionGS<target&&!rescueActive){row.reason="actuator-low-normal-hold";return;}
       // A stale direction is held, not blindly retried after the cup error reverses.
       if(retry&&Math.sign(retry.command-command)!==Math.sign(target-reg.slope)){row.reason="unconfirmed-target-direction-changed";return;}
       // One quantum only from a confirmed command; unresolved attempts repeat the same target.
@@ -6945,6 +6971,12 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       }
       const rescueActive=predictive&&!!t.rescueMode&&predictedRel>=.08;
       row.rescue=rescueActive;row.rescueAngleStreak=t.rescueAngleStreak||0;row.predictedErrorPct=round(predictedRel*100,1);
+      const limiter=Number(step.limiter&&step.limiter.value);
+      const pressureLimited=!Number.isFinite(limiter)||state.lastPressure>=0.95*limiter;
+      const actuatorLow=state.lastFlow<command*0.7;
+      if(!predictive&&reg.slope<target&&(pressureLimited||actuatorLow)){row.reason="pressure-or-actuator-limited";return;}
+      if(predictive&&pressureLimited&&decisionGS<target){row.reason="pressure-limited-upward-blocked";return;}
+      if(predictive&&actuatorLow&&decisionGS<target&&!rescueActive){row.reason="actuator-low-normal-hold";return;}
       // Explicit trim states (user 2026-10-30): coast = the trend is closing on
       // its own; lut-compensate = parallel/weak offset with pressure headroom;
       // vector = the existing bounded controller.

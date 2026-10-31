@@ -1,3 +1,14 @@
+# HyperEx Pulse Filter 1.87ds
+
+本地开发版（版本号 1.87ds，非严格 semver）。1.87ds 给导入补上「从链接导入」：
+
+- 诊断页学习历史的导入区新增输入框与 IMPORT FROM URL / 从链接导入 按钮；输入框默认填当前环境的 history-export 地址。
+- 点一次会同时回灌学习历史与 LUT：先 history-import，再 calibration-import；LUT 失败不影响历史，状态行分别报两段结果。
+- 文本输入框样式与数字框统一。
+- 验证见 tests/RESULTS_v0187ds.txt（552/552）。
+
+## Previous release
+
 # HyperEx Pulse Filter 1.86ds
 
 本地开发版（版本号 1.86ds，非严格 semver）。1.86ds 在诊断页加入导入，用于找回丢失的 LUT 与学习记录：

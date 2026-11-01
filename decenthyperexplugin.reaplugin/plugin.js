@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.9";
+  const PLUGIN_VERSION = "2.2.10";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -19,6 +19,9 @@ function createPlugin(host) {
     stage2WeightMax: 200.0, finalWeightMax: 300.0,
     maxProfileFrames: 20
   });
+  // §19 / T-4: the angle deadband is its own constant (degrees). It must never be
+  // derived from deadbandPct, which is a cup-flow percentage.
+  const ANGLE_DEADBAND_DEG=2;
   // Two empty-basket calibration programs. LOW WATER is the default and
   // concentrates samples around the HyperEx real-flow targets while keeping
   // the cup well below 300 ml. FULL retains the denser 12-point map.
@@ -6884,7 +6887,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
   // target line (cup flow flat on target, no further write); a trend that cannot
   // reach the target line reads 90, and one moving away reads above 90.
   function computeAngleStats(report,trace) {
-    const band=(report&&report.deadbandPct)||2;
+    const band=ANGLE_DEADBAND_DEG;
     const rows=(trace||[]).filter(x=>x.kind==="check"&&Number.isFinite(x.rawGS));
     if(rows.length<2)return {zeroDegreeShare:null,meanAngleDeg:null};
     let z=0,a=0,n=0,prev=null;
@@ -6988,7 +6991,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     state.liveTrim={active:true,started:false,handle:null,run,report,phase:null,frame:null,frameAt:0,
       startup:{status:c.s2StartupPlan&&c.s2StartupPlan.enabled?"armed":"disabled",plan:c.s2StartupPlan||{enabled:false}},
       commands:{},pending:null,retry:null,lastDecisionStamp:{},lastWriteAt:null,sameSignStreak:0,lastSign:0,bigAngleStreak:0,lastCheckGS:null,lastCheckAtMs:0,
-      rescueMode:false,rescueAngleStreak:0,rescueCalmStreak:0,phaseWrites:{stage1:0,stage2:0,stage3:0},phaseRescueWrites:{stage1:0,stage2:0,stage3:0},profile:JSON.parse(JSON.stringify(profileObject()))};
+      rescueMode:false,rescueAngleStreak:0,rescueCalmStreak:0,phaseWrites:{stage1:0,stage2:0,stage3:0},phaseRescueWrites:{stage1:0,stage2:0,stage3:0},phaseQuanta:{stage1:{normal:0,rescue:0},stage2:{normal:0,rescue:0},stage3:{normal:0,rescue:0}},profile:JSON.parse(JSON.stringify(profileObject()))};
     liveTrimRecord("armed",{periodMs:report.periodMs});
   }
   async function startLiveTrim() {
@@ -7015,7 +7018,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
           const x=typeof event.data==="string"?JSON.parse(event.data):event.data;
           if(x.type==="response"&&x.operation==="write"&&x.characteristicUUID==="A010"&&!t.pending.ack){
             const pend=t.pending;pend.ack=true;t.report.acks++;
-            liveTrimRecord("driver-ack",{frame:pend.frame,latencyMs:Date.now()-pend.at});
+            t.lastResponseMs=Date.now()-pend.at;liveTrimRecord("driver-ack",{frame:pend.frame,latencyMs:Date.now()-pend.at});
             // The refill is complete when the driver acknowledges the return
             // write: the pump command is back at the profile base. Waiting for a
             // target echo or flow corroboration kept S2 blocked for seconds.
@@ -7050,7 +7053,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       }
     }
     if(frame!==t.frame||state.phase!==t.phase){
-      if(state.phase!==t.phase){t.rescueMode=false;t.rescueAngleStreak=0;t.rescueCalmStreak=0;t.phaseWrites[state.phase]=0;t.phaseRescueWrites[state.phase]=0;}
+      if(state.phase!==t.phase){t.rescueMode=false;t.rescueAngleStreak=0;t.rescueCalmStreak=0;t.phaseWrites[state.phase]=0;t.phaseRescueWrites[state.phase]=0;if(t.phaseQuanta&&t.phaseQuanta[state.phase]){t.phaseQuanta[state.phase].normal=0;t.phaseQuanta[state.phase].rescue=0;}}
       t.frame=frame;t.phase=state.phase;t.frameAt=Date.now();
     }
     if(state.phase==="stage2"&&frame===1&&t.startup&&!Number.isFinite(t.startup.frameConfirmedAt))t.startup.frameConfirmedAt=Date.now();
@@ -7240,7 +7243,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       const frame=finiteOrNull(state.lastFrame);
       if(frame===null||!Number.isInteger(frame)||(state.phase==="stage1"?frame!==0:state.phase==="stage2"?frame!==1:frame<2||frame>=t.profile.steps.length)){row.reason="frame-not-confirmed";return;}
       if(frame!==t.frame||state.phase!==t.phase){
-        if(state.phase!==t.phase){t.rescueMode=false;t.rescueAngleStreak=0;t.rescueCalmStreak=0;t.phaseWrites[state.phase]=0;t.phaseRescueWrites[state.phase]=0;}
+        if(state.phase!==t.phase){t.rescueMode=false;t.rescueAngleStreak=0;t.rescueCalmStreak=0;t.phaseWrites[state.phase]=0;t.phaseRescueWrites[state.phase]=0;if(t.phaseQuanta&&t.phaseQuanta[state.phase]){t.phaseQuanta[state.phase].normal=0;t.phaseQuanta[state.phase].rescue=0;}}
         t.frame=frame;t.phase=state.phase;t.frameAt=Date.now();row.reason="frame-settle";return;
       }
       const predictive=predictiveMode&&(state.phase==="stage2"||state.phase==="stage3");
@@ -7311,10 +7314,18 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       if(predictive){
         if(angleDeg!==null&&angleDeg>=120)t.rescueAngleStreak=(t.rescueAngleStreak||0)+1;else t.rescueAngleStreak=0;
         const remainingS=Math.max(0,(state.cfg.finalWeight-state.cumulativeWeight)/Math.max(.1,decisionGS));
-        const predictedSafe=reg.predicted!==null&&reg.predicted!==undefined&&Number.isFinite(Number(reg.predicted))?Number(reg.predicted):null;
-        const cannotReturn=!Number.isFinite(remainingS)||remainingS<2||
-          (predictedSafe!==null&&decisionGS<target&&predictedSafe<target*.75)||
-          (predictedSafe!==null&&decisionGS>target&&predictedSafe>target*1.25);
+        // T-10: actually use the remaining time. One quantum moves the cup by r/16
+        // g/s; every write costs the silence window plus the ~1.2 s pump lag. If the
+        // steps still needed cannot fit, the controller cannot return in time.
+        const ccRescue=liveTrimControlCenter(state.phase,base,t.run);
+        const rRescue=Number(ccRescue.r)>0?Number(ccRescue.r):(state.phase==="stage3"?1.8:1.2);
+        const perQuantumGS=Math.max(.02,rRescue/16);
+        const stepsNeeded=Math.abs(target-decisionGS)/perQuantumGS;
+        const measuredMs=Number(t.lastResponseMs);
+        const writePeriodS=Math.max(.8,Math.min(3,Number.isFinite(measuredMs)?measuredMs/1000:.8));
+        const timeToReturnS=1.2+stepsNeeded*writePeriodS;
+        const cannotReturn=!Number.isFinite(remainingS)||timeToReturnS>remainingS;
+        row.stepsNeeded=round(stepsNeeded,1);row.timeToReturnS=round(timeToReturnS,2);row.remainingS=round(remainingS,2);
         const rescueHot=t.rescueAngleStreak>=2&&predictedRel>.25&&cannotReturn;
         if(rescueHot){t.rescueMode=true;t.rescueCalmStreak=0;}
         else if(t.rescueMode){
@@ -7346,16 +7357,24 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       if(trimMode==="coast"){row.reason="coast-trend-stable";return;}
       if(predictive){
         if(state.phase==="stage3"){
-          const normal=(t.phaseWrites&&t.phaseWrites.stage3)||0,rescue=(t.phaseRescueWrites&&t.phaseRescueWrites.stage3)||0;
-          if(rescueActive&&rescue>=2){row.reason="S3 rescue write budget";return;}
-          if(!rescueActive&&normal>=4){row.reason="S3 normal write budget";return;}
-          const progress=state.stage3PlannedMs>0?Math.min(1,Math.max(0,(Date.now()-state.stage3StartedAtMs)/state.stage3PlannedMs)):0;
-          if(!rescueActive&&progress>=.55){row.reason="S3 late-phase coast";return;}
+          // T-9 / F4 (user 2026-11-01): the S3 4+2 budget is a BEHAVIOURAL budget,
+          // not a safety gate. Count cumulative quanta, release the normal budget
+          // while the trend angle stays >=120 deg for 3+ checks, and drop the
+          // late-phase ban. The global maxWrites remains the safety cap.
+          const q=(t.phaseQuanta&&t.phaseQuanta.stage3)||{normal:0,rescue:0};
+          const bigAngleRelease=(t.rescueAngleStreak||0)>=3;
+          if(rescueActive&&q.rescue>=24){row.reason="S3 rescue quantum budget";return;}
+          if(!rescueActive&&q.normal>=24&&!bigAngleRelease){row.reason="S3 normal quantum budget";return;}
+          row.s3QuantaNormal=q.normal;row.s3QuantaRescue=q.rescue;row.bigAngleRelease=bigAngleRelease;
         }
-        const silenceMs=rescueActive?800:1200;
+        // F3 (user 2026-11-01): rescue silence = max(800 ms, last measured driver
+        // ACK latency); 800 ms is the floor when no measurement exists.
+        const measuredSilence=Number(t.lastResponseMs);
+        const silenceMs=rescueActive?(Number.isFinite(measuredSilence)?Math.max(800,Math.min(3000,Math.round(measuredSilence))):800):1200;
         if(t.lastWriteAt!==null&&Date.now()-t.lastWriteAt<silenceMs){
           t.report.silenceHolds=(t.report.silenceHolds||0)+1;
-          row.silenceMs=silenceMs;row.reason="predictive-write-silence";return;
+          row.silenceMs=silenceMs;row.silenceBasis=rescueActive?(Number.isFinite(measuredSilence)&&measuredSilence>800?"measured":"floor-800"):"normal-1200";
+          row.reason="predictive-write-silence";return;
         }
       }
       let steps=0,controlCenter=null;
@@ -7368,7 +7387,9 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         // T-8: rescue starts from an error-scaled floor (2..8) instead of a
         // fixed 8, so an S3 rescue writes 0.1-0.2 ml/s rather than 54% of target.
         const rescueMin=Math.max(2,Math.min(8,Math.round(.25*Math.abs(errGS)/r*16)));
-        steps=rescueActive?predictiveStepQuanta(errGS,r,rescueMin,24):predictiveStepQuanta(errGS,r,1,4);
+        // T-12: the sustained-angle ceiling now works in predictive mode too.
+        const normalMax=(t.bigAngleStreak||0)>=6?8:(t.bigAngleStreak||0)>=3?6:4;
+        steps=rescueActive?predictiveStepQuanta(errGS,r,rescueMin,24):predictiveStepQuanta(errGS,r,1,normalMax);
         row.controlCenterMlS=round(controlCenter.commandMlS,3);row.controlSource=controlCenter.source;row.controlR=controlCenter.r;row.controlBucket=controlCenter.bucketId||null;row.stepQuanta=steps;
       }else{
         steps=trimMode==="lut-compensate"?Math.max(2,vectorStepCount(errGS,t.bigAngleStreak,target)):vectorStepCount(errGS,t.bigAngleStreak,target);
@@ -7402,6 +7423,9 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         t.phaseWrites[state.phase]=(t.phaseWrites[state.phase]||0)+1;
         if(rescueActive)t.phaseRescueWrites[state.phase]=(t.phaseRescueWrites[state.phase]||0)+1;
         if(state.phase==="stage3"){if(rescueActive)t.report.s3RescueWrites++;else t.report.s3NormalWrites++;}
+        const quantumStep=Math.round(Math.abs(candidate-command)*16);
+        if(!t.phaseQuanta[state.phase])t.phaseQuanta[state.phase]={normal:0,rescue:0};
+        if(rescueActive)t.phaseQuanta[state.phase].rescue+=quantumStep;else t.phaseQuanta[state.phase].normal+=quantumStep;
       }
       t.report.writes++;state.liveTrimDirty=true;
       liveTrimRecord("write",{frame,commandMlS:candidate,previousMlS:command,retry:!!retry,rawGS:row.rawGS,predictedGS:row.predictedGS,targetGS:target,rescue:rescueActive,steps,intendedQuanta:steps,actualQuanta:Math.round(Math.abs(candidate-command)*16),controlCenterMlS:row.controlCenterMlS,controlSource:row.controlSource,controlR:row.controlR,controlBucket:row.controlBucket,payload});

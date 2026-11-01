@@ -1,4 +1,20 @@
+# HyperEx Pulse Filter 2.2.10
+
+杯内门槛与死参数：角度死区独立成常量、S3 预算按累计档数并可由大角度临时放开、救急判据真正用上剩余时间、救急静默按实测延迟放宽。
+
+- **T-4 角度死区独立**：`ANGLE_DEADBAND_DEG=2` 成为独立常量，`computeAngleStats` 不再拿 `deadbandPct`（杯流百分比 4）当角度阈值（度）。0° 占比与循环内判定现在都按 2° 角 + 2% 流量带，两个物理量不再互相冒充。
+- **T-9 / F4 S3 预算改成累计档数**：原先常规 4 笔 / 救急 2 笔是行为预算，真机 2.2.x 的 8 杯里「S3 normal write budget」被触发 242 次、「S3 rescue write budget」186 次（合计 428，与审查一致）。现在按写入的实际档数累计，常规与救急各 24 档；常规预算在趋势角连续 ≥120° 达到 3 个检测点时临时放开；全局 `maxWrites` 仍是安全门。`progress>=.55` 的后段禁写删除。
+- **T-10 救急判据用上剩余时间**：`cannotReturn` 改成真正的外推——每档把杯流改变 `r/16`，每笔要等静默窗 + 约 1.2 s 泵滞后，算出 `timeToReturnS`，与 `remainingS` 比较。trace 记 `stepsNeeded` / `timeToReturnS` / `remainingS`。时间够就不救急，时间不够才救急。
+- **F3 救急静默按实测**：救急静默 = `max(800 ms, 上一笔驱动 ACK 实测延迟)`，上限 3 s；没有实测就落 800 ms。trace 的 `silenceBasis` 记 `measured` / `floor-800` / `normal-1200`。
+- **T-12 连续大角度加码接入 predictive**：`bigAngleStreak≥3` 时常规步长上限 4 → 6，`≥6` 时 → 8；不再是被计算、被上报却不起作用的死代码。
+- **T-13 小项**：救急静默的 800 ms 现在有实测依据；`computeAngleStats` 与循环内的 0° 定义统一到 2° / 2% 带。
+- **未做（归属冲突）**：T-11 的 `approachWriteIntervalMs` / `approachMs` 默认值 / `approachFraction` 都属于 `stage2StartupPlan` 与 `S2_REFILL_DEFAULTS`（补水段横幅所有），本版没碰，等用户决定交给谁。
+- **测试**：tests/verify_v02210.cjs 651/651。新增 T-4 角度独立性、T-10 两态救急、T-9 预算与放开、T-13 实测静默四条；v0229 里断言旧「4 笔 + 后段禁写」的测试按新口径重写（不是弱化：新测试同时断言预算挡住与放开后能写）。对 2.2.9 副本跑同一套是 646/651。
+
+## Previous release
+
 # HyperEx Pulse Filter 2.2.9
+
 
 杯内步长与信封：一个入口决定可达指令范围，信封永远包含当前生效指令，S3 不再用 2-3 档去撞 4% 死区。
 

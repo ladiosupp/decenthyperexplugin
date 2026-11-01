@@ -1,4 +1,16 @@
+# HyperEx Pulse Filter 2.2.19
+
+第二轮复查的 cut 4 三项：稳态增益只用过滤后的历史、α 按阶段取救急笔数、覆盖门文案对齐阈值。
+
+- **P1-3 剩余部分：stageGainEstimate 不再混上下文**。原先读 `persistentHistoryFile.shots.slice(-8)` 并逐杯取 `evidence[stage]`，空粉碗、咖啡、不同模式/目标、未校验 profile 的杯子会混进同一个 k（两杯可能被当成三杯）。现在只读 `state.adaptiveHistory`（restore 时已按 historyLearningStatus、profileTruthSchema===3、numericLearningFingerprintKey、basketContext 过滤），并继续跳过 `s.runId===run.runId`；adaptiveHistory 为空时返回 `k=null`，不回退未过滤列表。
+- **P2-6 α 按阶段取救急笔数**。`gainBackfillAlpha(run,deviation,stage)` 从 `liveFlowTrim.trace` 的 write 记录按 frame 分阶段（stage2 = frame 1，stage3 = frame≥2）数 `rescue:true`；S2 全常规 + S3 救急 2 笔时，S2 α=0.12、S3 α=0.5。不用 `phaseWrites/phaseRescueWrites`（换阶段会清零），没有 trace 才退回 report 合计。
+- **覆盖门文案对齐**：`stageActuatorEvidence` 的 reason 从 0.8 改成与 eligible 相同的 0.60；65% 覆盖 + 压力门失败现在报「压力限幅」，不再误报「覆盖不足」。
+- **测试**：tests/verify_v02219.cjs 689/689。新增 P1-3 过滤+同杯跳过、P2-6 分阶段 α、65% 覆盖 reason 三条；原有 8 条稳态增益夹具改成预置 `adaptiveHistory`（v02218 原样保留）。
+
+## Previous release
+
 # HyperEx Pulse Filter 2.2.18
+
 
 P1 修复：补水 boost ACK 清计时器、bounded 默认 cup-target、当前杯不重复计入稳态增益。
 

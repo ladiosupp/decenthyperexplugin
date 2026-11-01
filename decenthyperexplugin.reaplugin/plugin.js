@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.18";
+  const PLUGIN_VERSION = "2.2.19";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -996,10 +996,21 @@ function createPlugin(host) {
     if(n>=2)return "MEDIUM";
     return "LOW";
   }
-  function gainBackfillAlpha(run,deviation) {
+  function gainBackfillAlpha(run,deviation,stage) {
     let alpha=GAIN_MEMORY_ALPHA;
-    const trim=run&&run.liveFlowTrim;
-    if(trim){
+    const trim=run&&run.liveFlowTrim,trace=trim&&Array.isArray(trim.trace)?trim.trace:[];
+    const wantsFrame=stage==="s2"?f=>Number(f)===1:stage==="s3"?f=>Number(f)>=2:null;
+    let rescue=null,normal=null;
+    if(wantsFrame&&trace.length){
+      rescue=0;normal=0;
+      for(const w of trace){if(w&&w.kind==="write"&&wantsFrame(w.frame)){if(w.rescue)rescue++;else normal++;}}
+    }
+    if(rescue!==null){
+      if(rescue>0)alpha=.5;
+      else if(normal>0)alpha=.12;
+    }else if(trim){
+      // No per-frame trace: fall back to the report total, which cannot separate
+      // stages -- only used for legacy runs.
       if(Number(trim.rescueWrites)>0)alpha=.5;
       else if(Number(trim.normalWrites)>0)alpha=.12;
     }
@@ -1194,7 +1205,7 @@ function createPlugin(host) {
         current=bucket.stages[stage]={r:round(observation.r,4),n:1,lastDeviation:null,lastObservedR:round(observation.r,4),drift:observation.drift==null?null:round(observation.drift,4),commandMlS:round(observation.command,4),commandBand:observation.commandBand||commandBandOf(observation.command),lastRunId:run.runId,updatedAt:now};
       }else{
         deviation=Math.abs(observation.r-current.r)/current.r;
-        alpha=gainBackfillAlpha(run,deviation);
+        alpha=gainBackfillAlpha(run,deviation,stage);
         if(observation.damped)alpha=alpha*.5;
         if(Number(observation.alphaOverride)>0)alpha=Number(observation.alphaOverride);
         current.damped=!!observation.damped;
@@ -2346,7 +2357,7 @@ function createPlugin(host) {
     const pressureFraction=usable?nearLimit/usable:1;
     const underCommandFraction=usable?underCommand/usable:1;
     const eligible=usable>=4 && usable>=rows.length*0.60 && pressureFraction<0.35 && underCommandFraction<0.40;
-    const reason=usable<4 || usable<rows.length*0.8 ? "Coffee machine telemetry/frame coverage insufficient; keep command" :
+    const reason=usable<4 || usable<rows.length*0.60 ? "Coffee machine telemetry/frame coverage insufficient; keep command" :
       pressureFraction>=0.35 ? "Pressure limiter may be active; cup-flow target may be unreachable. Keep command, do not increase pressure" :
       underCommandFraction>=0.40 ? "Machine flow is not tracking the shot command; withhold numeric correction" :
       "Coffee pressure and actuator quality gates passed";
@@ -3549,8 +3560,11 @@ function createPlugin(host) {
     const rows=[];
     const addSingle=e=>{if(!e)return;const cmd=Number(e.command),m=Number(e.measured);if(cmd>0&&m>0)rows.push({k:m/cmd,cmd,m,runId:e.runId});};
     const addS3=e=>{if(!e)return;if(Array.isArray(e.source)&&e.source.length){let ws=0,cs=0,ms=0;for(const f of e.source){const w=Math.max(1,Number(f.seconds)||1),c=Number(f.command),m=Number(f.measured);if(c>0&&m>0){ws+=w;cs+=c*w;ms+=m*w;}}if(ws>0&&cs>0&&ms>0)rows.push({k:(ms/ws)/(cs/ws),cmd:cs/ws,m:ms/ws,runId:e.runId});}else addSingle(e);};
-    const saved=(state.persistentHistoryFile&&state.persistentHistoryFile.shots||[]).slice(-8);
-    for(const s of saved){if(run&&s&&s.runId===run.runId)continue;stage==="s3"?addS3(s.evidence&&s.evidence.s3):addSingle(s.evidence&&s.evidence[stage]);}
+    // P1-3: use the already-filtered adaptive history (basket context, profile
+    // truth, numeric fingerprint). The persistent shot list mixes empty-basket,
+    // coffee, other-mode and unverified rows into one k.
+    const saved=(state.adaptiveHistory||[]).slice(-8);
+    for(const s of saved){if(run&&s&&s.runId===run.runId)continue;stage==="s3"?addS3(s.s3):addSingle(s[stage]);}
     stage==="s3"?addS3(current):addSingle(current);
     if(rows.length<2)return {samples:rows.length,k:null};
     const ks=rows.map(x=>x.k).sort((a,b)=>a-b),k=median(ks);

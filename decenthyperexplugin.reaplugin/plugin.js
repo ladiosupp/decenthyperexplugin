@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.7";
+  const PLUGIN_VERSION = "2.2.8";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -7098,7 +7098,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     // normal-segment value with the refill), while S3 needs a longer robust
     // window and a shorter 1.2 s horizon. Legacy keeps 1.6/0.5 and 3/2.
     const predictive=state.cfg.liveTrimDecisionModel!==false,isS3=state.phase==="stage3";
-    const windowMs=isS3?3000:1600,tailSec=isS3?1.2:.75,headSec=isS3?1.2:.65,horizon=isS3?(predictive?1.2:2):(predictive?2:.5);
+    const windowMs=isS3?3000:1600,tailSec=isS3?1.2:.75,headSec=isS3?1.2:.65,horizon=isS3?(predictive?1.2:2):(predictive?1.5:.5);
     const now=Date.now(),raw=state.phase==="stage2"?phaseRawSamples(t.run,"stage2"):t.run.rawScaleSamples||[],seen=new Set(),points=[];
     for(const x of raw){
       if(x.phase!==state.phase||Number(x.profileFrame)!==t.frame||x.tMs<t.frameAt-t.run.startedAtMs||now-t.run.startedAtMs-x.tMs>windowMs)continue;
@@ -7118,7 +7118,8 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     // ever added water) and bound the move so a two-point acceleration cannot
     // invent a step: |predicted - fastSlope| <= 0.6 x target. The uncapped
     // version ran raw 2.532 -> predicted 7.349 on the real machine.
-    const predicted=fastSlope!==null&&early&&early.r2>=.90?Math.max(0,fastSlope+Math.max(0,(fastSlope-early.slope)*horizon)):fastSlope;
+    const targetGS=Number(isS3?state.cfg.stage3Flow:state.cfg.stage2Flow)||0,moveCap=Math.max(.2,.6*targetGS);
+    const predicted=fastSlope!==null&&early&&early.r2>=.90?Math.max(0,fastSlope+Math.max(-moveCap,Math.min(moveCap,(fastSlope-early.slope)*horizon))):fastSlope;
     return r&&r.r2>=0.90&&r.slope>0?{...r,fastSlope,predicted,sourceEndStamp:end,predictive,windowMs,horizon}:null;
   }
   async function liveTrimTick(t) {
@@ -7250,7 +7251,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       }
       // T-1: Number(null) is 0, so a missing tail fit used to become a 0 g/s
       // decision and saturated both the error and the rescue gate.
-      const decisionGS=predictive&&Number.isFinite(Number(reg.predicted))?Number(reg.predicted):reg.slope;
+      const decisionGS=predictive&&reg.predicted!==null&&reg.predicted!==undefined&&Number.isFinite(Number(reg.predicted))?Number(reg.predicted):reg.slope;
       row.rawGS=round(reg.slope,3);row.predictedGS=round(decisionGS,3);row.windowMs=reg.windowMs;row.horizonS=reg.horizon;row.targetGS=target;row.errorPct=round((reg.slope/target-1)*100,2);row.r2=round(reg.r2,4);
       const deadband=(Number(t.report.deadbandPct)||4)/100;
       if(Math.abs(decisionGS/target-1)<=deadband+1e-9){row.reason="inside-"+Math.round(deadband*100)+"pct-band";return;}
@@ -7292,9 +7293,10 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       if(predictive){
         if(angleDeg!==null&&angleDeg>=120)t.rescueAngleStreak=(t.rescueAngleStreak||0)+1;else t.rescueAngleStreak=0;
         const remainingS=Math.max(0,(state.cfg.finalWeight-state.cumulativeWeight)/Math.max(.1,decisionGS));
+        const predictedSafe=reg.predicted!==null&&reg.predicted!==undefined&&Number.isFinite(Number(reg.predicted))?Number(reg.predicted):null;
         const cannotReturn=!Number.isFinite(remainingS)||remainingS<2||
-          (decisionGS<target&&reg.predicted<target*.75)||
-          (decisionGS>target&&reg.predicted>target*1.25);
+          (predictedSafe!==null&&decisionGS<target&&predictedSafe<target*.75)||
+          (predictedSafe!==null&&decisionGS>target&&predictedSafe>target*1.25);
         const rescueHot=t.rescueAngleStreak>=2&&predictedRel>.25&&cannotReturn;
         if(rescueHot){t.rescueMode=true;t.rescueCalmStreak=0;}
         else if(t.rescueMode){

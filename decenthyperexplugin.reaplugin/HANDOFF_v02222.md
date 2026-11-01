@@ -44,7 +44,7 @@
 - 读回容差 0.001 只吸收因子舍入；因子精度若再降，需要复核。
 - 夹到上限时 `drift` 会变化，suggestion 里显示的是夹后的值（不假装是模型原解）。
 - 手动倾斜按公式永远在界内，UI 那道门是防御性的；服务端同款检查有测试覆盖。
-- 未提交、未打 tag、未推送、未发版。
+- 已发布，见文末发布记录。
 
 ## 5. 怎么验
 
@@ -53,4 +53,14 @@
 `node tests/verify_v02222.cjs`
 
 预期 706/706。v02221 仍可对 2.2.21 跑 698/698。
+
+## 发布记录（2026-11-01）
+
+- commit <code>41d9a22</code>，tag <code>v2.2.22</code>，分支 <code>v1.79ds</code>。
+- GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.22
+  - 附件 <code>HyperExPulseFilter_v2.2.22.zip</code>，428,197 字节。
+- 夸克：<code>夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.22.zip</code>，fileId <code>c4e1baef90b14b11ae0c62d0b5a619c5</code>。
+- SHA256：<code>9844F3CF8E6B1D185961837E13E2C4D1B1AAB46CB934EF5A47DBAED21EEB8989</code>
+- 测试：<code>tests/verify_v02222.cjs</code> 706/706；包内解压复跑 706/706。
+- 本版包含 2.2.19–2.2.22 四版累积改动：P1-3 剩余上下文、P2-6 α 分阶段、P2-3 桶几何、P2-4 trace、P3-6 commandLimited、P2-5 C 文案、P2-1 LATE 门。
 

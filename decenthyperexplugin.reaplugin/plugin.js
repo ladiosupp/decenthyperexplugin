@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.26";
+  const PLUGIN_VERSION = "2.2.27";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -4842,7 +4842,7 @@ function renderRefillEditor(){
  const holding=Math.floor((Math.min(boost,Math.max(0.1,Number(plan.returnCommandMlS)||baseCommand))+1e-9)*16)/16;
  for(const x of refillControlFields){const input=box.querySelector('[data-refill-key="'+x[0]+'"]');if(bounded&&x[0]==='targetPercent'){input.value=r[x[0]];input.disabled=true;$('refillvalue-'+x[0]).textContent='100% · 仅上限';continue;}input.value=r[x[0]];input.disabled=curveBusy||!curveLatest.canApply;const text=x[0]==='cutoffPercent'?(r[x[0]]+' %'):x[2]==='s'?(r[x[0]]/1000).toFixed(2)+' s':r[x[0]]+'%'+(x[0]==='targetPercent'?' · '+boost.toFixed(4)+' ml/s':'');$('refillvalue-'+x[0]).textContent=text;if(x[0]==='cutoffPercent'){const floorPct=Math.round(r.cutoffPercent*.6);$('refillderived').textContent='派生：实测 ≥ '+floorPct+'% 目标（≈ '+(Number.isFinite(goal)?(goal*floorPct/100).toFixed(2):'—')+' g/s）+ 预测 ≥ 目标（'+(Number.isFinite(goal)?goal.toFixed(2):'—')+' g/s）才收回；下调会同时提前离开满灌（可能拖慢 90° 上升）、降低补水跳过阈值、降低实测噪声底';}}
  const floodMode=r.floodMode==="adaptive"?"adaptive":"fixed",floodFloor=Number((curveLatest.refillLimits.floodMaxMlS||[1/16,8,1/16])[0])||1/16;
- const floodInput=box.querySelector('[data-refill-key=""floodMaxMlS""]');
+ const floodInput=box.querySelector('[data-refill-key="floodMaxMlS"]');
  if(floodInput){floodInput.min=floodFloor;floodInput.max=8;floodInput.step=1/16;floodInput.value=r.floodMaxMlS;floodInput.disabled=curveBusy||!curveLatest.canApply||!bounded;}
  box.querySelectorAll('[data-refill-flood-mode]').forEach(q=>{q.checked=q.value===floodMode;q.disabled=curveBusy||!curveLatest.canApply||!bounded;});
  if($('refillvalue-floodMaxMlS'))$('refillvalue-floodMaxMlS').textContent=r.floodMaxMlS.toFixed(2)+' ml/s';

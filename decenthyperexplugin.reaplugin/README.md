@@ -1,3 +1,15 @@
+# HyperEx Pulse Filter 2.2.27
+
+**2.2.26 热修**：诊断页脚本里有一个双引号写坏的 DOM 选择器，真机上 `querySelector` 抛 `SyntaxError`，`loadCal()` 整段中断，STEP 1 / STEP 2 一直停在“检查 / 请等待”。2.2.26 不要用，直接上 2.2.27。
+
+- **根因**：`renderRefillEditor` 里查灌水上限滑杆写成 `box.querySelector('[data-refill-key=""floodMaxMlS""]')`（选择器里多了一对引号）。测试里的 mock `querySelector` 不看选择器字符串，所以 713 条全绿；真浏览器按 CSS 选择器解析直接抛异常。
+- **修法**：改成 `[data-refill-key="floodMaxMlS"]`，只此一处。
+- **回归**：新增一条静态扫描，把页面脚本里所有字面量 `querySelector('…')` / `querySelectorAll('…')` 抽出来，禁止选择器里出现双空引号，并断言灌水上限那行是合法选择器。以后这类“mock 看不见、真机才炸”的写法会被测试挡住。
+- **测试**：tests/verify_v02227.cjs **714/714**（v02226 的 713 条 + 1 条选择器扫描）。
+- 2.2.26 的灌水上限功能（固定 7 / 自适应）本身不变，只修这一行。
+
+## Previous release
+
 # HyperEx Pulse Filter 2.2.26
 
 bounded 补水新增「灌水上限」两挡：**固定**（默认 7.00 ml/s，曲线 S2 目标 → 8.00 可调）与 **自适应**（按 2 s 预测实时收，主要是压过冲）。只改灌水上限这一层，杯内/杯间/S3 与 bleedMs 未动。

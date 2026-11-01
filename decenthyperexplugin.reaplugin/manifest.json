@@ -3,7 +3,7 @@
   "author": "ladiosupp",
   "name": "HyperEx Pulse Filter",
   "description": "HyperEx three-stage controller with verified workflow-profile truth, persistent cross-version adaptive history with storage self-test, resistance-bucketed cross-shot gain memory, first-run RAW-scale flow calibration, automatic S1/S2/S3 next-shot adaptation, predictive live trim with physical write silence, S3 MID/earlyFactor/drift shaping, real-scale diagnostics, manual engineering tools, CSV export, full plugin settings, idempotent profile installation, and scoped DE1 flowMultiplier handling.",
-  "version": "2.2.20",
+  "version": "2.2.21",
   "apiVersion": 1,
   "permissions": [
     "log",
@@ -291,7 +291,7 @@
     "S2StartupAssist": {
       "type": "boolean",
       "label": "S2 起步响应补偿 · Startup assist",
-      "description": "主动泄压后提前补水；启动延时、目标比例（基准可选：基础泵倍率 / 目标折算）、称流速收回阈值（50–99%）、最长补水与渐进时间可在诊断页的下一杯可视化曲线编辑区用滑块设置并保存。默认0ms、160%、85%、4s、0.2s。目标折算是把S2目标杯流按上一杯实测尾段折算成泵指令，无合格实测时退回曲线基础指令。补水窗口按「帧确认 → onset → 杯流达到目标×阈值」计，收回收到驱动ACK即完成；节点与S2重叠区间在诊断页列出。机器指令仍受min(8ml/s,基准×1.6)、原限压90%、数据新鲜度、驱动ACK和预算保护；g/s经LUT/局部模型换算，不直接当ml/s。连续模式仍用旧短脉冲策略。 Configure refill in Next-shot curve editor; defaults0ms/160%/85%/4s/0.2s. Basis: base pump multiplier or target cup-flow (observed-tail model, profile-base fallback). Hardware-response accuracy is not guaranteed by editable software limits.",
+      "description": "主动泄压后提前补水；启动延时、目标比例（基准可选：基础泵倍率 / 目标折算）、收回 / 收口起点（50–99%，同时决定满灌结束点、补水跳过阈值与实测噪声底）、最长补水与渐进时间可在诊断页的下一杯可视化曲线编辑区用滑块设置并保存。默认0ms、160%、85%、4s、0.2s。目标折算是把S2目标杯流按上一杯实测尾段折算成泵指令，无合格实测时退回曲线基础指令。补水窗口按「帧确认 → onset → 预测杯流达到目标」计，收回收到驱动ACK即完成；节点与S2重叠区间在诊断页列出。机器指令仍受min(8ml/s,基准×1.6)、原限压90%、数据新鲜度、驱动ACK和预算保护；g/s经LUT/局部模型换算，不直接当ml/s。连续模式仍用旧短脉冲策略。 Configure refill in Next-shot curve editor; defaults0ms/160%/85%/4s/0.2s. Basis: base pump multiplier or target cup-flow (observed-tail model, profile-base fallback). Hardware-response accuracy is not guaranteed by editable software limits.",
       "default": true
     }
   },

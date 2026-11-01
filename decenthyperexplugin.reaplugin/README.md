@@ -1,3 +1,30 @@
+# HyperEx Pulse Filter 2.2.21
+
+第二轮复查补水段三项：P2-4 收回笔 trace 的 `previousMlS`、P3-6 bounded 的「指令上限」显示语义、P2-5 按用户 **2026-11-01 选定的 C**（cutoff 一值三用，控制律不动，只把联动讲清楚）。
+
+- **P2-4 previousMlS 记实际前一笔**：`dispatchS2Startup` 的每一笔写记录都用 `previousCommand`（真正在跑的前一笔）。收回笔原来记的是 `boosted`——`boundedRefillCommand` 在 return 时刻重算的值——导出里 bleed→return 会读成 1.375→3.875 的假跳变，后续重叠/斜率/「上一笔」分析全错。计划值另存 `plannedMlS`（只加在 refill 收回笔上）。新增 trace 断言：return 的 `previousMlS === bleedCommandMlS`。
+- **P3-6 安全包线不再报「指令上限」**：bounded 下 `boost = 8` 是设计值，旧判据 `commandLimited = boost>=8` 每杯恒真，「已触及指令上限」会被当成异常。改为 `floodAtSafetyEnvelope = bounded && boost>=commandFlowMax`；`commandLimited` 在 bounded 下为 false（legacy 分支仍读 `requested>ceiling`）。UI 安全行在 bounded 写「灌水在安全包线（设计值）」。安全逻辑未动。
+- **P2-5 方案 C（用户选定）**：`cutoffPercent` 保留**一值三用**，控制律一行未改：
+  - (a) `boundedRefillCommand` 的 shaping 起点：`predicted < target×X%` 时保持满灌，过了才 `platform + (target − predicted)/r`；
+  - (b) `dispatchS2Startup` 的 boost 跳过阈值：`reg.slope ≥ target×X%`（legacy 仍 `0.8×target`）；
+  - (c) `s2RefillReturnReason` 的实测噪声底：`observed ≥ target×X%×0.6`；收回真判据仍是 `predicted ≥ target`。
+- **UI / 文案按 C 改**：滑块从「收回噪声底（%）」改为「收回 / 收口起点（%）」/ `Cutoff / taper start (%)`；派生行写「实测 ≥ 51% 目标（≈ 2.55 g/s）+ 预测 ≥ 目标（5.00 g/s）才收回；下调会同时提前离开满灌（可能拖慢 90° 上升）、降低补水跳过阈值、降低实测噪声底」；预览行写「85% 同时决定收口起点、跳过阈值、实测噪声底」。补两条 `UI_LANGUAGE_PAIRS`，manifest 的 S2StartupAssist 说明同步。旧名「称流速收回阈值」不再出现。
+- **节点文案**：补水节点里原来的「杯流 85% x.xx s」改成「断流 x.xx s」——cutoff 触发的是断流笔，旧标签会让人以为秤流到过 85%。
+- **三档闭环（同一植物、r=1.29、同一目标 5 g/s）**：
+
+  | cutoff | rise 20→80% | 峰值过冲（秤流） | 末 2 s 平台偏差 | 写序列 |
+  |---|---|---|---|---|
+  | 70% | 600 ms | **+33.2%** | −13.9% | boost 8 → bleed 1.375 → return 3.875 |
+  | 85% | 600 ms | **+33.2%** | −13.9% | 同上 |
+  | 99% | 600 ms | **+45.8%** | −19.2% | 同上 |
+
+  读数说明：这台植物上 70 与 85 的 shaping 起点（3.5 vs 4.25 g/s）都没等到第一笔 trim（boost 后 500 ms 的节拍内 predicted 已到 5，先触发收回），所以两档曲线完全相同；99 的差别来自实测噪声底（0.6×4.95 = 2.97 g/s）把收回推迟一 tick，过冲多 12.6 点。方向与幅度就是 C 的代价：cutoff 越高越晚收、过冲越大；越低越早离开满灌、上升段可能变慢。
+- **技能文档**：§22.5 / §22.11 的 cutoff 表述改成 C 口径（三用 + 「真收回看 predicted ≥ target」保留），删掉「cutoff 只当观测噪声底」的说法。
+- **测试**：tests/verify_v02221.cjs **698/698**（v02220 的 692 条全部保留，新增 6 条：P2-4 trace、P3-6、噪声底随档变化、三档闭环扫描、文案三用、三用联动）。v02220 原样保留。
+- **没做**：没有解耦 shaping 起点 / 跳过阈值（方案 A/B），没有新增 `trimAtFraction`，没有改 `bleedMs`、杯内 `liveTrimTick`、增益记忆、S3 形状、桶几何或 2.2.19/2.2.20 的任何代码。未 commit / tag / push。
+
+## Previous release
+
 # HyperEx Pulse Filter 2.2.20
 
 第二轮复查退回的 P2-3：没有合格观测的完成杯不再改桶几何。

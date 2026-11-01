@@ -1,3 +1,14 @@
+# HyperEx Pulse Filter 2.2.18
+
+P1 修复：补水 boost ACK 清计时器、bounded 默认 cup-target、当前杯不重复计入稳态增益。
+
+- **P1-1**：boost 的 2 s ACK 计时器在 ACK 到达时清掉；后续 trim 未 ACK 不会再让整杯 abort。新增回归。
+- **P1-2**：bounded 模式在未保存/缺 basis 时默认 cup-target；已显式保存 pump-command 的存档保留。曲线编辑器“恢复默认”也按 bounded 返回 cup-target。
+- **P1-3**：stageGainEstimate 跳过 persistent history 里与当前 runId 相同的行，避免当前杯重复计数；未按模式过滤。
+- **测试**：tests/verify_v02218.cjs **686/686**（v02217 的 682 + 4 条 P1 回归）。
+
+## Previous release
+
 # HyperEx Pulse Filter 2.2.17
 
 cut 11 · 诊断页文案与补水折叠：cutoff 标签按新语义改名为「收回噪声底（%）」，S2 补水从曲线编辑器里独立成一折并带状态行，学习窗口措辞落到补水学习行，`controlOutputQuality` 增补窗口字段。控制律一行没动。

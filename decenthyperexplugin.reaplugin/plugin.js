@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.17";
+  const PLUGIN_VERSION = "2.2.18";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -2499,7 +2499,7 @@ function createPlugin(host) {
       plannedBoostMlS:plan.boostCommandMlS,plannedHoldingMlS:plan.returnCommandMlS==null?plan.baseCommandMlS:plan.returnCommandMlS,executedBoostMlS:write?write.commandMlS:null,
       execution:run.liveFlowTrim&&run.liveFlowTrim.startupExecution||null,timeline:s2RefillTimeline(run)};
   }
-  function currentS2RefillSettings(){let out;try{out=validatedS2RefillSettings(state.s2RefillSettings);}catch(_){out=validatedS2RefillSettings(null);}if(state.cfg&&state.cfg.s2RefillBoundedModel){out={...out};out.targetPercent=100;}
+  function currentS2RefillSettings(){let out;try{out=validatedS2RefillSettings(state.s2RefillSettings);}catch(_){out=validatedS2RefillSettings(null);}if(state.cfg&&state.cfg.s2RefillBoundedModel){out={...out};out.targetPercent=100;if(!state.s2RefillSettings||!S2_REFILL_BASES.includes(state.s2RefillSettings.basis))out.basis="cup-target";}
     // §22.11: cutoffPercent is a real tuning knob again. The old value-based
     // 85->95 migration could not tell a legacy 85 from a deliberate one, so the
     // documented "overshoot -> lower the cutoff" procedure silently reverted.
@@ -3550,7 +3550,7 @@ function createPlugin(host) {
     const addSingle=e=>{if(!e)return;const cmd=Number(e.command),m=Number(e.measured);if(cmd>0&&m>0)rows.push({k:m/cmd,cmd,m,runId:e.runId});};
     const addS3=e=>{if(!e)return;if(Array.isArray(e.source)&&e.source.length){let ws=0,cs=0,ms=0;for(const f of e.source){const w=Math.max(1,Number(f.seconds)||1),c=Number(f.command),m=Number(f.measured);if(c>0&&m>0){ws+=w;cs+=c*w;ms+=m*w;}}if(ws>0&&cs>0&&ms>0)rows.push({k:(ms/ws)/(cs/ws),cmd:cs/ws,m:ms/ws,runId:e.runId});}else addSingle(e);};
     const saved=(state.persistentHistoryFile&&state.persistentHistoryFile.shots||[]).slice(-8);
-    for(const s of saved)stage==="s3"?addS3(s.evidence&&s.evidence.s3):addSingle(s.evidence&&s.evidence[stage]);
+    for(const s of saved){if(run&&s&&s.runId===run.runId)continue;stage==="s3"?addS3(s.evidence&&s.evidence.s3):addSingle(s.evidence&&s.evidence[stage]);}
     stage==="s3"?addS3(current):addSingle(current);
     if(rows.length<2)return {samples:rows.length,k:null};
     const ks=rows.map(x=>x.k).sort((a,b)=>a-b),k=median(ks);
@@ -6067,7 +6067,8 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
   function curveEditorSnapshot() {
     if(!state.cfg)return null;
     const c=commandFlowSummary(),q=c.s3Shape||{},v={stage1:c.stage1CommandMlS,stage2:c.stage2CommandMlS,early:q.enabled?q.earlyCommand:c.stage3FlatCommandMlS,mid:q.enabled?q.midCommand:c.stage3FlatCommandMlS,late:q.enabled?q.lateCommand:c.stage3FlatCommandMlS,earlySeconds:q.enabled?q.earlySeconds:8,midSeconds:q.enabled?q.midSeconds:14};
-    return {revision:curveEditorRevision(),values:v,shaped:!!q.enabled,refill:currentS2RefillSettings(),refillBoundedModel:state.cfg.s2RefillBoundedModel===true,refillLimits:S2_REFILL_LIMITS,refillDefaults:validatedS2RefillSettings(null),
+    const refillDefaults=validatedS2RefillSettings(null);if(state.cfg.s2RefillBoundedModel===true)refillDefaults.basis="cup-target";
+    return {revision:curveEditorRevision(),values:v,shaped:!!q.enabled,refill:currentS2RefillSettings(),refillBoundedModel:state.cfg.s2RefillBoundedModel===true,refillLimits:S2_REFILL_LIMITS,refillDefaults,
       refillPreview:stage2StartupPlan(),refillActive:activeReleaseEnabled(state.cfg)&&state.cfg.liveFlowTrimTest&&state.cfg.s2StartupAssist,refillLoadWarning:state.s2RefillLoadWarning,refillPrevious:state.s2RefillPrevious?JSON.parse(JSON.stringify(state.s2RefillPrevious)):null,refillLastShot:refillLastShotSnapshot(),
       canApply:state.s2RefillStorageLoaded&&state.phase==="idle"&&!state.calibrationActive&&!state.curveApplyBusy&&!state.runtimeProfileRepairBusy&&!(state.autoApplyLastStatus&&state.autoApplyLastStatus.status==="applying")&&state.workflowTitle===state.cfg.profileTitle&&state.runtimeProfileVerified&&state.calibrationMapUsable,
       source:state.testOverrides&&testOverrideStatus().valid&&!testOverrideStatus().baselinePrior?state.testOverrides.manualCurveSource||null:null,
@@ -7366,7 +7367,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         try {
           const x=typeof event.data==="string"?JSON.parse(event.data):event.data;
           if(x.type==="response"&&x.operation==="write"&&x.characteristicUUID==="A010"&&!t.pending.ack){
-            const pend=t.pending;pend.ack=true;t.report.acks++;
+            const pend=t.pending;pend.ack=true;if(pend.startupAction==="boost"&&t.startupAckTimer){clearTimeout(t.startupAckTimer);t.startupAckTimer=null;}t.report.acks++;
             t.lastResponseMs=Date.now()-pend.at;liveTrimRecord("driver-ack",{frame:pend.frame,latencyMs:Date.now()-pend.at});
             // The refill is complete when the driver acknowledges the return
             // write: the pump command is back at the profile base. Waiting for a
@@ -8700,7 +8701,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
           try{const parsed=value?parseStoredJson(value):null;if(value&&!parsed)throw new Error("invalid stored JSON");const restored=value?validatedS2RefillSettings(parsed):null;
             // v1 stored a CUP-target percentage. Migrate only that percentage;
             // preserve the user's cutoff, timing, curve commands and S3 shape.
-            if(restored&&parsed.basis===undefined){restored.targetPercent=160;state.s2RefillLoadWarning="S2 refill migrated to160% of base pump flow; timing and noise floor retained";}
+            if(restored&&parsed.basis===undefined){const boundedRefill=!!(state.cfg&&state.cfg.s2RefillBoundedModel);restored.targetPercent=160;if(boundedRefill)restored.basis="cup-target";state.s2RefillLoadWarning=boundedRefill?"S2 refill migrated to cup-target; timing and noise floor retained":"S2 refill migrated to160% of base pump flow; timing and noise floor retained";}
             else state.s2RefillLoadWarning=null;
             state.s2RefillSettings=restored;state.s2RefillPrevious=validatedRefillPrevious(parsed&&parsed.previousChange);}
           catch(_){state.s2RefillSettings=null;state.s2RefillPrevious=null;state.s2RefillLoadWarning="Invalid saved S2 refill settings; defaults restored";}

@@ -15,11 +15,11 @@
    - 新文案（cut 10 提案）：「收回观测底（%）」。英文同步，别只改中文。
    - 落点：`UI_LANGUAGE_PAIRS` 里的 `["Cup-flow cutoff", "称流速收回阈值"]` 等条目，以及补水编辑器的渲染函数（`renderRefillEditor` 的标签/提示）。
 
-2. **controlOutputQuality 的 basis 文案**
-   - 旧：`final60% of phase`（对 S2 已不准确）。
-   - 现在有两套窗：测量窗 800 ms（`s2LearningWindow` 的 consumer 路径）与链路窗 1500 ms（`chainSettleMs`）。
-   - 新文案要能区分：「末 800 ms 测量窗 / 链路 1500 ms」，取不到窗口时说明原因。
-   - 落点：`UI_LANGUAGE_PAIRS` 与 `controlOutputQuality` 返回的 basis 字符串；翻译覆盖测试会断言这些条目，改完要同步测试。
+2. **controlOutputQuality 的 basis 文案 —— 已收口：保留导出兼容字段**
+   - 结论：`basis` **不改**。它是导出字段，回放脚本与台账在读（`learningEvidence.stage2.outputQuality.basis`）；2.2.17 的 ACCEPT §4.9 与 README 都写明「原有 basis 字符串保持不变」。
+   - 窗口说明走 `basisDetail`（2.2.17 加的 `after refill settle 800 ms; final 60% regression`）与补水学习行（「排除补水 800 ms（链路 1500 ms）后 · 末 60% 回归」）。页面若需要显示窗口说明，用 `basisDetail` 或学习行，不要动 `basis`。
+   - 页面核对（2026-11-01）：`ACTUAL RAW OUTPUT` 那行只显示 phase error / final60% mean / error / ripple / RMSE / overshoot，**不显示 basis**；`basis` 只进导出 JSON。
+   - 落点：无新增代码改动（显示侧在 2.2.17 已完成）。
 
 ## 交付与流程
 

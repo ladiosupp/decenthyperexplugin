@@ -706,7 +706,7 @@ F1–F4 定口径后再排入。所有改动都在插件侧，需走 §15 发版
 
 **未做 / 未验（cut 10 收口时的全部剩余）**
 
-1. **`controlOutputQuality` 的 basis 文案**（代码项，归 2.2.17）：现在写 `actual RAW g/s; rolling regressions over final60% of phase, separate from normalized learning model`，加了 800 / 1500 ms 学习窗后对 S2 不准确，也分不清测量窗与链路窗。建议改成能区分两者的说法（例如 `actual RAW g/s; rolling regressions over the measured window (S2: 800 ms after refill complete, chain evidence: 1500 ms); tail = final 60% of that window`）。它出现在 plugin.js 两处（`UI_LANGUAGE_PAIRS` 与 `controlOutputQuality`），并有测试与翻译覆盖断言，**必须走代码发版流程**，cut 10 只登记口径。
+1. **`controlOutputQuality` 的 basis 文案 —— 已收口（2.2.17），`basis` 保留为导出兼容字段**：回放脚本与台账在读 `learningEvidence.stage2.outputQuality.basis`，所以 `basis` 保持 `actual RAW g/s; rolling regressions over final60% of phase, separate from normalized learning model` 不变；窗口说明改由 2.2.17 新增的 `basisDetail`（`after refill settle 800 ms; final 60% regression`）与补水学习行承担。页面 `ACTUAL RAW OUTPUT` 不显示 basis，无需改显示层。原先「改成能区分两窗的说法」的建议作废。
 2. 其余全部是真机验证类：≥5 ml/s 稳态 r 标定；补水峰值过冲（闭环 +33.2%，绊线 ≤40%）与 `cutoffPercent` / `bleedMs` 调参；分桶半径 0.08 的建桶速度；同一条件下一杯真的 HOLD；S3 最新杯缺 `evidence.s3`；2.2.8 之后 S2 平台在真机上是否离开 −21…−29%。
 
 **本节与早期表格的差异**：旧表把 R-5 / R-7 / T-11 记成「未动」、把 R-1 / R-3 / Q-1 记成「部分已改」，是 2.2.7 当时的快照；2.2.8–2.2.16 已全部收口，以本表为准。

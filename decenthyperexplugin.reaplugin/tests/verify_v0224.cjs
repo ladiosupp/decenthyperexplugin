@@ -12,7 +12,7 @@ function setup(options={}) {
  let clock=options.now||Date.now();class TestDate extends Date {static now(){return clock;}}
  host.transport={open:async(req)=>{calls.push({transport:'open',req});if(mock.openRaw)return mock.openRaw();return {handle:'raw-test'};},onEvent(handle,fn){mock.rawListener=fn;},send:async(handle,payload)=>{calls.push({transport:'send',handle,payload});if(mock.sendRaw)return mock.sendRaw();},close:async(handle)=>{calls.push({transport:'close',handle});}};
  const context=vm.createContext({console,Date:TestDate,Math,JSON,Map,Promise,setTimeout(fn,ms){const id=++timerId;timers.set(id,{fn,ms});return id;},clearTimeout(id){timers.delete(id);},fetch:async()=>{throw Error('unexpected fetch');}});
- const injection=`globalThis.hooks={stage2CupOnset,phaseRawSamples,diagnosticRawRegression,diagnosticPhaseSummary,validatedS2RefillSettings,currentS2RefillSettings,s3CommandHistoryAudit,projectS3Commands,kickS2Refill,s2RefillFlowEstimate,s2RefillReturnReason,completeS2Startup,stage2LegacyStartupPlan,guardedSingleSkip,scheduleRestartSkip,controlOutputQuality,finalizeDiagnostics,learningAdmission,utf8ByteLength,keepCoffeeQualification,diagnosticRunCommandSnapshot,normalizeLearningLevel,learningPolicy,scalarLearningSuggestion,stage3SingleSuggestion,stage3ReferenceEvidence,stageCommandOrigin,historyPersistenceAudit,compactLiveHistory,s2NearbyEvidence,activeReleaseEnabled,overrideStorageKey,liveTrimPhaseAllowed,beginContinuousStage2,stage1LiveLearning,onScaleSnapshot,beginDump,finishSequence,storageRead,storageWrite,stage2StartupMetrics,stage2StartupPlan,dispatchS2Startup,assessRunLearningIntegrity,historyLearningStatus,learningRunAllowed,historyEvidenceAllowed,learningHistoryPayload,setLearningHistoryReview,matchingAdaptiveEvidenceSearch,createUiTranslator,translateUiText,UI_LANGUAGE_PAIRS,curveEditorRevision,curveEditorSnapshot,applyCurveEditorDraft,saveS2RefillSettings,manualCurveBlocksRun,state,loadConfig,profileObject,calibrationProfileObject,stripRealFlowText,recomputeCalibrationUsability,handleWorkflowUpdated,handleStateUpdate,
+ const injection=`globalThis.hooks={stage2CupOnset,phaseRawSamples,diagnosticRawRegression,diagnosticPhaseSummary,validatedS2RefillSettings,currentS2RefillSettings,s3CommandHistoryAudit,projectS3Commands,kickS2Refill,s2RefillFlowEstimate,s2RefillReturnReason,completeS2Startup,stage2LegacyStartupPlan,guardedSingleSkip,scheduleRestartSkip,controlOutputQuality,finalizeDiagnostics,learningAdmission,utf8ByteLength,keepCoffeeQualification,diagnosticRunCommandSnapshot,normalizeLearningLevel,learningPolicy,scalarLearningSuggestion,stage3SingleSuggestion,stage3ReferenceEvidence,stageCommandOrigin,historyPersistenceAudit,compactLiveHistory,s2NearbyEvidence,activeReleaseEnabled,overrideStorageKey,liveTrimPhaseAllowed,beginContinuousStage2,stage1LiveLearning,onScaleSnapshot,beginDump,finishSequence,storageRead,storageWrite,stage2StartupMetrics,stage2StartupPlan,dispatchS2Startup,assessRunLearningIntegrity,historyLearningStatus,learningRunAllowed,historyEvidenceAllowed,learningHistoryPayload,setLearningHistoryReview,matchingAdaptiveEvidenceSearch,createUiTranslator,translateUiText,UI_LANGUAGE_PAIRS,curveEditorRevision,curveEditorSnapshot,applyCurveEditorDraft,saveS2RefillSettings,manualCurveBlocksRun,state,loadConfig,profileObject,calibrationProfileObject,stripRealFlowText,trimHistoryFullRecords,recomputeCalibrationUsability,handleWorkflowUpdated,handleStateUpdate,
  verifyAndRepairSelectedHyperExProfile,syncHyperExProfile,runtimeProfileTruthPayload,adaptiveHistoryFingerprint,adaptiveHistoryFingerprintKey,gainMemoryQualityGuard,driftShapeSuggestion,s3ShapeStatus,liveTrimControlCenter,boundedRefillCommand,
  numericLearningFingerprintKey,trustedAdaptiveRun,restoreAdaptiveHistoryFromPersistentFile,previousMatchingAdaptiveEvidence,nextShotAdaptiveSuggestion,rememberAdaptiveEvidence,
  compactPersistentShotRecord,persistHistoryFile,appendPersistentHistoryShot,startPersistentHistoryProbe,setPersistentHistoryUnavailable,
@@ -86,7 +86,7 @@ test('old 1.48 truth and interrupted shots cannot suggest numeric changes',()=>{
 test('incompatible and legacy rows excluded from persistent restore',()=>{const e=setup();e.s.persistentHistoryAvailable=true;const valid=historyRow(e);const legacy=copy(valid);legacy.runId='legacy';legacy.profileTruthSchema=undefined;const other=copy(valid);other.runId='other';other.fingerprint.actualFlowMultiplier=1.1;e.s.persistentHistoryFile={shots:[legacy,other,valid]};e.h.restoreAdaptiveHistoryFromPersistentFile();assert.deepEqual(copy(e.s.adaptiveHistory.map(x=>x.runId)),['old']);});
 test('SESSION ONLY never restores disk evidence and preserves session evidence',()=>{const e=setup();const row=historyRow(e);e.s.persistentHistoryAvailable=false;e.s.persistentHistoryFile={shots:[row]};const session=copy(row.evidence);session.runId='session';e.s.adaptiveHistory=[session];e.h.restoreAdaptiveHistoryFromPersistentFile();assert.deepEqual(copy(e.s.adaptiveHistory.map(x=>x.runId)),['session']);});
 test('storage failure removes restored evidence but keeps session rows',()=>{const e=setup();const row=historyRow(e);e.s.persistentHistoryAvailable=true;e.s.persistentHistoryFile={shots:[row]};e.h.restoreAdaptiveHistoryFromPersistentFile();const session=copy(row.evidence);session.runId='session';e.s.adaptiveHistory.push(session);e.h.setPersistentHistoryUnavailable('test failure');assert.deepEqual(copy(e.s.adaptiveHistory.map(x=>x.runId)),['session']);});
-test('probe arriving before initial history read cannot overwrite disk',()=>{const e=setup();e.h.startPersistentHistoryProbe();e.deliverRead();assert.equal(e.s.storageProbeVerified,true);assert.equal(e.s.persistentHistoryAvailable,null);assert.equal(e.storageCalls.filter(x=>x.type==='write'&&x.key==='adaptiveHistoryFileV2').length,0);const row=historyRow(e);e.event('adaptiveHistoryFileV2',JSON.stringify({schema:2,shots:[row]}));assert.equal(e.s.persistentHistoryAvailable,null);e.flushReads();assert.equal(e.s.persistentHistoryAvailable,true);assert.equal(e.s.persistentHistoryFile.shots[0].runId,'old');});
+test('probe arriving before initial history read cannot overwrite disk',()=>{const e=setup();e.h.startPersistentHistoryProbe();e.deliverRead();assert.equal(e.s.storageProbeVerified,true);assert.equal(e.s.persistentHistoryAvailable,null);assert.equal(e.storageCalls.filter(x=>x.type==='write'&&x.key==='adaptiveHistoryFileV2').length,0);const row=historyRow(e);e.event('adaptiveHistoryFileV2',JSON.stringify({schema:2,shots:[row]}));assert.equal(e.s.persistentHistoryAvailable,null);assert(e.s.historyTrimWriteTimer,'first write deferred to idle');e.s.phase='idle';e.run(e.s.historyTrimWriteTimer);e.flushReads();assert.equal(e.s.persistentHistoryAvailable,true);assert.equal(e.s.persistentHistoryFile.shots[0].runId,'old');});
 test('initial history read arriving before probe is also safe',()=>{const e=setup();e.event('adaptiveHistoryFileV2',JSON.stringify({schema:2,shots:[historyRow(e)]}));assert.equal(e.storageCalls.filter(x=>x.type==='write'&&x.key==='adaptiveHistoryFileV2').length,0);e.h.startPersistentHistoryProbe();e.flushReads();assert.equal(e.s.persistentHistoryAvailable,true);});
 test('history file mismatch reports SESSION ONLY despite successful probe',()=>{const e=setup();e.event('adaptiveHistoryFileV2',null);e.h.startPersistentHistoryProbe();e.deliverRead();e.pendingReads[0].value='{}';e.deliverRead();assert.equal(e.s.persistentHistoryAvailable,false);assert.match(e.s.persistentHistoryStatus,/readback mismatch/);});
 test('history file timeout reports SESSION ONLY',()=>{const e=setup();e.event('adaptiveHistoryFileV2',null);e.h.startPersistentHistoryProbe();e.deliverRead();e.run(e.s.historyWriteTimer);assert.equal(e.s.persistentHistoryAvailable,false);assert.match(e.s.persistentHistoryStatus,/timed out/);});
@@ -1579,6 +1579,9 @@ function setStage2CupSlope(r,flow,start=8,base=10){
  const rows=r.rawScaleSamples.filter(x=>x.phase==='stage2').sort((a,b)=>Number(a.tMs)-Number(b.tMs));
  for(const x of rows)x.weightG=base+(Number(x.tMs)/1000-start)*flow;
 }
+function setStage2Targets(r,value){
+ for(const x of r.samples)if(x.phase==='stage2')x.targetFlowMlS=value;
+}
 function setStage2Regime(r,pressure,flow){
  for(const x of r.samples.filter(x=>x.phase==='stage2')){x.pressureBar=pressure;x.machineFlowMlS=flow;}
 }
@@ -1597,13 +1600,13 @@ test('gain memory keeps low and high resistance in separate buckets with hystere
  const low2=controlledRun(e,'gm-c');setStage2Regime(low2,.55,2.507);const third=e.h.updateGainMemoryFromRun(low2,{});assert.equal(third.bucketCreated,false);assert.equal(third.bucketId,first.bucketId);
 });
 test('gain memory uses cup flow per actual command so a wrong base does not pollute r',()=>{
- const e=setup(),r=controlledRun(e,'gm-wrong');r.config.stage2CommandMlS=5.88;setStage2CupSlope(r,7.2);
- const gm=e.h.updateGainMemoryFromRun(r,{});assert.equal(gm.stages.s2.status,'updated');assert(Math.abs(gm.stages.s2.observedR-7.2/5.88)<.1);
- const q=e.h.gainMemorySuggestion(r,'s2');assert(q);assert(q.commandMlS<5.88);assert(Math.abs(q.commandMlS-5/(7.2/5.88))<.2);
+ const e=setup(),r=controlledRun(e,'gm-wrong');r.config.stage2CommandMlS=5.88;setStage2CupSlope(r,7.2);setStage2Targets(r,3);
+ const gm=e.h.updateGainMemoryFromRun(r,{});assert.equal(gm.stages.s2.status,'updated');assert(Math.abs(gm.stages.s2.observedR-7.2/3)<.1);
+ const q=e.h.gainMemorySuggestion(r,'s2');assert(q);assert(q.commandMlS<5.88);assert(Math.abs(q.commandMlS-5/(7.2/3))<.2);
 });
 test('a large gain deviation lowers confidence and uses the current-shot local estimate',()=>{
  const e=setup(),a=controlledRun(e,'gm-d1');e.h.updateGainMemoryFromRun(a,{});
- const b=controlledRun(e,'gm-d2');setStage2CupSlope(b,6.0);const gm=e.h.updateGainMemoryFromRun(b,{});
+ const b=controlledRun(e,'gm-d2');setStage2CupSlope(b,6.0);setStage2Targets(b,2.507);const gm=e.h.updateGainMemoryFromRun(b,{});
  assert(gm.stages.s2.deviationPct>15);assert.equal(gm.stages.s2.alpha,.55);
  const q=e.h.gainMemorySuggestion(b,'s2');assert(q);assert.equal(q.local,true);assert(Math.abs(q.r-6/2.507)<.05);assert(q.commandMlS<2.6);
 });
@@ -2021,4 +2024,22 @@ test('flow strip pushes the skin twice a second while S2 and S3 run',()=>{
  const src=require('fs').readFileSync(require('path').join(__dirname,'..','plugin.js'),'utf8');
  assert(src.includes('state.flowStripTimer = setTimeout(tick, 500);'));
  assert(!src.includes('state.flowStripTimer = setTimeout(tick, 1000);'));
+});
+
+test('history keeps full sampling only for the newest shots',()=>{
+ const e=setup();
+ const mk=id=>({runId:id,fullRecord:{samples:[{a:1}],rawScaleSamples:[{b:1}],events:[{c:1}],liveFlowTrim:{trace:[{d:1}]}}});
+ const file={schema:2,shots:Array.from({length:14},(_,i)=>mk('r'+i))};
+ e.h.trimHistoryFullRecords(file);
+ assert.equal(file.shots[13].fullRecord.samples.length,1,'newest keeps samples');
+ assert.equal(file.shots[13].fullRecord.events.length,1,'newest keeps events');
+ assert.equal(file.shots[9].fullRecord.samples,null,'fifth oldest drops samples');
+ assert.equal(file.shots[9].fullRecord.events.length,1,'fifth keeps events');
+ assert.equal(file.shots[0].fullRecord.events,null,'oldest drops events');
+ assert.equal(file.shots[0].fullRecord.liveFlowTrim.trace.length,0,'oldest drops trace');
+});
+test('history readback compares the stored write token instead of canonicalising the file',()=>{
+ const src=require('fs').readFileSync(require('path').join(__dirname,'..','plugin.js'),'utf8');
+ assert(src.includes('parsed.writeToken !== state.pendingHistoryWriteToken'));
+ assert(!src.includes('adaptiveHistoryFingerprintKey(JSON.parse(state.pendingHistoryWrite))'),'no second full parse');
 });

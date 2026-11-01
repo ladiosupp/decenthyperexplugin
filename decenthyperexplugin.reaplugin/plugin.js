@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.4";
+  const PLUGIN_VERSION = "2.2.5";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -94,6 +94,11 @@ function createPlugin(host) {
   const STORAGE_HISTORY_FILE = "adaptiveHistoryFileV2";
   const STORAGE_HISTORY_PROBE = "adaptiveHistoryStorageProbeV1";
   const HISTORY_FILE_MAX_SHOTS = 30;
+  // Full per-sample records are the whole size of the history file (a 100 s
+  // shot is ~0.6 MB). Only the newest shots keep them; older shots keep the
+  // summary, evidence and (for a while) the live-trim trace.
+  const HISTORY_FULL_SHOTS = 4;
+  const HISTORY_TRACE_SHOTS = 10;
   const STORAGE_PRESETS = "hyperExPresetsV1";
   const STORAGE_LEGACY_PROFILE = "legacyCalibrationProfileHiddenV1";
   const STORAGE_PRESET_PENDING = "hyperExPresetPendingV1";
@@ -948,6 +953,20 @@ function createPlugin(host) {
     }
     return bucket;
   }
+  // The S2 profile command is regularly overridden by the live-trim writes,
+  // so the gain must divide by what the pump actually followed. The machine
+  // echoes that as targetFlowMlS; take the median over the S2 tail.
+  function stage2EffectiveCommand(run) {
+    const rows=(run&&Array.isArray(run.samples)?run.samples:[]).filter(x=>x&&x.phase==="stage2"&&x.machineTelemetryValid===true&&Number.isFinite(Number(x.targetFlowMlS))&&Number(x.targetFlowMlS)>0);
+    const raw=phaseRawSamples(run,"stage2");
+    if(rows.length<6||raw.length<6)return null;
+    const t0=Number(raw[0].tMs),t1=Number(raw[raw.length-1].tMs);
+    if(!Number.isFinite(t0)||!Number.isFinite(t1)||t1<=t0)return null;
+    const tail=rows.filter(x=>Number(x.tMs)>=t0+(t1-t0)*0.6).map(x=>Number(x.targetFlowMlS));
+    if(tail.length<4)return null;
+    return median(tail);
+  }
+
   function gainStageObservation(run,evidence,stage) {
     const cfg=run&&run.config||{};
     if(stage==="s2"){
@@ -955,7 +974,9 @@ function createPlugin(host) {
       if(evidence&&evidence.liveTrimChain&&evidence.liveTrimChain.usable===false)return null;
       const quality=controlOutputQuality(run,"stage2");
       if(!quality||quality.available!==true||!(Number(quality.tailMeanGS)>0)||Number(quality.tailRippleCVPct)>20)return null;
-      const command=Number(cfg.stage2CommandMlS),measured=Number(quality.tailMeanGS);
+      const measured=Number(quality.tailMeanGS);
+      const effective=stage2EffectiveCommand(run);
+      const command=Number.isFinite(effective)&&effective>0?effective:Number(cfg.stage2CommandMlS);
       if(!(command>0&&measured>0))return null;
       const r=measured/command;
       if(!(r>=.2&&r<=3))return null;
@@ -1040,9 +1061,17 @@ function createPlugin(host) {
     const memory=gainMemoryState(false);
     if(!memory)return null;
     const regime=gainRegimeForRun(run);
-    if(!regime)return null;
-    let bucket=run&&run.gainMemoryBucketId?memory.buckets.find(x=>x.id===run.gainMemoryBucketId):null;
-    if(!bucket)bucket=selectGainBucket(memory,regime.signature).bucket;
+    let bucket=null;
+    if(regime){
+      bucket=run&&run.gainMemoryBucketId?memory.buckets.find(x=>x.id===run.gainMemoryBucketId):null;
+      if(!bucket)bucket=selectGainBucket(memory,regime.signature).bucket;
+    }else{
+      // No signature yet (fresh plugin load, or the plan is built before this
+      // shot has any S2 sample). Use the last brewed bucket instead of dropping
+      // to the empty-basket LUT; the in-shot deviation check still takes over.
+      bucket=memory.lastBucketId?memory.buckets.find(x=>x.id===memory.lastBucketId):null;
+    }
+    if(!bucket)return null;
     const stateRow=bucket&&bucket.stages&&bucket.stages[stage];
     if(!stateRow||!(Number(stateRow.r)>0))return null;
     const cfg=run&&run.config||{};
@@ -1055,7 +1084,7 @@ function createPlugin(host) {
     const ceiling=Math.min(LIMITS.commandFlowMax,Number.isFinite(lut)&&lut>0?lut*2:LIMITS.commandFlowMax);
     const command=Math.max(LIMITS.commandFlowMin,Math.min(ceiling,target/r));
     return {stage,bucketId:bucket.id,center:bucket.center,radius:bucket.radius,bucketSamples:stateRow.n,
-      r:round(r,4),smoothedR:round(stateRow.r,4),observedR:stateRow.lastObservedR,
+      stale:!regime,r:round(r,4),smoothedR:round(stateRow.r,4),observedR:stateRow.lastObservedR,
       deviationPct:stateRow.lastDeviation==null?null:round(stateRow.lastDeviation*100,1),local,
       confidence:gainConfidence(stateRow),targetGS:round(target,3),lutCommandMlS:Number.isFinite(lut)?round(lut,3):null,
       commandMlS:round(command,3),drift:stateRow.drift==null?null:round(stateRow.drift,4),
@@ -1242,6 +1271,18 @@ function createPlugin(host) {
     return {...report,trace:(report.trace||[]).filter(x=>x.kind!=="check"),checkReasons:reasons,historyTraceFormat:"actions-plus-check-counts-v1"};
   }
 
+
+  function trimHistoryFullRecords(file) {
+    const shots=file&&Array.isArray(file.shots)?file.shots:[];
+    for(let i=0;i<shots.length;i++){
+      const rec=shots[i],age=shots.length-1-i;
+      if(!rec||!rec.fullRecord)continue;
+      if(age<HISTORY_FULL_SHOTS)continue;
+      rec.fullRecord.samples=null;rec.fullRecord.rawScaleSamples=null;
+      if(age>=HISTORY_TRACE_SHOTS){if(rec.fullRecord.liveFlowTrim)rec.fullRecord.liveFlowTrim.trace=[];rec.fullRecord.events=null;}
+    }
+    return file;
+  }
 
   function fullShotRecord(run) {
     if (!run) return null;
@@ -2893,6 +2934,20 @@ function createPlugin(host) {
     };
   }
 
+  // Rewriting a trimmed history file is a multi-megabyte write; do it while
+  // the machine is idle instead of during startup or a shot.
+  function scheduleHistoryTrimWrite() {
+    clearTimer("historyTrimWriteTimer");
+    let tries=0;
+    const attempt=()=>{
+      state.historyTrimWriteTimer=null;
+      if(!state.persistentHistoryLoaded||!state.persistentHistoryFile)return;
+      if(state.phase!=="idle"||state.calibrationActive){if(++tries<12)state.historyTrimWriteTimer=setTimeout(attempt,5000);return;}
+      persistHistoryFile();
+    };
+    state.historyTrimWriteTimer=setTimeout(attempt,3000);
+  }
+
   function persistHistoryFile() {
     // Never overwrite disk before the initial read, and serialize full-file writes.
     if (!state.persistentHistoryLoaded || !state.storageProbeVerified || state.persistentHistoryAvailable === false || !state.persistentHistoryFile) return false;
@@ -2900,6 +2955,7 @@ function createPlugin(host) {
     state.persistentHistoryFile.writerVersion = PLUGIN_VERSION;
     state.persistentHistoryFile.updatedAt = new Date().toISOString();
     state.persistentHistoryFile.writeToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    state.pendingHistoryWriteToken = state.persistentHistoryFile.writeToken;
     state.pendingHistoryWrite = JSON.stringify(state.persistentHistoryFile);
     state.historyWriteBytes=utf8ByteLength(state.pendingHistoryWrite);
     state.historyWriteDirty = false;
@@ -2916,6 +2972,13 @@ function createPlugin(host) {
     const row = Array.isArray(rows) && rows.find(x => x && x.runId === run.runId);
     if (!row) return;
     row.nextShotApplied = { at:new Date().toISOString(), commandFlows, profileTruth:runtimeProfileTruthPayload() };
+    // The shot record was just written; merge this small update into one later
+    // write instead of rewriting the whole history file twice at shot end.
+    if (state.pendingHistoryWrite || (state.historyJustPersistedRunId === run.runId && Date.now() - (state.historyJustPersistedAt || 0) < 3000)) {
+      state.historyWriteDirty = true;
+      if (!state.historyWriteDeferred) state.historyWriteDeferred = setTimeout(() => { state.historyWriteDeferred = null; if (state.historyWriteDirty && !state.pendingHistoryWrite) persistHistoryFile(); }, 1200);
+      return;
+    }
     persistHistoryFile();
   }
 
@@ -2929,7 +2992,8 @@ function createPlugin(host) {
     state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.filter(x => x && x.runId !== record.runId);
     state.persistentHistoryFile.shots.push(record);
     if (state.persistentHistoryFile.shots.length > HISTORY_FILE_MAX_SHOTS) state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.slice(-HISTORY_FILE_MAX_SHOTS);
-    persistHistoryFile();
+    trimHistoryFullRecords(state.persistentHistoryFile);
+    if (persistHistoryFile()) { state.historyJustPersistedRunId = record.runId; state.historyJustPersistedAt = Date.now(); }
   }
 
   function restoreAdaptiveHistoryFromPersistentFile() {
@@ -3691,6 +3755,8 @@ function createPlugin(host) {
   // plugin's own regression, so it needs a skin push twice a second while S2/S3 run.
   function startFlowStripTicker() {
     clearTimer("flowStripTimer");
+    clearTimer("historyWriteDeferred");
+    clearTimer("historyTrimWriteTimer");
     const tick = () => {
       state.flowStripTimer = null;
       if (state.phase !== "stage2" && state.phase !== "stage3") return;
@@ -4064,7 +4130,7 @@ function renderRefillEditor(){
  $('refilldefaults').disabled=curveBusy||!curveLatest.canApply;
  $('refillnote').textContent=(curveLatest.refillActive?'补水已启用':'当前不执行补水：需开启主动泄压、杯内控流和S2起步增强')+(curveLatest.refillLoadWarning?' · '+curveLatest.refillLoadWarning:'');
  const horizon=(r.startDelayMs+r.maxDurationMs+r.approachMs)/1000,xx=t=>34+690*t/Math.max(1,horizon),max=Math.max(baseCommand,boost)*1.2,yy=v=>118-80*v/Math.max(.1,max),start=r.startDelayMs/1000,end=start+r.maxDurationMs/1000;
- $('refillpreview').innerHTML='<line x1="34" y1="118" x2="724" y2="118" stroke="#657082"/><path d="M 34 '+yy(baseCommand)+' H '+xx(start)+' V '+yy(boost)+' H '+xx(end)+' V '+yy(holding)+' H 724" fill="none" stroke="#b794ff" stroke-width="3"/><line x1="'+xx(end)+'" y1="25" x2="'+xx(end)+'" y2="122" stroke="#cdb6ff" stroke-dasharray="4 4"/><text x="34" y="18" fill="#ddd" font-size="12">'+boost.toFixed(4)+' ml/s · '+r.targetPercent+'% '+(r.basis==="cup-target"?'目标折算基值':'基础泵流量')+' · 接管 '+holding.toFixed(4)+' ml/s</text><text x="34" y="143" fill="#ddd" font-size="12">0s → '+start.toFixed(2)+'s 启动 → 最迟 '+end.toFixed(2)+'s 请求收回</text><text x="34" y="36" fill="#ddd" font-size="11">达到 '+r.cutoffPercent+'% 称流速可提前收回；图示为最长时限</text>';
+ $('refillpreview').innerHTML='<line x1="34" y1="118" x2="724" y2="118" stroke="#657082"/><path d="M 34 '+yy(baseCommand)+' H '+xx(start)+' V '+yy(boost)+' H '+xx(end)+' V '+yy(holding)+' H 724" fill="none" stroke="#b794ff" stroke-width="3"/><line x1="'+xx(end)+'" y1="25" x2="'+xx(end)+'" y2="122" stroke="#cdb6ff" stroke-dasharray="4 4"/><text x="34" y="18" fill="#ddd" font-size="12">'+boost.toFixed(4)+' ml/s · '+r.targetPercent+'% '+(r.basis==="cup-target"?'目标折算基值':'基础泵流量')+'（r '+(Number(plan.controlGain)||0).toFixed(2)+' '+(plan.controlSource==="gain-memory"?"实测":plan.controlSource==="lut"?"空粉碗 LUT":"曲线")+'）'+' · 接管 '+holding.toFixed(4)+' ml/s</text><text x="34" y="143" fill="#ddd" font-size="12">0s → '+start.toFixed(2)+'s 启动 → 最迟 '+end.toFixed(2)+'s 请求收回</text><text x="34" y="36" fill="#ddd" font-size="11">达到 '+r.cutoffPercent+'% 称流速可提前收回；图示为最长时限</text>';
  $('refillsafety').textContent='预览为估算；应用后以校验结果为准。机器指令上限 '+(Math.floor(upper*16)/16).toFixed(4)+' ml/s；原限压90%、数据新鲜度和驱动确认保护固定。'+(request>upper?' 已触及指令上限。':'');
  const tl=curveLatest.refillLastShot&&curveLatest.refillLastShot.timeline;
  if($('refillnodes'))$('refillnodes').innerHTML=tl&&tl.onsetMs!=null?('<b>上一杯补水节点</b><br>帧确认 0.00 s · onset '+((tl.relative&&tl.relative.onsetS)==null?'—':tl.relative.onsetS)+' s（S2 起点）'+(tl.cutoffAtMs!=null?' · 杯流 '+esc(r.cutoffPercent)+'% '+((tl.relative&&tl.relative.cutoffS)==null?'—':tl.relative.cutoffS)+' s':'')+(tl.relative&&tl.relative.returnS!=null?' · 收回 '+esc(tl.relative.returnS)+' s':'')+(tl.relative&&tl.relative.completeS!=null?' · 确认 '+esc(tl.relative.completeS)+' s':'')+'<br>'+(tl.overlap?'S2 与补水重叠 '+esc(tl.overlap.seconds)+' s（onset → 收回）':'S2 与补水无重叠')):'';
@@ -4385,6 +4451,8 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     clearTimer("completionTimer");
     clearTimer("abortResetTimer");
     clearTimer("flowStripTimer");
+    clearTimer("historyWriteDeferred");
+    clearTimer("historyTrimWriteTimer");
   }
 
   function profileObject() {
@@ -8117,16 +8185,18 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
               state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.filter(x => x && x.runId !== row.runId).concat(row);
             }
             state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.slice(-HISTORY_FILE_MAX_SHOTS);
+            trimHistoryFullRecords(state.persistentHistoryFile);
             state.persistentHistoryLoaded = true;
             state.learningContextLoaded = true;
             gainMemoryState(true);
-            if (state.storageProbeVerified) { clearTimer('storageProbeTimer'); persistHistoryFile(); }
+            if (state.storageProbeVerified) { clearTimer('storageProbeTimer'); scheduleHistoryTrimWrite(); }
           } else if (state.pendingHistoryWrite) {
-            if (!parsed || adaptiveHistoryFingerprintKey(parsed) !== adaptiveHistoryFingerprintKey(JSON.parse(state.pendingHistoryWrite))) {
+            if (!parsed || parsed.writeToken !== state.pendingHistoryWriteToken) {
               setPersistentHistoryUnavailable('history file readback mismatch');
             } else {
               clearTimer('historyWriteTimer');
               state.pendingHistoryWrite = null;
+              state.pendingHistoryWriteToken = null;
               state.persistentHistoryAvailable = true;
               state.persistentHistoryStatus = 'probe and history file write/readback verified';
               state.historyVerifiedRunIds=(parsed.shots||[]).map(x=>x.runId);state.historyLastReadbackAt=new Date().toISOString();state.historyRecoveryAttempts=0;

@@ -1,6 +1,6 @@
 # v2.2.18 交接 — P1 补水/学习修复（2026-11-01）
 
-状态：本地代码与测试，<strong>未 commit / 未 tag / 未 push / 未发版</strong>。基线 HEAD = <code>37b0566</code>（v2.2.17），分支 <code>v1.79ds</code>。
+状态：<strong>已发布 v2.2.18</strong>（commit <code>e4b0433</code>，tag <code>v2.2.18</code>，分支 <code>v1.79ds</code>）。GitHub Release 与夸克包已上传；发布记录见文末。基线 HEAD = <code>37b0566</code>（v2.2.17）。
 
 ## 改了什么
 
@@ -25,3 +25,12 @@
 1. 正常一杯让补水持续 >2 s，确认不再在 boost 后约 2 s 出现 “S2 refill driver ACK missing”。
 2. 新装或“恢复补水默认值”后看 <code>stage2StartupPlan.controlSource</code>/<code>controlBaseMlS</code>：目标 5 g/s 应为 <code>gain-memory</code>/<code>lut</code> 且平台约 3.6–4.0。
 3. 已保存 pump-command 的旧设置不应被强行改写；若仍看到 <code>profile-base</code>，先确认 UI 里是否显式选了 pump-command。
+
+## 发布记录（2026-11-01）
+
+- commit <code>e4b0433</code>，tag <code>v2.2.18</code>，分支 <code>v1.79ds</code>。
+- GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.18
+  - 附件 <code>HyperExPulseFilter_v2.2.18.zip</code>，416,743 字节。
+- 夸克：<code>夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.18.zip</code>，fileId <code>8257e580a99249a38f8d8d456fdea955</code>。
+- SHA256：<code>2AC740A98975D9924007A8F2306992BFEB0BB5AAA9D54B70773E4E1FF4038CA8</code>
+- 测试：<code>tests/verify_v02218.cjs</code> 686/686；包内解压复跑 686/686。

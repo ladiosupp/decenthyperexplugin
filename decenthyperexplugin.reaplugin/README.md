@@ -1,3 +1,32 @@
+# HyperEx Pulse Filter 2.2.29
+
+2.2.28 之后按用户 2026-11-02 的 S3 平滑要求加的三件事：predictive coast、big-angle 90° 门槛、S3 入段 coast。**没有做 S3 刹车**；前段本来就在 1.64–1.73，刹车只会更低。
+
+- **predictive coast**：trimMode 在 predictive 模式下不再永远 vector/rescue；误差在 S2 8% / S3 10% 内且 3 s 趋势平（|slope|<0.1）或预测正在收口时，记 coast、不写。旧的 legacy coast 只在 trimMode 非 predictive 时生效，所以 2.2.27 的 mid/late 一直在 4–10% 误差里来回写。
+- **big-angle 90° + >15%**：bigAngleStreak 的门槛从 45° 提到 90°；6/8 档必须同时有 predictedRel>15% 的确认。2.2.27 22:56 14.3 s 的 −0.375（6 档）在 14% 误差下被压回 2 档。常规仍是 2 档，误差 >15% 允许 4 档，救急 24 档/0.8 s 不变。
+- **S3 入段 coast（不是刹车）**：S3 前 3.5 s，只要杯流还在目标上方或仍在下降，就记 coast、不写；trace 行带 coastEntry:true。这去掉了 2.2.27 在 1.9–3.3 s 那些被 S2→S3 衰减掩盖、跟向无效的写入；不会把前段压得更低。
+- **保留**：2.2.28 的 S3 桶优先、S3 形状换桶跳变、S2 收回平台/断流 predicted、S2 local r、平台窗、headroom、S3 2 档/2400 ms 全部保留。
+- **测试**：tests/verify_v02229.cjs **725/725**（v02228 的 721 条 + 4 条 2.2.29：flat coast、entry coast、14% 不到 6 档、90°/15% 静态）。2.2.28 旧测试保留为历史，不再对 2.2.29 全绿。
+
+## Previous release
+
+# HyperEx Pulse Filter 2.2.28
+
+2.2.27 四杯真机（22:47 / 22:51 / 22:56 / 23:06）的收口：S3 控制桶改为当前杯优先；S3 形状在换桶时允许一次跟到同一杯的 target/r；S2 收回不再回退空粉碗 LUT；断流用 predicted 收口；S2 低置信 local r 作为基值；S2 后段测量改峰值后平台；S2 startup headroom 跳过 boost；S3 常规写入 2 档 / 2400 ms。S3 入段刹车和 S2 段长按用户要求不做。
+
+- **S3 控制桶（liveTrimMemoryCandidate）**：S3 先看 run（当前杯 S2 后段签名），再看上一杯。2.2.27 23:06 用了上一杯 g3 r=2.33、center 0.875，当前杯 g2 r=1.265 只写进记忆；114 个 command-bound-vector hold 从 4.3 s 到 42.2 s。现在 center = target/r，S3 mid 回到 1.9–2.0。
+- **S3 形状水平（driftShapeSuggestion）**：桶切换且同杯 MID 增益同向时，MID 一次走到同杯 target/r；反向时走记忆 50%。earlyFactor / drift 仍限 20%/杯，相邻增幅上限保留。2.2.27 23:06 的 mid 0.875（下一杯 0.938）现在约 1.375。
+- **S2 收回平台（boundedRefillControlBase / stage2StartupPlan）**：顺序改为 gain-memory → 上一杯实测尾段 → 当前曲线指令 → 空粉碗 LUT；收回取 target/r，但只对 gain-memory / observed-tail 信任，profile-base / LUT 回退时不低于当前曲线指令；断流笔也按这个平台算。22:47 的 2.5（LUT）改为 4.1875，尾段 −21.6% 应回到 ±5%。
+- **断流收口（bleeding）**：best.predicted <= target×1.02 为主，250 ms 后允许 observed 回落兜底，700 ms 仍是上限。2.2.27 的 216–263 ms 就回平台、峰值晚到 1.3–1.9 s；过冲应从 +15.8/+12.6/+21.1% 降到 +5–10%。
+- **S2 低置信 local r（nextShotAdaptiveSuggestion）**：local / cross-band / HIGH 时 gain memory 作为基值，向 target/r 走 70%（LOW/local）或 100%（HIGH），同杯 reverse 只做 ±25% / 0.35 的包围。23:06 的下一杯从 4.06 改到约 4.75，不再继续低 15–20%。
+- **S2 平台测量（stage2PlateauStartMs）**：S2 尾段从平滑杯流峰值 +1.5 s 起算，和 stage2EffectiveCommand 同窗；没有 cup-flow 数据的旧记录回退 final 60%。短段 / 峰值太晚直接标 unavailable，不再把补水后的衰减当平台。
+- **S2 startup headroom（stage2StartupMetrics）**：post 从 refill complete +1 s 起算，不再把 boost 期间 machineFlow < target×0.85 当 headroom 失败。2.2.27 四杯 4/4 eligible=false 的自我否决应消失。
+- **S3 常规写入（predictive）**：常规 2 档、静默 2400 ms；误差 >15% 仍允许 4 档，big-angle 6/8、救急 24 档 / 0.8 s 不变。2.2.27 平均 2–3 档 / 2.1–2.7 s 的 1.8–2.2 限幅环应收窄。
+- **未做（按用户 2026-11-02 决定）**：S3 入段刹车（2–3 s 近最低指令）不做；S2 段长 / 重量不改（曲线设计参数）。S3 的 late drift 仍走原有 drift 模型。
+- **测试**：tests/verify_v02228.cjs **721/721**（v02227 的 714 条保留，更新 2 条旧口径 + 7 条 2.2.28）。2.2.27 旧测试保留为历史，不再对 2.2.28 全部通过。
+
+## Previous release
+
 # HyperEx Pulse Filter 2.2.27
 
 **2.2.26 热修**：诊断页脚本里有一个双引号写坏的 DOM 选择器，真机上 `querySelector` 抛 `SyntaxError`，`loadCal()` 整段中断，STEP 1 / STEP 2 一直停在“检查 / 请等待”。2.2.26 不要用，直接上 2.2.27。

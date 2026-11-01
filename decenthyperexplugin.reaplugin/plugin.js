@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.27";
+  const PLUGIN_VERSION = "2.2.29";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -1116,19 +1116,41 @@ function createPlugin(host) {
   function stage2EffectiveCommand(run) {
     const win=s2LearningWindow(run);
     if(win.refill&&!win.confirmed)return null; // R-5: never fall back to unwindowed data
-    const cutoffMs=Number.isFinite(win.startMs)?win.startMs:null;
+    const plateau=stage2PlateauStartMs(run);
+    const cutoffMs=plateau!==null?plateau:(Number.isFinite(win.startMs)?win.startMs:null);
     const rows0=(run&&Array.isArray(run.samples)?run.samples:[]).filter(x=>x&&x.phase==="stage2"&&x.machineTelemetryValid===true&&Number.isFinite(Number(x.targetFlowMlS))&&Number(x.targetFlowMlS)>0);
     const raw0=phaseRawSamples(run,"stage2");
     const rows=cutoffMs===null?rows0:rows0.filter(x=>Number(x.tMs)>=cutoffMs),raw=cutoffMs===null?raw0:raw0.filter(x=>Number(x.tMs)>=cutoffMs);
     if(rows.length<6||raw.length<6)return null;
     const t0=Number(raw[0].tMs),t1=Number(raw[raw.length-1].tMs);
     if(!Number.isFinite(t0)||!Number.isFinite(t1)||t1<=t0)return null;
-    // L-10: the numerator (controlOutputQuality.tailMeanGS) is the final 60% of
-    // the phase, so the denominator must be the same 60%. Taking the final 40%
-    // mixed two command epochs into one ratio.
-    const tail=rows.filter(x=>Number(x.tMs)>=t0+(t1-t0)*0.4).map(x=>Number(x.targetFlowMlS));
+    // L-10: the numerator (controlOutputQuality.tailMeanGS) and the denominator
+    // share stage2PlateauStartMs: after the refill peak, not the old final 60%
+    // that still contained the post-refill decay.
+    const tail=cutoffMs===null?rows.filter(x=>Number(x.tMs)>=t0+(t1-t0)*0.4).map(x=>Number(x.targetFlowMlS)):rows.filter(x=>Number(x.tMs)>=cutoffMs).map(x=>Number(x.targetFlowMlS));
     if(tail.length<4)return null;
     return median(tail);
+  }
+
+  // 2.2.28: the S2 tail is a plateau, not the final 60% of a short stage. On the
+  // 2.2.27 field shots the peak arrived at 3.8-4.5 s and the old final-60% window
+  // began at 4.9-5.7 s while the cup flow was still falling from 5.5 to 3.9 g/s;
+  // the learned r was therefore a decay slope. Start after the smoothed cup-flow
+  // peak plus 1.5 s, and keep the refill settle start as a lower bound.
+  function stage2PlateauStartMs(run) {
+    const win=s2LearningWindow(run);
+    if(win.refill&&!win.confirmed)return null;
+    const base=Number.isFinite(win.startMs)?win.startMs:null;
+    const raw=phaseRawSamples(run,"stage2");
+    if(!raw.length)return null;
+    let peak=-Infinity;
+    for(const x of raw){const v=Number(x.decaidWeightFlowGS);if(Number.isFinite(v)&&v>peak)peak=v;}
+    if(!Number.isFinite(peak))return null;
+    const peakRow=raw.find(x=>Number(x.decaidWeightFlowGS)>=peak*.95);
+    if(!peakRow)return null;
+    const peakAt=Number(peakRow.tMs);
+    const afterPeak=Number.isFinite(peakAt)?peakAt+1500:null;
+    return base===null?afterPeak:Math.max(base,afterPeak);
   }
 
   function gainStageObservation(run,evidence,stage) {
@@ -1414,11 +1436,28 @@ function createPlugin(host) {
     if(!gains.every(v=>Number(v)>0.05))return null;
     const midNow=Number(current.source[1].command);
     if(!(midNow>0))return null;
+    // 2.2.28: a bucket/regime change is an estimator output, not a 0.075 ml/s
+    // per-shot trim. Use the current S3 gain memory's target/r as the level
+    // anchor when it disagrees with the old MID by more than 15%; the shape
+    // ratios (earlyFactor/drift) keep their per-shot 20% caps.
+    const s3Memory=gainMemorySuggestion(run,"s3");
+    const s3MemoryMid=s3Memory&&Number.isFinite(Number(s3Memory.commandMlS))&&Number(s3Memory.commandMlS)>0?Number(s3Memory.commandMlS):null;
+    let regimeJump=false;
     let midTarget=target/gains[1],earlyFactor=gains[1]/gains[0],drift=gains[1]/gains[2];
+    if(s3MemoryMid!==null&&Math.abs(s3MemoryMid-midNow)>midNow*.15){
+      const pull=s3Memory.confidence==="HIGH"?1:.5;
+      const sameDirection=Math.sign(s3MemoryMid-midNow)===Math.sign(midTarget-midNow);
+      // If the same-shot MID gain agrees on direction, its 20 s direct estimate
+      // is the current shot's local estimate; the memory only supplies the
+      // regime-change signal. Only an opposite memory direction needs the
+      // damped 50% anchor.
+      if(!sameDirection)midTarget=midNow+(s3MemoryMid-midNow)*pull;
+      regimeJump=true;
+    }
     if(previous&&Array.isArray(previous.source)&&previous.source.length===3){
       const priorGains=previous.source.map(x=>{const c=Number(x.command),m=Number(x.measured);return c>0&&m>0?m/c:null;});
       if(priorGains.every(v=>Number(v)>0.05)){
-        midTarget=(midTarget+target/priorGains[1])/2;
+        if(!regimeJump)midTarget=(midTarget+target/priorGains[1])/2;
         earlyFactor=(earlyFactor+priorGains[1]/priorGains[0])/2;
         drift=(drift+priorGains[1]/priorGains[2])/2;
       }
@@ -1427,7 +1466,9 @@ function createPlugin(host) {
     earlyFactor=Math.max(currentEarlyFactor*.80,Math.min(currentEarlyFactor*1.20,earlyFactor));
     drift=Math.max(currentDrift*.80,Math.min(currentDrift*1.20,drift));
     earlyFactor=Math.max(.50,Math.min(2.00,earlyFactor));drift=Math.max(.50,Math.min(2.00,drift));
-    const [fraction,absolute]=policy.s3,midLimit=s3StepLimit(midNow,fraction,absolute);
+    const [fraction,absolute]=policy.s3;
+    let midLimit=s3StepLimit(midNow,fraction,absolute);
+    if(regimeJump)midLimit=Math.max(midLimit,Math.abs(midTarget-midNow));
     const midCommand=snapCommandFlow(Math.max(midNow-midLimit,Math.min(midNow+midLimit,midTarget)));
     const lut=Number(run.config.stage3LutCommandMlS),ceiling=Math.min(LIMITS.commandFlowMax,Number.isFinite(lut)&&lut>0?lut*2:LIMITS.commandFlowMax);
     // P2-1: bound only the LATE edge to what the curve editor can save
@@ -2439,7 +2480,12 @@ function createPlugin(host) {
       const fit=linearRegression(points);if(fit&&fit.r2>=admission.r2(.90)&&fit.slope>=0)flows.push({at:at-first,flow:fit.slope});
     }
     if(flows.length<8||rows[rows.length-1].tMs-first<5000)return result;
-    const duration=rows[rows.length-1].tMs-first,tail=flows.filter(x=>x.at>=duration*.6),mean=tail.length?tail.reduce((s,x)=>s+x.flow,0)/tail.length:null;
+    const duration=rows[rows.length-1].tMs-first;
+    const peakLevel=Math.max(...flows.map(x=>x.flow))*.95;
+    const peakFlow=flows.find(x=>x.flow>=peakLevel)||flows[0];
+    const tailStart=Math.max(duration*.6,Number(peakFlow.at)+1500);
+    const plateauShort=tailStart>=duration-1200;
+    const tail=plateauShort?[]:flows.filter(x=>x.at>=tailStart),mean=tail.length?tail.reduce((s,x)=>s+x.flow,0)/tail.length:null;
     const cv=mean>0?Math.sqrt(tail.reduce((s,x)=>s+(x.flow-mean)**2,0)/tail.length)/mean:null;
     const crossing=level=>flows.find((x,i)=>i+2<flows.length&&flows[i+2].at-x.at<=600&&flows.slice(i,i+3).every(q=>q.flow>=level));
     const t20=crossing(target*.2),t80=crossing(target*.8),p20=mean>0?crossing(mean*.2):null,p80=mean>0?crossing(mean*.8):null;
@@ -2452,11 +2498,13 @@ function createPlugin(host) {
       overshootPct:round(Math.max(0,max/target-1)*100,2),pulseUsed:!!(run.liveFlowTrim&&run.liveFlowTrim.trace||[]).find(x=>x.kind==="write"&&x.startupAction==="boost"),sampleCount:seen.size});
     const machine=(run.samples||[]).filter(x=>x.phase==="stage2"&&Number(x.profileFrame)===1),limit=finiteOrNull(cfg.stage2PressureLimit);
     const usable=machine.filter(x=>x.machineTelemetryValid===true&&finiteOrNull(x.machineAgeMs)!==null&&x.machineAgeMs<=600&&finiteOrNull(x.pressureBar)!==null&&x.pressureBar>=0&&finiteOrNull(x.machineFlowMlS)!==null&&finiteOrNull(x.targetFlowMlS)!==null&&x.targetFlowMlS>0);
-    const post=usable.filter(x=>x.tMs-first>=1000),near=usable.filter(x=>x.pressureBar>=limit*.95).length,tracking=post.filter(x=>x.machineFlowMlS>=x.targetFlowMlS*.85).length;
+    const complete=(run.liveFlowTrim&&run.liveFlowTrim.trace||[]).find(x=>x.kind==="startup-complete"&&Number(x.frame)===1);
+    const postStart=complete&&Number.isFinite(Number(complete.tMs))?Number(complete.tMs)+1000:first+1000;
+    const post=usable.filter(x=>x.tMs>=postStart),near=usable.filter(x=>x.pressureBar>=limit*.95).length,tracking=post.filter(x=>x.machineFlowMlS>=x.targetFlowMlS*.85).length;
     const headroom=limit>0&&usable.length>=8&&usable.length>=machine.length*.8&&near/usable.length<.10&&post.length>=4&&tracking/post.length>=.9;
     result.headroomPassed=!!headroom;result.machineCoveragePct=round(usable.length/Math.max(1,machine.length)*100,1);result.pressureLimitedPct=round(near/Math.max(1,usable.length)*100,1);
     result.eligible=!!(rows[0].tMs-first<=600&&p20&&p80&&mean>=target*(1-admission.spread(.5))&&mean<=target*(1+admission.spread(.08))&&cv!==null&&cv<=admission.spread(.12)&&result.overshootPct<=admission.spread(8)&&headroom&&assessRunLearningIntegrity(run).eligible);
-    result.reason=rows[0].tMs-first>600?"S2 startup onset samples missing":!headroom?"S2 startup pressure or actuator headroom insufficient":!p20||!p80?"S2 rise crossings incomplete":mean<target*(1-admission.spread(.5))||mean>target*(1+admission.spread(.08))?"S2 plateau outside startup-assist range":cv>admission.spread(.12)?"S2 tail ripple too high for startup boost":result.overshootPct>admission.spread(8)?"S2 overshoot; startup boost withheld":result.eligible?"S2 startup shape eligible":"S2 startup integrity check failed";
+    result.reason=rows[0].tMs-first>600?"S2 startup onset samples missing":!headroom?"S2 startup pressure or actuator headroom insufficient":plateauShort?"S2 plateau window too short":!p20||!p80?"S2 rise crossings incomplete":mean<target*(1-admission.spread(.5))||mean>target*(1+admission.spread(.08))?"S2 plateau outside startup-assist range":cv>admission.spread(.12)?"S2 tail ripple too high for startup boost":result.overshootPct>admission.spread(8)?"S2 overshoot; startup boost withheld":result.eligible?"S2 startup shape eligible":"S2 startup integrity check failed";
     return result;
   }
   function startupMetricAllowed(m) {
@@ -2573,7 +2621,7 @@ function createPlugin(host) {
     if(!Number.isFinite(estimate)||estimate<LIMITS.commandFlowMin||estimate>LIMITS.commandFlowMax)return null;
     return {command:estimate,basis:"target-cup-flow observed-tail local model",referenceTailGS:round(q.tailMeanGS,3),sourceRunId:prior.runId,previousCommandMlS:round(previousCommand,4),rippleCVPct:round(q.tailRippleCVPct,2),rippleDamped:q.tailRippleCVPct>=12};
   }
-  function boundedRefillControlBase(targetGS,profileBase) {
+  function boundedRefillControlBase(targetGS,profileBase,observedBase) {
     // The driver only accepts 1/16 ml/s steps. A raw target/r base such as
     // 5/1.254 = 3.9872 can never be written back, and the return used to be
     // dropped by the quantization guard (field 2.2.2: watchdogs aborted S2
@@ -2585,14 +2633,22 @@ function createPlugin(host) {
     // trend vector and is never derived from r, target or base. Pinning r = 1
     // above ~4 ml/s (2.2.6 high-flow-direct) tied the flood ceiling to the
     // user's cup target and made the platform wrong by the same factor.
-    // Order: learned gain memory -> empty-basket LUT -> profile base.
+    // Order: learned gain memory -> running profile base -> empty-basket LUT.
+    // 2.2.28: the LUT is the EMPTY-BASKET command (2.507 for 5 g/s). It must
+    // not become the coffee platform when the matched bucket has no S2 sample:
+    // the 2.2.27 22:47 shot fell back to 2.5, returned 40% below the running
+    // 4.1875, and the short S2 stage never climbed back (tail -21.6%).
     const gm=liveTrimMemoryCandidate("stage2",state.diagnosticLast||state.diagnosticCurrent);
     if(gm&&Number(gm.r)>0&&Number(targetGS)>0){const command=snapCommandFlow(Number(targetGS)/Number(gm.r));if(command)return {commandMlS:command,r:Number(targetGS)/command,source:"gain-memory",bucketId:gm.bucketId};}
-    const mapped=Number.isFinite(Number(targetGS))?mappedCommandForReal(targetGS):null;
-    if(Number.isFinite(Number(mapped))&&Number(mapped)>0){const command=snapCommandFlow(mapped);if(command)return {commandMlS:command,r:Number(targetGS)/command,source:"lut"};}
+    // Clean previous-shot tail estimate: a machine-specific local model. This
+    // sits between the learned bucket and the generic profile base, which is
+    // what the original cup-target basis intended.
+    if(Number.isFinite(Number(observedBase))&&Number(observedBase)>0){const observedCommand=snapCommandFlow(Number(observedBase));if(observedCommand)return {commandMlS:observedCommand,r:Number(targetGS)/observedCommand,source:"observed-tail"};}
     const command=snapCommandFlow(Number(profileBase));
-    if(!command)return {commandMlS:Number(profileBase),r:Number(targetGS)/Number(profileBase),source:"profile-base"};
-    return {commandMlS:command,r:Number(targetGS)/command,source:"profile-base"};
+    if(command)return {commandMlS:command,r:Number(targetGS)/command,source:"profile-base"};
+    const mapped=Number.isFinite(Number(targetGS))?mappedCommandForReal(targetGS):null;
+    if(Number.isFinite(Number(mapped))&&Number(mapped)>0){const mappedCommand=snapCommandFlow(mapped);if(mappedCommand)return {commandMlS:mappedCommand,r:Number(targetGS)/mappedCommand,source:"lut"};}
+    return {commandMlS:Number(profileBase),r:Number(targetGS)/Number(profileBase),source:"profile-base"};
   }
   // §22.11 refill law. The pump command is a TREND VECTOR, not a flow setpoint:
   // it sits far above the cup target while charging (flood, up to the safety
@@ -2670,7 +2726,7 @@ function createPlugin(host) {
     const raw=resolvedStageCommandFlow("stage2",state.cfg.stage2Flow),base=Math.round(raw*16)/16;
     const estimate=settings.basis==="cup-target"&&cupTarget>0?s2RefillPumpEstimate(base,cupTarget):null;
     const bounded=state.cfg.s2RefillBoundedModel===true;
-    const control=bounded&&settings.basis==="cup-target"?boundedRefillControlBase(cupTarget,base):null;
+    const control=bounded&&settings.basis==="cup-target"?boundedRefillControlBase(cupTarget,base,estimate&&estimate.command):null;
     const refillBase=bounded?(control?Number(control.commandMlS):base):(estimate?estimate.command:base);
     const controlBase=refillBase;
     const controlGain=bounded?(control&&Number(control.r)>0?Number(control.r):(cupTarget>0?cupTarget/refillBase:null)):null;
@@ -2738,11 +2794,16 @@ function createPlugin(host) {
     // instead starved S2 whenever that command was below target/r (2026-11-01
     // 00:25: return 2.5 vs a running 3.0625, cup flow collapsed to 2.638 g/s).
     // A protective return still takes the lower of platform and profile command.
-    const holding=bounded&&settings.basis==="cup-target"?{commandMlS:round(refillBase,4),basis:"target/r platform handoff"+(controlGain?" (r="+round(controlGain,3)+")":""),sourceRunId:control&&control.bucketId||null}:s2HoldingReference(base,boost);
+    // 2.2.28: the return platform is target/r, but never below the S2 command
+    // the profile is already running. A stale/low plan-time platform used to
+    // starve the short S2 stage (22:47: return 2.5 vs running 4.1875).
+    const trustedControl=!!(control&&(control.source==="gain-memory"||control.source==="observed-tail"));
+    const holdingCommand=bounded&&settings.basis==="cup-target"?(trustedControl?round(refillBase,4):Math.max(round(refillBase,4),base)):null;
+    const holding=bounded&&settings.basis==="cup-target"?{commandMlS:holdingCommand,basis:"target/r platform handoff, not below the running S2 command"+(controlGain?" (r="+round(controlGain,3)+")":""),sourceRunId:control&&control.bucketId||null}:s2HoldingReference(base,boost);
     // §22.11 two-step handoff: the bleed level sits well below the platform so
     // the pump stops adding water and the retained volume carries the cup flow
     // the rest of the way up.
-    const bleedCommandMlS=bounded&&settings.basis==="cup-target"?snapCommandFlow(Math.max(LIMITS.commandFlowMin,refillBase*S2_REFILL_BLEED_FRACTION)):null;
+    const bleedCommandMlS=bounded&&settings.basis==="cup-target"?snapCommandFlow(Math.max(LIMITS.commandFlowMin,holdingCommand*S2_REFILL_BLEED_FRACTION)):null;
     const basisReason=bounded?(settings.basis==="cup-target"?"S2 refill bounded by target-equivalent command; targetPercent is an upper bound":"S2 refill bounded by profile command; targetPercent is an upper bound"):(settings.basis==="cup-target"?(estimate?"S2 refill aims at the S2 cup target using the observed tail":"S2 refill aims at the S2 cup target; profile base pump command, no clean observed tail"):"S2 configurable refill");
     return {...plan,returnCommandMlS:holding.commandMlS,bleedCommandMlS,bleedMs:S2_REFILL_BLEED_MS,holdingReference:holding,enabled:true,reason:basisReason+"; predicted target or safety deadline",// R-7: extra water is measured against the command S2 would otherwise run
       // (the profile base), not against the refill control base.
@@ -3880,11 +3941,33 @@ function createPlugin(host) {
       const curve=Number(run.config&&run.config.stage2CommandMlS);
       const numeric=s2.usable!==false&&(s2.action==="ADJUST"||s2.action==="LUT COMPENSATE")&&Number.isFinite(Number(s2.suggestedCommandMlS));
       if(numeric){
-        // L-7: the memory is the same-band prior used by the reverse mapping.
-        // It never replaces a same-shot reverse result (the weak-estimator-wins
-        // path was target/r=3.884 overwriting the chain's 4.72).
-        s2.gainMemory.role="prior";
-        s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory "+memoryS2.bucketId+" band "+(memoryS2.band||"—")+" r="+memoryS2.r+" is a prior; the same-shot reverse keeps the command";
+        // 2.2.28: a local/cross-band/high-confidence memory is an estimator
+        // output, not just a prior. Pull the next base toward target/r by 70%
+        // (LOW/local) or 100% (HIGH); the same-shot reverse stays as a bounded
+        // correction around the old command, and a bucket change may move up to
+        // ±25% / 0.35 ml/s. The 2.2.27 23:06 shot had local r=0.917 -> 5.45 but
+        // the next base fell to 4.06 because the feed-forward k=1.221 won.
+        const base=Number(s2.suggestedCommandMlS),memoryTarget=Number(memoryS2.commandMlS);
+        const regime=!!(memoryS2.local||memoryS2.crossBand||memoryS2.confidence==="HIGH");
+        let pulled=false;
+        if(regime&&Number.isFinite(base)&&Number.isFinite(memoryTarget)){
+          const pull=memoryS2.confidence==="HIGH"?1:0.7;
+          const hi=Math.max(base*1.25,base+0.35),lo=Math.min(base*0.75,base-0.35);
+          const bounded=snapCommandFlow(clampCommandFlow(Math.max(lo,Math.min(hi,base+(memoryTarget-base)*pull))));
+          if(Number.isFinite(bounded)&&Math.abs(bounded-base)>=.005){
+            s2.suggestedCommandMlS=round(bounded,4);
+            s2.action=String(s2.action||"").includes("LUT")?"LUT COMPENSATE":"ADJUST";
+            s2.gainMemory.role="base";s2.gainMemory.applied=true;
+            s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory "+memoryS2.bucketId+" band "+(memoryS2.band||"—")+" r="+memoryS2.r+" is the base: next command "+formatCommandFlow(base)+" -> "+formatCommandFlow(bounded)+" ml/s ("+Math.round(pull*100)+"% toward target/r); same-shot reverse bounded by "+policy.name;
+            pulled=true;
+          }
+        }
+        if(!pulled){
+          // L-7: outside a regime change the memory remains the same-band prior
+          // used by the reverse mapping; it never replaces a same-shot reverse.
+          s2.gainMemory.role="prior";
+          s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory "+memoryS2.bucketId+" band "+(memoryS2.band||"—")+" r="+memoryS2.r+" is a prior; the same-shot reverse keeps the command";
+        }
       }else if(Number.isFinite(curve)&&sameCommandFlow(memoryS2.commandMlS,curve)){
         s2.usable=true;s2.action="HOLD";delete s2.suggestedCommandMlS;
         s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory already maps to the curve command";
@@ -4854,7 +4937,7 @@ function renderRefillEditor(){
  $('refilldefaults').disabled=curveBusy||!curveLatest.canApply;
  $('refillnote').textContent=(curveLatest.refillActive?'补水已启用':'当前不执行补水：需开启主动泄压、杯内控流和S2起步增强')+(curveLatest.refillLoadWarning?' · '+curveLatest.refillLoadWarning:'');const savedRefill=curveLatest.refill||r,refillDraftDirty=JSON.stringify(r)!==JSON.stringify(savedRefill);if($('refillstatus'))$('refillstatus').textContent='灌水上限 '+(savedRefill.floodMode==="adaptive"?"自适应":savedRefill.floodMaxMlS.toFixed(2))+' · 收回 / 收口起点 '+savedRefill.cutoffPercent+'% · 实测门槛 ≈ '+Math.round(savedRefill.cutoffPercent*.6)+'% 目标 · 启动 '+(savedRefill.startDelayMs/1000)+' s'+(refillDraftDirty?' · 草稿未保存':'');
  const horizon=(r.startDelayMs+r.maxDurationMs+r.approachMs)/1000,xx=t=>34+690*t/Math.max(1,horizon),max=Math.max(baseCommand,boost)*1.2,yy=v=>118-80*v/Math.max(.1,max),start=r.startDelayMs/1000,end=start+r.maxDurationMs/1000;
- const l1=(bounded?'≤ ':'')+boost.toFixed(4)+' ml/s · '+(bounded?'灌水上限 ':r.targetPercent+'% ')+(r.basis==="cup-target"?'目标折算基值':'基础泵流量')+'（r '+(Number(plan.controlGain)||0).toFixed(2)+' '+(plan.controlSource==="gain-memory"?'实测':plan.controlSource==="lut"?'空粉碗 LUT':plan.controlSource==="high-flow-direct"?'高流量直给':'曲线')+'） · 接管 '+holding.toFixed(4)+' ml/s';
+ const l1=(bounded?'≤ ':'')+boost.toFixed(4)+' ml/s · '+(bounded?'灌水上限 ':r.targetPercent+'% ')+(r.basis==="cup-target"?'目标折算基值':'基础泵流量')+'（r '+(Number(plan.controlGain)||0).toFixed(2)+' '+(plan.controlSource==="gain-memory"?'实测':plan.controlSource==="observed-tail"?'实测尾段':plan.controlSource==="lut"?'空粉碗 LUT':plan.controlSource==="high-flow-direct"?'高流量直给':'曲线')+'） · 接管 '+holding.toFixed(4)+' ml/s';
  const l2='0s → '+start.toFixed(2)+'s 启动 → 最迟 '+end.toFixed(2)+'s 请求收回';
  const l3='收回判据：预测 ≥ '+(Number.isFinite(goal)?goal.toFixed(2):'—')+' g/s；'+r.cutoffPercent+'% 同时决定收口起点、跳过阈值、实测噪声底';
  $('refillpreviewlabels').innerHTML='<b>'+esc(l1)+'</b><br>'+esc(l2)+'<br>'+esc(l3);
@@ -7271,7 +7354,9 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
 
   function controlOutputQuality(run,phase) {
     const target=desiredRealForRunPhase(run,phase),whole=diagnosticRawRegression(run,phase);
-    const win=phase==="stage2"?s2LearningWindow(run):null,cutoffMs=win&&Number.isFinite(win.startMs)?win.startMs:null;
+    const win=phase==="stage2"?s2LearningWindow(run):null;
+    const plateauStart=phase==="stage2"?stage2PlateauStartMs(run):null;
+    const cutoffMs=phase==="stage2"?(plateauStart!==null?plateauStart:(win&&Number.isFinite(win.startMs)?win.startMs:null)):(win&&Number.isFinite(win.startMs)?win.startMs:null);
     if(win&&win.refill&&!win.confirmed)return {available:false,reason:"refill-return-unconfirmed",windowSettleMs:win.settleMs,chainSettleMs:win.chainSettleMs}; // R-5
     const all=phaseRawSamples(run,phase),raw=cutoffMs===null?all:all.filter(x=>Number(x.tMs)>=cutoffMs);
     if(!target)return {available:false,reason:"no-target"};
@@ -7280,7 +7365,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     if(raw.length<6)return {available:false,reason:cutoffMs===null||all.length<6?"raw-samples-insufficient":"learning-window-too-short",rawSamples:all.length,windowSamples:raw.length};
     const stamps=new Set(),data=raw.filter(x=>{const t=finiteOrNull(x.scaleTimestampSeconds);if(t===null||stamps.has(t))return false;stamps.add(t);return true;});
     if(data.length<6)return {available:false};
-    const lo=Number(data[0].scaleTimestampSeconds),hi=Number(data[data.length-1].scaleTimestampSeconds),tail=lo+(hi-lo)*.4;
+    const lo=Number(data[0].scaleTimestampSeconds),hi=Number(data[data.length-1].scaleTimestampSeconds),tail=phase==="stage2"&&plateauStart!==null?lo:lo+(hi-lo)*.4;
     const flows=[];
     for(let i=0;i<data.length;i++){
       const end=Number(data[i].scaleTimestampSeconds);if(end<tail+1.2)continue;
@@ -7293,7 +7378,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       tailMeanGS:round(mean,3),tailErrorPct:mean===null?null:round((mean/target-1)*100,2),tailRippleCVPct:mean?round(Math.sqrt(variance)/mean*100,2):null,
       tailRMSEGS:flows.length?round(Math.sqrt(average(flows.map(x=>(x-target)*(x-target)))),3):null,
       tailOvershootPct:flows.length?round(Math.max(0,Math.max(...flows)/target-1)*100,2):null,windows:flows.length,
-      windowSettleMs:win?win.settleMs:null,chainSettleMs:win?win.chainSettleMs:null,tailFraction:.6,basisDetail:phase==="stage2"?(win?("after refill settle "+win.settleMs+" ms; final 60% regression"):"final 60% regression"):"final 60% of phase regression",basis:"actual RAW g/s; rolling regressions over final60% of phase, separate from normalized learning model"};
+      windowSettleMs:win?win.settleMs:null,chainSettleMs:win?win.chainSettleMs:null,tailFraction:phase==="stage2"&&plateauStart!==null?1:.6,basisDetail:phase==="stage2"?(plateauStart!==null?"after refill peak + 1.5 s (settle "+((win&&win.settleMs)||0)+" ms); plateau regression":(win?"refill settle "+win.settleMs+" ms; final 60% regression":"final 60% regression")):"final 60% of phase regression",basis:"actual RAW g/s; rolling regressions over the plateau (S2) or final60% (S1/S3), separate from normalized learning model"};
   }
 
   // Steady-tail machine gain: cup flow (RAW) divided by the machine's own flow
@@ -7585,7 +7670,13 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
   function liveTrimMemoryCandidate(phase,run) {
     const stageKey=phase==="stage2"?"s2":phase==="stage3"?"s3":null;
     if(!stageKey)return null;
-    for(const candidate of [state.diagnosticLast,run,state.diagnosticCurrent]){
+    // 2.2.28: for S3 the current run already has the S2 late-60% signature, so
+    // it must be the first bucket source. The old order preferred diagnosticLast
+    // (the previous shot), which made the 2.2.27 23:06 S3 run use g3 r=2.33
+    // while the current run had just learned g2 r=1.265; the 0.875 center then
+    // held 114 command-bound-vector checks for the whole stage.
+    const candidates=stageKey==="s3"?[run,state.diagnosticLast,state.diagnosticCurrent]:[state.diagnosticLast,run,state.diagnosticCurrent];
+    for(const candidate of candidates){
       if(!candidate)continue;
       const gm=gainMemorySuggestion(candidate,stageKey);
       if(gm&&Number.isFinite(Number(gm.commandMlS))&&Number(gm.commandMlS)>0)return gm;
@@ -7837,8 +7928,17 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         if(t.startup.status==="bleeding"){
           const bp=t.startup,bplan=bp.plan,btarget=t.run.config.stage2Flow;
           const best=s2RefillFlowEstimate(t);
-          const bsettled=Date.now()-(Number(bp.bleedStartedAt)||Date.now())>=Number(bplan.bleedMs||700)
-            ||(best&&Number.isFinite(Number(best.slope))&&Number(best.slope)<=btarget*1.02);
+          // 2.2.28: release on the lead-compensated prediction, not the observed
+          // level. The old observed test settled after 216-263 ms while the pump
+          // was still at 7-8 ml/s; the cup-flow peak arrived 1.3-1.9 s later.
+          const bflow=best&&Number.isFinite(Number(best.predicted))?Number(best.predicted):best&&Number(best.slope);
+          const bobserved=best&&Number.isFinite(Number(best.slope))?Number(best.slope):null;
+          const bleedElapsed=Date.now()-(Number(bp.bleedStartedAt)||Date.now());
+          // Predicted is the primary release. A 300 ms observed fallback keeps a
+          // slow plant from carrying the full 700 ms bleed into an undershoot.
+          const bsettled=bleedElapsed>=Number(bplan.bleedMs||700)
+            ||(Number.isFinite(bflow)&&bflow<=btarget*1.02)
+            ||(bleedElapsed>=250&&Number.isFinite(bobserved)&&bobserved<=btarget*1.02);
           if(bsettled)await dispatchS2Startup(t,"return");
         }
         if(t.startup.status==="return-unconfirmed"){
@@ -7969,7 +8069,9 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
           angleDeg=Math.abs(trendSlope)<1e-9?(inBand?0:90):((target>reg.slope?trendSlope>0:trendSlope<0)?Math.min(90,mag):180-Math.min(90,mag));
         }
       }
-      if(angleDeg!==null&&angleDeg>=45)t.bigAngleStreak=(t.bigAngleStreak||0)+1;else t.bigAngleStreak=0;
+      // 2.2.29: 45 deg is not a confident "big angle"; it fires on short-window
+      // noise and allowed 6-quantum writes at a 10-15% error. Require 90 deg.
+      if(angleDeg!==null&&angleDeg>=90)t.bigAngleStreak=(t.bigAngleStreak||0)+1;else t.bigAngleStreak=0;
       t.report.bigAngleStreak=t.bigAngleStreak;t.report.vectorAngleDeg=angleDeg===null?null:round(angleDeg,1);
       const predictedRel=target>0?Math.abs(target-decisionGS)/target:1;
       if(predictive){
@@ -8013,9 +8115,17 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       // rarely crosses the band even when the cup is already flat (field data:
       // coast fired once per shot).
       const trendFlat=Number.isFinite(trendSlope)&&Math.abs(trendSlope)<0.1;
-      const trimMode=predictive?(rescueActive?"rescue":"vector"):(Math.abs(errGS/target)<=0.06&&(closing||trendFlat)?"coast":(errGS>0&&angleDeg!==null&&angleDeg>=55&&angleDeg<=125?"lut-compensate":"vector"));
+      // 2.2.29: predictive mode now has a confidence coast. The old branch always
+      // returned vector/rescue, so a flat or already-closing trend outside 4%
+      // still wrote every normal slot -- the mid/late up-down chasing. Coast at
+      // 8% (S2) / 10% (S3) when the 3 s trend is flat or the prediction is closing.
+      const stage3EntryAge=state.phase==="stage3"&&Number(state.stage3StartedAtMs)>0?Date.now()-Number(state.stage3StartedAtMs):Infinity;
+      const stage3EntryCoast=state.phase==="stage3"&&stage3EntryAge<3500&&(reg.slope>target*1.02||(Number.isFinite(trendSlope)&&trendSlope<0));
+      const coastBand=state.phase==="stage3"?0.10:0.08;
+      const predictiveCoast=!rescueActive&&!stage3EntryCoast&&Math.abs(errGS/target)<=coastBand&&(closing||trendFlat);
+      const trimMode=predictive?(stage3EntryCoast?"coast":rescueActive?"rescue":predictiveCoast?"coast":"vector"):(Math.abs(errGS/target)<=0.06&&(closing||trendFlat)?"coast":(errGS>0&&angleDeg!==null&&angleDeg>=55&&angleDeg<=125?"lut-compensate":"vector"));
       row.trimMode=trimMode;
-      if(trimMode==="coast"){row.reason="coast-trend-stable";return;}
+      if(trimMode==="coast"){row.reason="coast-trend-stable";row.coastEntry=!!stage3EntryCoast;return;}
       if(predictive){
         if(state.phase==="stage3"){
           // T-9 / F4 (user 2026-11-01): the S3 4+2 budget is a BEHAVIOURAL budget,
@@ -8031,10 +8141,14 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         // F3 (user 2026-11-01): rescue silence = max(800 ms, last measured driver
         // ACK latency); 800 ms is the floor when no measurement exists.
         const measuredSilence=Number(t.lastResponseMs);
-        const silenceMs=rescueActive?(Number.isFinite(measuredSilence)?Math.max(800,Math.min(3000,Math.round(measuredSilence))):800):1200;
+        // 2.2.28: S3 normal silence is 2400 ms; its cup-flow response is 3-5 s
+        // and the old 1200 ms cadence wrote faster than the response, creating
+        // the 1.8-2.2 limit cycle. Rescue keeps the 800 ms floor.
+        const normalSilenceMs=state.phase==="stage3"?2400:1200;
+        const silenceMs=rescueActive?(Number.isFinite(measuredSilence)?Math.max(800,Math.min(3000,Math.round(measuredSilence))):800):normalSilenceMs;
         if(t.lastWriteAt!==null&&Date.now()-t.lastWriteAt<silenceMs){
           t.report.silenceHolds=(t.report.silenceHolds||0)+1;
-          row.silenceMs=silenceMs;row.silenceBasis=rescueActive?(Number.isFinite(measuredSilence)&&measuredSilence>800?"measured":"floor-800"):"normal-1200";
+          row.silenceMs=silenceMs;row.silenceBasis=rescueActive?(Number.isFinite(measuredSilence)&&measuredSilence>800?"measured":"floor-800"):"normal-"+normalSilenceMs;
           row.reason="predictive-write-silence";return;
         }
       }
@@ -8049,7 +8163,13 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         // fixed 8, so an S3 rescue writes 0.1-0.2 ml/s rather than 54% of target.
         const rescueMin=Math.max(2,Math.min(8,Math.round(.25*Math.abs(errGS)/r*16)));
         // T-12: the sustained-angle ceiling now works in predictive mode too.
-        const normalMax=(t.bigAngleStreak||0)>=6?8:(t.bigAngleStreak||0)>=3?6:4;
+        // 2.2.28: S3 ordinary normal writes stop at 2 quanta (0.125 ml/s, about
+        // 0.24 g/s at r=1.94) instead of 4. The big-angle escalation and rescue
+        // remain the fast paths.
+        // 2.2.29: 6/8 quanta only after a confirmed 90-deg streak AND a predicted
+        // error >15%. A 14% error with a 6-quantum write was the 22:56 14.3 s case.
+        const bigAngleConfirmed=predictedRel>0.15;
+        const normalMax=state.phase==="stage3"?((t.bigAngleStreak||0)>=6&&bigAngleConfirmed?8:(t.bigAngleStreak||0)>=3&&bigAngleConfirmed?6:(predictedRel>0.15?4:2)):((t.bigAngleStreak||0)>=6&&bigAngleConfirmed?8:(t.bigAngleStreak||0)>=3&&bigAngleConfirmed?6:4);
         steps=rescueActive?predictiveStepQuanta(errGS,r,rescueMin,24):predictiveStepQuanta(errGS,r,1,normalMax);
         row.controlCenterMlS=round(controlCenter.commandMlS,3);row.controlSource=controlCenter.source;row.controlR=controlCenter.r;row.controlBucket=controlCenter.bucketId||null;row.stepQuanta=steps;
       }else{

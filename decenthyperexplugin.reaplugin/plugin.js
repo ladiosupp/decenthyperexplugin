@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.11";
+  const PLUGIN_VERSION = "2.2.12";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -114,8 +114,20 @@ function createPlugin(host) {
   const GAIN_MEMORY_ALPHA=.35;
   const GAIN_MEMORY_DEVIATION_ALPHA=.55;
   const GAIN_MEMORY_DEVIATION=.15;
+  // Bucket geometry is a seed, not a permanent band. The centre follows the
+  // median of the last GAIN_MEMORY_SIGNATURE_SAMPLES signatures and the radius
+  // follows their spread (L-4). Membership is nearest-neighbour, clipped to the
+  // midpoint towards the next bucket, so two buckets cannot both claim one
+  // signature and lastBucketId is no longer needed as a tie-breaker.
   const GAIN_MEMORY_BUCKET_RADIUS=.12;
+  const GAIN_MEMORY_BUCKET_MIN_RADIUS=.08;
+  const GAIN_MEMORY_BUCKET_MAX_RADIUS=.20;
+  const GAIN_MEMORY_SIGNATURE_SAMPLES=6;
   const GAIN_MEMORY_HYSTERESIS=1.25;
+  // One range for every writer and reader of r (L-9). A stored value outside it
+  // is a measurement failure, never a gain.
+  const GAIN_R_MIN=.2;
+  const GAIN_R_MAX=3;
   const GAIN_MEMORY_MIN_SAMPLES=10;
   const GAIN_MEMORY_MAX_BUCKETS=12;
   const STORAGE_AUTO_APPLY = "autoApplyNextShot";
@@ -882,6 +894,7 @@ function createPlugin(host) {
   }
   function normalizeGainMemory(raw) {
     const out=emptyGainMemory();
+    out.dropped=[];
     if(!raw||typeof raw!=="object")return out;
     const seen=new Set();
     for(const row of Array.isArray(raw.buckets)?raw.buckets:[]){
@@ -889,24 +902,33 @@ function createPlugin(host) {
       const center=Number(row.center),radius=Number(row.radius);
       if(!Number.isFinite(center)||center<=0)continue;
       const id=String(row.id||"");if(!id||seen.has(id))continue;
+      const samples=(Array.isArray(row.samples)?row.samples:[]).map(Number).filter(x=>Number.isFinite(x)&&x>0).slice(-GAIN_MEMORY_SIGNATURE_SAMPLES);
       const stages={};
       for(const key of ["s2","s3"]){
         const x=row.stages&&row.stages[key];
         const r=Number(x&&x.r);
-        if(!(r>0.05&&r<=8))continue;
+        if(!Number.isFinite(r))continue;
+        if(!(r>=GAIN_R_MIN&&r<=GAIN_R_MAX)){
+          out.dropped.push({bucketId:id,stage:key,r:round(r,4),reason:"r outside ["+GAIN_R_MIN+","+GAIN_R_MAX+"]"});
+          continue;
+        }
         stages[key]={r:round(r,4),n:Math.max(1,Math.floor(Number(x.n)||1)),
           lastDeviation:Number.isFinite(Number(x.lastDeviation))?round(Number(x.lastDeviation),4):null,
           lastObservedR:Number.isFinite(Number(x.lastObservedR))?round(Number(x.lastObservedR),4):null,
           lastLocalR:Number.isFinite(Number(x.lastLocalR))?round(Number(x.lastLocalR),4):null,
           damped:!!x.damped,
           drift:Number.isFinite(Number(x.drift))?round(Number(x.drift),4):null,
+          commandMlS:Number.isFinite(Number(x.commandMlS))?round(Number(x.commandMlS),4):null,
+          commandBand:typeof x.commandBand==="string"?x.commandBand:null,
           lastRunId:x.lastRunId==null?null:String(x.lastRunId),updatedAt:x.updatedAt||null};
       }
       if(!Object.keys(stages).length)continue;
       seen.add(id);
-      out.buckets.push({id,center:round(center,4),radius:Number.isFinite(radius)&&radius>0?round(radius,4):GAIN_MEMORY_BUCKET_RADIUS,stages,createdAt:row.createdAt||null,updatedAt:row.updatedAt||null});
+      out.buckets.push({id,center:round(center,4),radius:Number.isFinite(radius)&&radius>0?round(radius,4):GAIN_MEMORY_BUCKET_RADIUS,
+        samples:samples.length?samples:[round(center,4)],stages,createdAt:row.createdAt||null,updatedAt:row.updatedAt||null});
     }
     out.buckets=out.buckets.slice(0,GAIN_MEMORY_MAX_BUCKETS);
+    out.dropped=out.dropped.slice(-20);
     out.seq=Math.max(Number(raw.seq)||0,out.buckets.length);
     out.lastBucketId=out.buckets.some(x=>x.id===raw.lastBucketId)?String(raw.lastBucketId):null;
     out.updatedAt=raw.updatedAt||null;
@@ -960,30 +982,67 @@ function createPlugin(host) {
       machineFlowMlS:round(median(values.map(x=>x.flow)),3),
       basis:"S2 late 40% pressure / machine flow"};
   }
+  // The band a bucket may claim: its own hysteresis radius, clipped to the
+  // midpoint towards the nearest other centre. Membership becomes a partition,
+  // so one signature can never fall into two buckets (L-4).
+  function gainBucketLimit(bucket,buckets) {
+    const radius=Number(bucket&&bucket.radius)>0?Number(bucket.radius):GAIN_MEMORY_BUCKET_RADIUS;
+    let gap=Infinity;
+    for(const other of buckets||[]){
+      if(!other||other===bucket)continue;
+      const distance=Math.abs(Number(other.center)-Number(bucket.center));
+      if(Number.isFinite(distance)&&distance>0&&distance<gap)gap=distance;
+    }
+    return Math.min(radius*GAIN_MEMORY_HYSTERESIS,gap/2);
+  }
+  // Radius follows the spread of the signatures the bucket has actually seen.
+  function gainBucketRadius(samples) {
+    if(!Array.isArray(samples)||samples.length<3)return GAIN_MEMORY_BUCKET_RADIUS;
+    const center=median(samples),mad=median(samples.map(x=>Math.abs(x-center)));
+    return Math.max(GAIN_MEMORY_BUCKET_MIN_RADIUS,Math.min(GAIN_MEMORY_BUCKET_MAX_RADIUS,2.6*mad));
+  }
   function selectGainBucket(memory,signature) {
     const buckets=memory&&Array.isArray(memory.buckets)?memory.buckets:[];
-    const last=buckets.find(b=>b.id===(memory&&memory.lastBucketId));
-    const within=(bucket,multiplier)=>bucket&&Math.abs(signature-bucket.center)<=bucket.radius*multiplier;
-    if(within(last,GAIN_MEMORY_HYSTERESIS))return {bucket:last,hysteresis:true};
     let best=null,bestDistance=Infinity;
     for(const bucket of buckets){
-      const distance=Math.abs(signature-bucket.center);
-      if(distance<=bucket.radius&&distance<bestDistance){best=bucket;bestDistance=distance;}
+      const distance=Math.abs(signature-Number(bucket.center));
+      if(distance<bestDistance){best=bucket;bestDistance=distance;}
     }
-    return {bucket:best||null,hysteresis:false};
+    if(!best)return {bucket:null,absorb:null,distance:Infinity,limit:0};
+    const limit=gainBucketLimit(best,buckets);
+    if(bestDistance<=limit)return {bucket:best,absorb:null,distance:bestDistance,limit};
+    // A near-duplicate signature widens the nearest bucket instead of
+    // fragmenting memory; beyond its own radius it is a new regime.
+    if(bestDistance<=Number(best.radius))return {bucket:null,absorb:best,distance:bestDistance,limit};
+    return {bucket:null,absorb:null,distance:bestDistance,limit};
   }
   function createGainBucket(memory,signature) {
     const id="g"+String(Math.max(1,Number(memory.seq)||0)+1);
     memory.seq=Number(id.slice(1))||memory.buckets.length+1;
-    const bucket={id,center:round(signature,4),radius:GAIN_MEMORY_BUCKET_RADIUS,stages:{},createdAt:new Date().toISOString(),updatedAt:null};
+    const bucket={id,center:round(signature,4),radius:GAIN_MEMORY_BUCKET_RADIUS,samples:[],stages:{},createdAt:new Date().toISOString(),updatedAt:null};
     memory.buckets.push(bucket);
+    // LRU: drop the least recently updated bucket, never the new or active one.
     while(memory.buckets.length>GAIN_MEMORY_MAX_BUCKETS){
-      const index=memory.buckets.findIndex(x=>x.id!==bucket.id&&x.id!==memory.lastBucketId);
-      if(index<0)break;
-      memory.buckets.splice(index,1);
+      const candidates=memory.buckets.filter(x=>x.id!==bucket.id&&x.id!==memory.lastBucketId);
+      if(!candidates.length)break;
+      candidates.sort((a,b)=>String(a.updatedAt||a.createdAt||"").localeCompare(String(b.updatedAt||b.createdAt||"")));
+      memory.buckets.splice(memory.buckets.indexOf(candidates[0]),1);
     }
     return bucket;
   }
+  // r is a function of the command (skill ledger): record the band each stage
+  // was measured in so a cross-band reference can be flagged.
+  function commandBandOf(value) {
+    const v=Number(value);
+    if(!(v>0))return null;
+    if(v<1)return "<1.0";
+    if(v<2)return "1.0-2.0";
+    if(v<3)return "2.0-3.0";
+    if(v<4)return "3.0-4.0";
+    if(v<5)return "4.0-5.0";
+    return ">=5.0";
+  }
+
   // The S2 profile command is regularly overridden by the live-trim writes,
   // so the gain must divide by what the pump actually followed. The machine
   // echoes that as targetFlowMlS; take the median over the S2 tail.
@@ -995,7 +1054,10 @@ function createPlugin(host) {
     if(rows.length<6||raw.length<6)return null;
     const t0=Number(raw[0].tMs),t1=Number(raw[raw.length-1].tMs);
     if(!Number.isFinite(t0)||!Number.isFinite(t1)||t1<=t0)return null;
-    const tail=rows.filter(x=>Number(x.tMs)>=t0+(t1-t0)*0.6).map(x=>Number(x.targetFlowMlS));
+    // L-10: the numerator (controlOutputQuality.tailMeanGS) is the final 60% of
+    // the phase, so the denominator must be the same 60%. Taking the final 40%
+    // mixed two command epochs into one ratio.
+    const tail=rows.filter(x=>Number(x.tMs)>=t0+(t1-t0)*0.4).map(x=>Number(x.targetFlowMlS));
     if(tail.length<4)return null;
     return median(tail);
   }
@@ -1017,10 +1079,11 @@ function createPlugin(host) {
       if(!Number.isFinite(effective)||effective<=0)return null;
       const command=effective;
       const r=measured/command;
-      if(!(r>=.2&&r<=3))return null;
+      if(!(r>=GAIN_R_MIN&&r<=GAIN_R_MAX))return null;
       const saturated=!!(evidence&&evidence.liveTrimChain&&evidence.liveTrimChain.usable===false);
       return {r,command,measured,source:saturated?"S2 tail local (actuator saturated)":"S2 steady tail",
-        local:saturated,damped:ripple>=12,alphaOverride:saturated?.55:null};
+        local:saturated,damped:ripple>=12,alphaOverride:saturated?.55:null,
+        commandBand:commandBandOf(command),window:{startPct:40,endPct:100}};
     }
     if(stage==="s3"){
       if(String(cfg.stage3CommandOrigin||"")==="manual")return null;
@@ -1029,9 +1092,9 @@ function createPlugin(host) {
       const command=Number(mid&&mid.command),measured=Number(mid&&mid.measured);
       if(!(command>0&&measured>0))return null;
       const r=measured/command;
-      if(!(r>=.2&&r<=3))return null;
+      if(!(r>=GAIN_R_MIN&&r<=GAIN_R_MAX))return null;
       const drift=Number(late&&late.measured)>0?Number(late.measured)/measured:null;
-      return {r,drift:Number.isFinite(drift)&&drift>0&&drift<=3?drift:null,command,measured,source:"S3 MID"};
+      return {r,drift:Number.isFinite(drift)&&drift>0&&drift<=3?drift:null,command,measured,source:"S3 MID",commandBand:commandBandOf(command)};
     }
     return null;
   }
@@ -1069,14 +1132,20 @@ function createPlugin(host) {
     const memory=gainMemoryState(true);
     if(!memory)return null;
     const selected=selectGainBucket(memory,regime.signature);
-    const bucket=selected.bucket||createGainBucket(memory,regime.signature);
-    const now=new Date().toISOString(),out={status:"updated",bucketId:bucket.id,bucketCreated:!selected.bucket,hysteresis:!!selected.hysteresis,center:bucket.center,radius:bucket.radius,signature:regime.signature,regime,stages:{},updatedAt:now};
+    const bucket=selected.bucket||selected.absorb||createGainBucket(memory,regime.signature);
+    // The centre follows the median of the signatures this regime actually
+    // produced and the radius follows their spread; a near-duplicate signature
+    // widens the nearest bucket instead of creating a fragment (L-4).
+    bucket.samples=(Array.isArray(bucket.samples)?bucket.samples.slice(-(GAIN_MEMORY_SIGNATURE_SAMPLES-1)):[]).concat([round(regime.signature,4)]);
+    bucket.center=round(median(bucket.samples),4);
+    bucket.radius=round(gainBucketRadius(bucket.samples),4);
+    const now=new Date().toISOString(),out={status:"updated",bucketId:bucket.id,bucketCreated:!selected.bucket&&!selected.absorb,absorbed:!!selected.absorb,hysteresis:false,center:bucket.center,radius:bucket.radius,signature:regime.signature,signatureSamples:bucket.samples.length,regime,stages:{},updatedAt:now};
     for(const stage of ["s2","s3"]){
       const observation=gainStageObservation(run,stage==="s3"&&evidence.s3?evidence.s3:evidence,stage);
       if(!observation){out.stages[stage]={status:"no-observation"};continue;}
       let current=bucket.stages[stage],deviation=null,alpha=null;
       if(!current||!(Number(current.r)>0)){
-        current=bucket.stages[stage]={r:round(observation.r,4),n:1,lastDeviation:null,lastObservedR:round(observation.r,4),drift:observation.drift==null?null:round(observation.drift,4),lastRunId:run.runId,updatedAt:now};
+        current=bucket.stages[stage]={r:round(observation.r,4),n:1,lastDeviation:null,lastObservedR:round(observation.r,4),drift:observation.drift==null?null:round(observation.drift,4),commandMlS:round(observation.command,4),commandBand:observation.commandBand||commandBandOf(observation.command),lastRunId:run.runId,updatedAt:now};
       }else{
         deviation=Math.abs(observation.r-current.r)/current.r;
         alpha=gainBackfillAlpha(run,deviation);
@@ -1089,14 +1158,16 @@ function createPlugin(host) {
         current.lastDeviation=round(deviation,4);
         current.lastObservedR=round(observation.r,4);
         if(Number(observation.drift)>0)current.drift=round(Number(current.drift)>0?current.drift+alpha*(observation.drift-current.drift):observation.drift,4);
+        current.commandMlS=round(observation.command,4);current.commandBand=observation.commandBand||commandBandOf(observation.command);
         current.lastRunId=run.runId;current.updatedAt=now;
       }
       out.stages[stage]={status:"updated",r:current.r,n:current.n,observedR:current.lastObservedR,
         deviationPct:current.lastDeviation==null?null:round(current.lastDeviation*100,1),alpha,
-        confidence:gainConfidence(current),source:observation.source,drift:current.drift==null?null:round(current.drift,4)};
+        confidence:gainConfidence(current),source:observation.source,drift:current.drift==null?null:round(current.drift,4),
+        commandBand:current.commandBand||null,window:observation.window||null};
     }
     if(!Object.values(out.stages).some(x=>x.status==="updated")){
-      if(!selected.bucket)memory.buckets=memory.buckets.filter(x=>x.id!==bucket.id);
+      if(!selected.bucket&&!selected.absorb)memory.buckets=memory.buckets.filter(x=>x.id!==bucket.id);
       return {...out,status:"no-observation"};
     }
     memory.lastBucketId=bucket.id;memory.updatedAt=now;bucket.updatedAt=now;run.gainMemoryBucketId=bucket.id;
@@ -1106,7 +1177,7 @@ function createPlugin(host) {
     const memory=gainMemoryState(false);
     if(!memory)return null;
     const regime=gainRegimeForRun(run);
-    let bucket=null;
+    let bucket=null,fallback=false;
     if(regime){
       bucket=run&&run.gainMemoryBucketId?memory.buckets.find(x=>x.id===run.gainMemoryBucketId):null;
       if(!bucket)bucket=selectGainBucket(memory,regime.signature).bucket;
@@ -1117,8 +1188,18 @@ function createPlugin(host) {
       bucket=memory.lastBucketId?memory.buckets.find(x=>x.id===memory.lastBucketId):null;
     }
     if(!bucket)return null;
-    const stateRow=bucket&&bucket.stages&&bucket.stages[stage];
-    if(!stateRow||!(Number(stateRow.r)>0))return null;
+    const activeBucket=bucket;
+    let stateRow=bucket.stages&&bucket.stages[stage],sourceBucket=bucket;
+    if(!stateRow||!(Number(stateRow.r)>0)){
+      // L-4: a missing stage must not fall straight back to the LUT while other
+      // buckets learned it (2.2.5: g2 had no s3, so g3 s3 r=1.94 / drift=0.913
+      // was unreachable). Borrow the most sampled other bucket and mark stale.
+      const rows=memory.buckets.filter(x=>x!==bucket&&x.stages&&Number(x.stages[stage]&&x.stages[stage].r)>0);
+      if(!rows.length)return null;
+      rows.sort((a,b)=>(Number(b.stages[stage].n)||0)-(Number(a.stages[stage].n)||0)
+        ||Math.abs(a.center-bucket.center)-Math.abs(b.center-bucket.center));
+      sourceBucket=rows[0];stateRow=rows[0].stages[stage];fallback=true;
+    }
     const cfg=run&&run.config||{};
     const target=stage==="s2"?Number(cfg.stage2Flow):Number(cfg.stage3Flow);
     const lut=stage==="s2"?Number(cfg.stage2LutCommandMlS):Number(cfg.stage3LutCommandMlS);
@@ -1127,14 +1208,16 @@ function createPlugin(host) {
     const localR=Number(stateRow.lastLocalR);
     const local=Number.isFinite(localR)&&localR>0&&Number(stateRow.lastDeviation)>GAIN_MEMORY_DEVIATION;
     const r=local?localR:Number(stateRow.r);
-    if(!(r>0.05))return null;
+    if(!(r>=GAIN_R_MIN&&r<=GAIN_R_MAX))return null;
     const ceiling=Math.min(LIMITS.commandFlowMax,Number.isFinite(lut)&&lut>0?lut*2:LIMITS.commandFlowMax);
     const command=Math.max(LIMITS.commandFlowMin,Math.min(ceiling,target/r));
-    return {stage,bucketId:bucket.id,center:bucket.center,radius:bucket.radius,bucketSamples:stateRow.n,
-      stale:!regime,r:round(r,4),smoothedR:round(stateRow.r,4),observedR:stateRow.lastObservedR,
+    return {stage,bucketId:sourceBucket.id,activeBucketId:activeBucket.id,center:sourceBucket.center,radius:sourceBucket.radius,bucketSamples:stateRow.n,
+      stale:!regime||fallback,fallback:fallback?"cross-bucket":null,r:round(r,4),smoothedR:round(stateRow.r,4),observedR:stateRow.lastObservedR,
       deviationPct:stateRow.lastDeviation==null?null:round(stateRow.lastDeviation*100,1),local,
       confidence:local?"LOW":gainConfidence(stateRow),targetGS:round(target,3),lutCommandMlS:Number.isFinite(lut)?round(lut,3):null,
       commandMlS:round(command,3),drift:stateRow.drift==null?null:round(stateRow.drift,4),
+      commandBand:stateRow.commandBand||null,currentBand:commandBandOf(command),
+      crossBand:!!(stateRow.commandBand&&stateRow.commandBand!==commandBandOf(command)),
       sourceRunId:stateRow.lastRunId||null,applied:false};
   }
   function scalarLearningSuggestion(label,key,current,previous,policy,steadyLarge) {

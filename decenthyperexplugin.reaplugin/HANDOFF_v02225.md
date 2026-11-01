@@ -39,4 +39,11 @@ STEP 1/3/4 按 2026-11-01 确认的示意图落地统一折叠；图表引擎切
 
 ## 发布记录
 
-（待补）
+（2026-11-01）
+
+- commit `5915dd9`，tag `v2.2.25`，分支 `v1.79ds` 已推送。
+- GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.25（附件 `HyperExPulseFilter_v2.2.25.zip`，435,258 字节）。
+- 夸克：`夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.25.zip`，fileId `0dbac42579d64227b39a78a3bddaaa37`。
+- SHA256：`EF11C055D0788C60B926F06C06E3E0B1F7A9DEAF961CF3A1C0A827D9B770792B`。
+- 打包：从 tag `v2.2.25` 的 `git archive` 构建（不压工作区），解压后 `node --check` 通过、复跑 **707/707**。
+- 备注：本次夸克 MCP 的上传提交接口稳定返回 `203`（列表与详情正常，5 字节探针同样失败），改用官方 skill 的 CLI（`quark-drive upload`）完成，落在同一目录。

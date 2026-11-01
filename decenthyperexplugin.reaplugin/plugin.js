@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.23";
+  const PLUGIN_VERSION = "2.2.24";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -85,7 +85,11 @@ function createPlugin(host) {
   // could be skipped entirely. 800 covers about three ticks at level 3.
   const S2_REFILL_DEFAULTS=Object.freeze({startDelayMs:0,targetPercent:160,cutoffPercent:85,maxDurationMs:4000,approachMs:800});
   const S2_REFILL_BASES=Object.freeze(["pump-command","cup-target"]);
-  const S2_REFILL_LIMITS=Object.freeze({startDelayMs:[0,1500,50],targetPercent:[100,160,1],cutoffPercent:[50,99,1],maxDurationMs:[500,4000,100],approachMs:[200,6000,100]});
+  // 2026-11-01: the cutoff floor is 30, not 50. On the real machine the rise
+  // can still overshoot at 85 and even 70, because the taper start is what has
+  // to move; 30% lets the shaping start sit at 0.3 x target without touching
+  // any other parameter. See the three-way coupling note below.
+  const S2_REFILL_LIMITS=Object.freeze({startDelayMs:[0,1500,50],targetPercent:[100,160,1],cutoffPercent:[30,99,1],maxDurationMs:[500,4000,100],approachMs:[200,6000,100]});
   // ---------------------------------------------------------------------
   // 补水段（S2 refill）所有权标记 — 2026-11-01 流量控制审查（三轮合并）
   // 口径：decentplugin 技能 §22.10 / §22.11 / §22.12（2026-11-01 用户定稿）

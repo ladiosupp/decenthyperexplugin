@@ -29,7 +29,13 @@
 4. 导出 history JSON 查 `controlOutputQuality`：`windowSettleMs` 800、`chainSettleMs` 1500、`tailFraction` 0.6，收回未确认那杯也有前两个字段。
 5. 英文界面：滑块标签应显示 `Cutoff noise floor`，状态行与派生行仍是中文（预期）。
 
-## 待用户点头
+## 待办
 
-- commit / tag v2.2.17 / push / GitHub Release / 夸克上传（按 §20，每次都要当次同意）。
 - 折叠版面在真机上的目视确认（本版没跑真机截图）。
+
+## 发布记录（2026-11-01）
+
+- commit `37b0566`，tag `v2.2.17`，分支 `v1.79ds` 已推送。
+- GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.17（附件 `HyperExPulseFilter_v2.2.17.zip`，416,498 字节）。
+- 夸克：`夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.17.zip`，fileId `58e5d32ebb8a429790a2570d1ea7765b`。
+- SHA256：`CC3CE326C231A20D32398C5749D095FE00B924D9026985B4F1A765AF1BD40810`。

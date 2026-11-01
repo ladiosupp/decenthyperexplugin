@@ -22,4 +22,12 @@
 ## 未做
 
 - 本版把曲线编辑器与补水预览也换成 canvas（逻辑坐标 800×232 / 760×156，指针命中按逻辑像素半径）；流量/角度/秤重默认 canvas，右上角切换按钮仍在。
+
+## 发布记录（2026-11-01）
+
+- commit `760cc21`，tag `v2.2.23`，分支 `v1.79ds` 已推送。
+- GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.23（附件 429,984 字节）。
+- 夸克：`夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.23.zip`，fileId `773e9663fe1b419584952bdba429ee59`。
+- SHA256：`02C4FDB058D476ABFCB442E06DBEACE05A691FDB3CD2716C88B60065609A571E`。
+- 打包注意：本版包体从 `760cc21` 的 `git archive` 构建。直接压工作区会带上 2.2.24 对话的未提交改动（首次打包就踩到，包内两条 cutoff 边界测试红）。以后发版一律从提交打。
 - 未在真机目视验收。

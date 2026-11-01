@@ -15,6 +15,61 @@ cut 9 · 补水收尾：学习沉降窗拆两档、收回未确认不再退化�
 
 ## Previous release
 
+# HyperEx Pulse Filter 2.2.15 · 一致性门与三套 S2 估计（cut 8 · L-7 / L-13 / L-15 / L-16）
+
+杯间学习的三套 S2 估计以前各说各话：单杯链路按仿射反解要 4.72 ml/s、稳态前馈因 spread 56% 本不该参与、增益记忆按 `target/r` 给 3.884——最后记忆覆盖了另外两套。这一版把它们收成一个反解，并让人、写都按同一条曲线指令比较。
+
+- **L-7 统一反解**：新增 `s2ReverseEstimate`。先取当杯**实际生效指令**（机器回显 `targetFlowMlS` 末 60% 中位数），算同窗 `r` 与 `target/r`；链路有显著截距（≥目标 10%）时才做仿射检验，且链路斜率必须 ≥ 当杯 `r` 的 75% 才采用——锚在最后一笔还没落定的写入上的「仿射解」是滞后假象，不是稳态。最后 0.9 阻尼 + `policy.s2` 限幅 + 1/16 归档。真机最后一杯：有效 3.938、尾段 4.794、`r_obs=1.2174` → **4.0625 ml/s**，与所需 4.107 差 −1.1%；旧记忆 3.884（−5.4%）、旧晚写仿射 4.72（+14.9%）。
+- **r 做成命令的函数**：`gainMemory` 每段新增 `bands`（`<1.0` … `>=5.0`），每杯只更新自己所在区间；建议时只取同区间先验，跨区标 `crossBand`，不静默套用。旧记录没有 `bands` 时仍按单值 r 兼容。
+- **记忆不再覆盖同杯建议**：有可用的 ADJUST / LUT COMPENSATE 数值时，记忆只报 `role:"prior"`、`applied:false`；只有没有同杯数值时才由记忆填。
+- **L-13 半档相等**：`sameScalarAdaptiveEvidence` / `sameStage3Shape` 的 command 容差 0.005 → 0.03125（半个 1/16 档）；target 0.01、时序 0.25 s 不变。跨 measurement basis 不再硬拒，改打 `cross-window historical reference` 并把 S3 置信度降一级。真机 `historySearch` 的 4/5 incompatible 由这条消除。
+- **前馈 spread 门真正生效**：两杯 spread ≤5%、三杯以上 ≤10% 才 `eligible`；超限只留遥测参考，`applied` 永远为假，且不参与建议。前馈输出也过 `snapCommandFlow`。
+- **L-16 目标比例一步过渡**：`testOverrideStatus` 在 0.5–2× 内返回 `targetScale`，`manualTestCommand` / `s3ShapeStatus` / `preserveStage` 读取时缩放，`rescaleOverridesForTargets` 负责持久化；超过 2× 仍无效。`mapCreatedAt` 变化仍整套作废（不同 LUT 下的绝对指令没有定义，`gainMemory` 按 §22.1 保留）。
+- **L-15 起步上界**：`startupMetricAllowed` 的 `tailMeanGS` 上界 +8% → +25%，下界 −50%、纹波 12%×factor、过冲 8%×factor 保留。真机 00:25 的 `tailCvPct 15.43` 仍被纹波门拒绝。
+- **HOLD 真正可达**：`nextShotAdaptiveSuggestion` 不再拿 `s2.currentCommandMlS`（有链时是链路末笔 4.3125）与建议比，而是与本杯曲线指令比；S1/S2 的 ADJUST、S3 的三段形状都与曲线同档时转 HOLD。新增 `hold.all = !actionable`：全段都没有真实变化才不重写曲线。真机四杯 S1 都在 ADJUST 的问题由此不再强迫重写。
+- **测试**：tests/verify_v02215.cjs **677/677**（666 条既有 + 11 条 cut 8）。新增覆盖：半档相等（命中与拒绝）、半档历史行命中、真机 00:25 统一反解、落定链路采用仿射、四档 `policy.s2` 限幅、spread 超限前馈不参与、+25% 起步上界、目标一步 rescale、HOLD 与曲线比较 + 全段 HOLD、跨 basis 降置信度、截距植物 5 杯闭环。v02214 测试与 RESULTS 原样保留；安全门零删除。
+
+### 局限 / 未决
+
+- **≥5 ml/s 稳态 r 仍 0 样本**；4–5 区间的 0.88 中位是暂态，不是高流量稳态。高指令标定（5.5 / 6.5 / 7.5 ml/s 各 3 s）仍待做。
+- 目标比例超过 0.5–2× 仍整套作废；要跨数量级，先重跑 Flow Cal。
+- `gainMemorySuggestion` 在 `updateGainMemoryFromRun` 之后调用，同区间先验已含当杯 r（权重最多 0.25，实测影响 <0.01 ml/s）；严格「先验不含当杯」需在更新前快照。
+- 补水植物整体准确度仍不记达标（缺压力/粉饼动态与 ≥5 ml/s 稳态 r）；本版没有动物理参数，`HX_LOOP_REPORT=1` 与 cut 0/1/5 逐项一致（rise 0.60 s、峰值 +33.2%、平台 −19.3%、return 3.875）。
+
+## Previous release
+
+# HyperEx Pulse Filter 2.2.14 · S3 形状：删串联门、拆非递减、门槛按档位（cut 7 · L-5 / L-6）
+
+S3 形状以前有两条并行通路：约 15 条串联硬门的 shape-only 共识，和 drift 模型。前者实际不可达；后者因为学习快照没带 `s3DriftModel`，在生产里从来没跑过——真机形状因此一直是平直（0.777/0.777/0.777，origin 标 adaptive）。
+
+- **L-5 删除 `stage3ShapeOnlyConsensus`**：同指令、同时序、同 basis、两杯 LATE DECAY、lateToEarlyRatio<0.80、overallR2≥0.95、逐帧 r2/秒数、shapeVar/overallVar、profileRatio 互差、逐帧 ≤0.05/4%、非递减、相邻增幅、曝光变化 ≤0.2%、至少一帧变化 ≥0.005——整块删除。S3 形状只剩 drift 一个写入口；`s3DriftModel` 关闭时旧 LEVEL+SHAPE 建议仍可作回退。
+- **drift 真的能跑**：诊断快照 `run.config` 现在带 `s3DriftModel`。以前 `driftShapeSuggestion` 读 `run.config.s3DriftModel`，快照里却没有这个键，函数永远返回 null；EARLY 帧的 S2→S3 沉降排除也因此从未生效。两处一起修好。
+- **L-6 非递减三处拆除**：`projectS3Commands`、`curveLimits`、`applyCurveEditorDraft` 不再要求 EARLY ≤ MID ≤ LATE，只保留相邻增幅 ≤ max(+0.25 ml/s, ×1.35)。`s3ShapeStatus` 读回 legacy 形状时也不再因顺序拒绝；stall 恢复路径与高级手动编辑器里的同一限制一并删掉。
+- **按档位计的门槛**：新增 `s3StepLimit(command, fraction, absolute) = max(1/16, |command|×fraction, absolute)`。形状门与学习门以「1 个 1/16 档」为最小可表达单位；4% / 0.05 ml/s 这类阈值只作档内死区（理想修正 < 半档 → HOLD），不再当外部硬门。0.75 ml/s 处一档 = 8.3%，正好越过 4% 与 8% 的旧门。套用处：`projectS3Commands`、两处 `bounded()`、levelFactor 的 ±5%、`stage3SingleSuggestion` 的死区与步幅、`driftShapeSuggestion` 的 MID 步幅、`addGain` 的 S3 feed-forward。
+- **曲线编辑器按 model 分支**：形状值不变时原样保留已存对象（只改补水参数不再重写 S3）；真正编辑形状时写 `model:"drift"` + `earlyFactor` + `drift` + `manual`/`manualTilt`，不再把 drift 降级成 legacy，也不会让 `manualS3ShapeLocked` 失效。`curveLimits` 只限制相邻增幅（MID 相对 EARLY、LATE 相对 MID 的上限）。
+- **UI 文案**：「一档 = 1/16 ml/s…」「输入值按档位归档…」「当前控制点允许范围…」与静态页面同步改成「S3 允许前段高于中段、后段低于中段；只限制相邻增幅」。
+- **测试**：tests/verify_v02214.cjs 666/666。新增：删除不变量（源码不再含 `stage3ShapeOnlyConsensus`）、诊断快照携带 `s3DriftModel`、0.75 ml/s 一档步幅、单杯 6.7% 误差产出一档修正而 1.3% 落 HOLD、drift 投影保持非单调形状、drift 学习并写进曲线（EARLY>MID、LATE<MID）、曲线编辑器保存 drift 不降级、后续曲线保存保留 drift 因子、0.50–2.00 之外的比率被拒。
+
+### 局限 / 未决
+
+- 真机 `hyperex-history (4).json` 里 16 杯带 `evidence.s3`，但**最新一杯（2.2.5，00:27）没有**，那一杯的逐帧 gain 无法重算；本轮用两条 2.2.4 的 evidence.s3 做了 drift 回放（见 HANDOFF §3），最新杯只能核对「平直 + origin=adaptive」。
+- `sameStage3Shape` 的相等判据当时仍是 0.005（L-13，cut 8）。2.2.15 已放宽到半个档位（0.03125），drift 每杯改形状不再被判成「不同指令」；保守／温和两档受此影响的问题一并关闭。
+- drift 的 `earlyFactor`/`drift` 仍是每杯 ±20% 的比率步幅，与按档位计的指令步幅是两件事。
+
+## Previous release
+
+# HyperEx Pulse Filter 2.2.13 · 指令归档统一（Q-1 / L-14）
+
+驱动只走 1/16 ml/s（0.0625）档位。2.2.12 及以前只有写入面归档：`resolvedStageCommandFlow` 返回 2.507 这类未归档值，`gainMemorySuggestion` 的 target/r 用 `round(...,3)`，「指令是否相同」用 0.005 比较——比一档细 12.5 倍。结果配置面、UI 面、学习面、写入面各说各话，`gain memory already maps to the current command` 分支不可达，AUTO APPLY 每杯重写内容寻址 profile。
+
+本版：`resolvedStageCommandFlow`、`liveTrimControlCenter`、`gainMemorySuggestion`、`driftShapeSuggestion`、`scalarLearningSuggestion` / `scalarConsensusSuggestion` 的 suggested、学习输出写回、`rescaleOverridesForTargets`、手动曲线保存、`curveSetValue` 全部过 `snapCommandFlow`；新增 `sameCommandFlow(a,b)`（两侧先归档，半个档位内视为同一条指令），用于 HOLD 判定、读回校验、`keep` 模式识别。学习输出直接存档位值，不再 `round(...,3)`（3.0625 存成 3.063 会让读回和比较再次失配）。
+
+真机对照：REVIEW §1.4 的 00:25 那杯曲线 3.875、记忆 r=1.2874 → 3.884，旧比较恒为 ADJUST；归档后 3.875 与曲线一致，同一条件的下一杯走 HOLD，不再改写 profile。
+
+已知边界（留给 cut 7；2.2.14 已按 1/16 档位计门槛）：S3 在 0.75 ml/s 附近一档约 8.3%，而 S3 形状门是 4% / 0.05 ml/s、正常学习门是 8%（0.06 ml/s），档位粒度已经大于门槛。量化后这些形状修正无法表达，会落成 HOLD。S3 形状与学习门槛需要按档位计，而不是按百分比计。
+
+## Previous release
+
 # HyperEx Pulse Filter 2.2.12
 
 增益记忆的结构：桶中心跟随实测、命中改成最近邻分区、缺段跨桶回退、LRU 淘汰、r 只有一套范围、分子分母同窗。
@@ -105,8 +160,8 @@ S2 补水按 §22.11 重写：泵流量是趋势矢量，灌水量只受安全�
 - **灌水期可以逐笔下调（trim / 断流）**：新增 dispatchS2Startup(t,"trim")，每 500 ms 一次、要求上一笔已 ACK、单调向下、trace 记 startup-bleed，图表标记「补水断流」。
 - **修掉一个会让断流永远写不出去的档位 bug**：boundedRefillCommand 原来用 Math.floor 归档，floor(0.10×16)/16 = 0.0625 低于驱动硬下限，dispatchS2Startup 会静默拒发；改用 snapCommandFlow。
 - **cutoffPercent 恢复成真正可调**：删掉 bounded 模式下「值等于 85 就改成 95」的按值迁移（它分不清历史遗留的 85 和用户主动设的 85，正好把文档里「过冲就下调 cutoff」这条路堵死）。默认回到 85，已存的值不动。
-- **测试策略改了**：tests/verify_v0227.cjs 637/637。删掉 6 条镜像断言（assert.equal(p.controlBaseMlS,5) 这类「代码算出什么就断言什么」，其中一条还把 1.5× 上限本身钉成不变量），换成两层：① §22.11 口径不变量（对 3.0–6.5 g/s 每个目标断言灌水上限 ≥7.0；对 r ∈ {1.05,1.19,1.29,1.39,1.6} 断言平台 = snap(target/r) 且低于目标、灌水不随 r 变；断言规律能降到平台以下并到 0.125；断言单调向下）；② **闭环植物测试**——按实测动力学（0.35 s 死区 + τ 0.4 s + 粉饼限流 5.5 ml/s + 杯流 = r × 泵流）合成植物，按 50 ms 步进、250 ms tick 真跑 liveTrimTick，断言的是**秤流速曲线**：泵指令必须一度超过目标杯流数值（这一条杀掉所有「泵 = 设定值」的写法）、上升 20→80% ≤1.5 s、收口落在平台、补水写入 ≤10 笔。安全门测试（限压、ACK、帧确认、预算、秤失效、profile truth、存储回读）一条没动。
-- **已知未完成（需用户定口径后再改）**：闭环测出的过冲仍然偏大——r=1.29 峰值 +36.4%、r=1.05 +11.3%、r=1.6 +62.7%（平台 −15.0% / −11.0% / −12.2%）。原因是**单步收口**：从 8 ml/s 一步回到平台，泵要 ~1.2 s 才走完，这段时间杯流继续冲。§22.11 要求的是**两段收口**（先断流、让留存水把杯流顶到目标，再写平台）。试过把 cutoff 改成前瞻判据（predicted ≥ target、观测值只当噪声底），过冲降到 +22.6% / +7.7% / +51.2%，但 trim 一次都没触发——上升太快，从 cutoff 到 target 只有约 0.1 s，250 ms 的 tick 抓不到那个窗口，所以**断流必须放在 return 那一笔而不是灌水途中**，这需要在 boosting → returning 之间加一个 bleeding 状态，属于改安全状态机，已回退等确认。
+- **测试策略改了**：tests/verify_v0227.cjs 637/637（cut 0 按新 cutoff 口径重写后 642/642，见下条）。删掉 6 条镜像断言（assert.equal(p.controlBaseMlS,5) 这类「代码算出什么就断言什么」，其中一条还把 1.5× 上限本身钉成不变量），换成两层：① §22.11 口径不变量（对 3.0–6.5 g/s 每个目标断言灌水上限 ≥7.0；对 r ∈ {1.05,1.19,1.29,1.39,1.6} 断言平台 = snap(target/r) 且低于目标、灌水不随 r 变；断言规律能降到平台以下并到 0.125；断言单调向下）；② **闭环植物测试**——按实测动力学（0.35 s 死区 + τ 0.4 s + 粉饼限流 5.5 ml/s + 杯流 = r × 泵流）合成植物，按 50 ms 步进、250 ms tick 真跑 liveTrimTick，断言的是**秤流速曲线**：泵指令必须一度超过目标杯流数值（这一条杀掉所有「泵 = 设定值」的写法）、上升 20→80% ≤1.5 s、收口落在平台、补水写入 ≤10 笔。安全门测试（限压、ACK、帧确认、预算、秤失效、profile truth、存储回读）一条没动。
+- **两段收口已实现（同日用户批准后，HANDOFF_v0227 §8）**：cutoff 改成前瞻判据——实测 ≥ cutoff×0.6 只当噪声底，收回看前导补偿后的预测秤流 ≥ 100% 目标；新增 bleeding 状态，cutoff 触发先写 `snap(max(0.10, 平台×0.35))` 断流，等 700 ms（`S2_REFILL_BLEED_MS`）或秤流回落到 target×1.02 以内，再写平台 `target/r`。状态机 armed → boosting → bleeding → returning → complete，四组安全路径同步；断流笔的 ACK 不结束补水，看门狗容忍已 ACK 的断流笔（最多续两次 1500 ms）。同一植物只改收口：r=1.29 峰值 +88% → +36.4% → **+21.4%**、平台偏差 −15.0% → **−1.4%**；r=1.05 / 1.6 的过冲与平台都达标。剩下的过冲靠 `cutoffPercent` 与 `bleedMs` 继续收，属真机调参。测试：cut 0 已按新口径重写，`tests/verify_v0227.cjs` 642/642。
 
 ## Previous release
 
@@ -669,7 +724,7 @@ Based on delivered/GitHub1.70. Install over the same plugin; retain LUT/history 
 
 1.70将正常单杯和双杯LEVEL+SHAPE调整改为带每段时长权重的有界单调投影，保留非递减、相邻变化与四档逐段上限。冲突的三段共同让步，而不是用前段的新最大值覆盖后两段。为最终投影保留原始逐段建议，避免提前丢失后段下降意图。专门的停滞恢复规则保持。
 
-对于杯内运行的S3，如果真实RAW尾段超出所选学习带，而归一化模型建议相反方向变化，高尾段阻止上调，低尾段阻止下调；仍可保留同向的限幅修正。模型冲突造成HOLD时显示“实测与模型方向冲突，保持”，不会冒称“在容差内”。投影后不足0.005ml/s的变化不会被当成新的数值应用。模型未被当成实际测量；RAW曲线/误差继续独立展示。该规则不保证根除所有杯差，也不会人为制造非平直命令；受当前非递减形状约束时，合理结果仍可能为平直。
+对于杯内运行的S3，如果真实RAW尾段超出所选学习带，而归一化模型建议相反方向变化，高尾段阻止上调，低尾段阻止下调；仍可保留同向的限幅修正。模型冲突造成HOLD时显示“实测与模型方向冲突，保持”，不会冒称“在容差内”。投影后不足0.005ml/s的变化不会被当成新的数值应用。模型未被当成实际测量；RAW曲线/误差继续独立展示。该规则不保证根除所有杯差，也不会人为制造非平直命令；受当时非递减形状约束时，合理结果仍可能为平直。
 
 
 ### S3指令历史追溯
@@ -712,13 +767,13 @@ Validation: **388/388 Node synthetic/regression checks**. Includes the361 prior 
 | 正常（默认） | 一杯合格证据 | ±8% | ±10%且0.08ml/s | ±12%且0.35ml/s | ±8%且0.075ml/s |
 | 激进 | 一杯合格证据，更高增益 | ±5% | ±15%且0.12ml/s | ±20%且0.60ml/s | ±12%且0.125ml/s |
 
-百分比与绝对值同时限幅，并保留机器流量、S3顺序/相邻变化限制、压力与执行保护；不是承诺实际杯流按同比例改变。基础增益0.18/0.25/0.35/0.55。历史同向一致时作为约20%参考；当前与历史冲突时正常/激进缩小本次步幅而非一律REPEAT。保守保留两杯一致性检查；已确认S3停滞仍使用较保守的专门恢复规则。
+百分比与绝对值同时限幅，并保留机器流量、S3 相邻增幅限制（2.2.14 起不再要求顺序递增）、压力与执行保护；不是承诺实际杯流按同比例改变。基础增益0.18/0.25/0.35/0.55。历史同向一致时作为约20%参考；当前与历史冲突时正常/激进缩小本次步幅而非一律REPEAT。保守保留两杯一致性检查；已确认S3停滞仍使用较保守的专门恢复规则。
 
 **激进的统计学习准入范围为正常的1.3倍**。例如S2稳态与起步波动CV上限12%→15.6%，拟合未解释误差上限0.10→0.13，即R²0.90→0.87；固定S2回归R²0.97→0.961。最少统计时长/覆盖率按1.3折算，样本数向上取整；归一化窗口离散度25%→32.5%、历史参考一致范围35%→45.5%。它扩大可用证据，不把错误杯算正确，也不扩大实际出液目标或驱动安全边界。原始HIT/NEAR/MISS仍是出液诊断，与数据准入/学习误差带分别显示。
 
 ### Same curve, dynamic evidence
 
-Normal/Aggressive use current clean S1 startup, S2 level and S3 frame evidence without requiring an identical-command repeat. Near-target current evidence holds; a pressure/actuator limit, unavailable RAW evidence, excluded fault or numeric response outside0.2–3×target still withholds correction. Missing evidence is never invented. Gentle permits a clean large scalar error(≥20%, with stable matching tail forS2) or largeS3frame error; Conservative requires comparable repeats. S3 single-shot LEVEL+SHAPE changes retain the monotonic/adjacent bounds. An explicit user OFF for autoapply still requires manual application.
+Normal/Aggressive use current clean S1 startup, S2 level and S3 frame evidence without requiring an identical-command repeat. Near-target current evidence holds; a pressure/actuator limit, unavailable RAW evidence, excluded fault or numeric response outside0.2–3×target still withholds correction. Missing evidence is never invented. Gentle permits a clean large scalar error(≥20%, with stable matching tail forS2) or largeS3frame error; Conservative requires comparable repeats. S3 single-shot LEVEL+SHAPE changes retain only the adjacent-rise bound; EARLY may sit above MID and LATE below MID. An explicit user OFF for autoapply still requires manual application.
 
 For this single fixed HyperEx curve, numeric history no longer hard-matches targets, weight exits, soak time, temperature or pressure-setting microchanges. PhysicalLUT/multiplier, coffee/empty context and ActiveReleaseON/OFF remain separated. Existing coffee qualification and valid learned command seeds survive microchanges without resetting to empty calibration. Existing qualification-marker strings migrate by normalizing their original fingerprint. Learned override goal bindings accept bounded goal changes instead of discarding every small change; physicalLUT and mode guards remain.
 
@@ -846,53 +901,3 @@ Live trim defaults ON at level3; diagnostic slider/native dropdown. Saved explic
 Full browser visual/touch rendering was unavailable (Chromium/Firefox and SVG raster delegate not installed); simulated DOM/pointer checks are not hardware or full WebView validation. Existing handheld/tablet screenshots remain the actual1.60 evidence. No1.65 device results yet.
 
 Run node --check plugin.js and node tests/verify_v0174.cjs. Current HANDOFF_v0174.md and tests/RESULTS_v0174.txt accompany this package. LICENSE and original calibration JSON are unchanged. Delivered older ZIPs remain immutable; old remote files retained for history.
-
-
-## 2.2.13 · 指令归档统一（Q-1 / L-14）
-
-驱动只走 1/16 ml/s（0.0625）档位。2.2.12 及以前只有写入面归档：`resolvedStageCommandFlow` 返回 2.507 这类未归档值，`gainMemorySuggestion` 的 target/r 用 `round(...,3)`，「指令是否相同」用 0.005 比较——比一档细 12.5 倍。结果配置面、UI 面、学习面、写入面各说各话，`gain memory already maps to the current command` 分支不可达，AUTO APPLY 每杯重写内容寻址 profile。
-
-本版：`resolvedStageCommandFlow`、`liveTrimControlCenter`、`gainMemorySuggestion`、`driftShapeSuggestion`、`scalarLearningSuggestion` / `scalarConsensusSuggestion` 的 suggested、学习输出写回、`rescaleOverridesForTargets`、手动曲线保存、`curveSetValue` 全部过 `snapCommandFlow`；新增 `sameCommandFlow(a,b)`（两侧先归档，半个档位内视为同一条指令），用于 HOLD 判定、读回校验、`keep` 模式识别。学习输出直接存档位值，不再 `round(...,3)`（3.0625 存成 3.063 会让读回和比较再次失配）。
-
-真机对照：REVIEW §1.4 的 00:25 那杯曲线 3.875、记忆 r=1.2874 → 3.884，旧比较恒为 ADJUST；归档后 3.875 与曲线一致，同一条件的下一杯走 HOLD，不再改写 profile。
-
-已知边界（留给 cut 7 / 待用户定口径）：S3 在 0.75 ml/s 附近一档约 8.3%，而 S3 形状门是 4% / 0.05 ml/s、正常学习门是 8%（0.06 ml/s），档位粒度已经大于门槛。量化后这些形状修正无法表达，会落成 HOLD。S3 形状与学习门槛需要按档位计，而不是按百分比计。
-
-## 2.2.14 · S3 形状：删串联门、拆非递减、门槛按档位（cut 7 · L-5 / L-6）
-
-S3 形状以前有两条并行通路：约 15 条串联硬门的 shape-only 共识，和 drift 模型。前者实际不可达；后者因为学习快照没带 `s3DriftModel`，在生产里从来没跑过——真机形状因此一直是平直（0.777/0.777/0.777，origin 标 adaptive）。
-
-- **L-5 删除 `stage3ShapeOnlyConsensus`**：同指令、同时序、同 basis、两杯 LATE DECAY、lateToEarlyRatio<0.80、overallR2≥0.95、逐帧 r2/秒数、shapeVar/overallVar、profileRatio 互差、逐帧 ≤0.05/4%、非递减、相邻增幅、曝光变化 ≤0.2%、至少一帧变化 ≥0.005——整块删除。S3 形状只剩 drift 一个写入口；`s3DriftModel` 关闭时旧 LEVEL+SHAPE 建议仍可作回退。
-- **drift 真的能跑**：诊断快照 `run.config` 现在带 `s3DriftModel`。以前 `driftShapeSuggestion` 读 `run.config.s3DriftModel`，快照里却没有这个键，函数永远返回 null；EARLY 帧的 S2→S3 沉降排除也因此从未生效。两处一起修好。
-- **L-6 非递减三处拆除**：`projectS3Commands`、`curveLimits`、`applyCurveEditorDraft` 不再要求 EARLY ≤ MID ≤ LATE，只保留相邻增幅 ≤ max(+0.25 ml/s, ×1.35)。`s3ShapeStatus` 读回 legacy 形状时也不再因顺序拒绝；stall 恢复路径与高级手动编辑器里的同一限制一并删掉。
-- **按档位计的门槛**：新增 `s3StepLimit(command, fraction, absolute) = max(1/16, |command|×fraction, absolute)`。形状门与学习门以「1 个 1/16 档」为最小可表达单位；4% / 0.05 ml/s 这类阈值只作档内死区（理想修正 < 半档 → HOLD），不再当外部硬门。0.75 ml/s 处一档 = 8.3%，正好越过 4% 与 8% 的旧门。套用处：`projectS3Commands`、两处 `bounded()`、levelFactor 的 ±5%、`stage3SingleSuggestion` 的死区与步幅、`driftShapeSuggestion` 的 MID 步幅、`addGain` 的 S3 feed-forward。
-- **曲线编辑器按 model 分支**：形状值不变时原样保留已存对象（只改补水参数不再重写 S3）；真正编辑形状时写 `model:"drift"` + `earlyFactor` + `drift` + `manual`/`manualTilt`，不再把 drift 降级成 legacy，也不会让 `manualS3ShapeLocked` 失效。`curveLimits` 只限制相邻增幅（MID 相对 EARLY、LATE 相对 MID 的上限）。
-- **UI 文案**：「一档 = 1/16 ml/s…」「输入值按档位归档…」「当前控制点允许范围…」与静态页面同步改成「S3 允许前段高于中段、后段低于中段；只限制相邻增幅」。
-- **测试**：tests/verify_v02214.cjs 666/666。新增：删除不变量（源码不再含 `stage3ShapeOnlyConsensus`）、诊断快照携带 `s3DriftModel`、0.75 ml/s 一档步幅、单杯 6.7% 误差产出一档修正而 1.3% 落 HOLD、drift 投影保持非单调形状、drift 学习并写进曲线（EARLY>MID、LATE<MID）、曲线编辑器保存 drift 不降级、后续曲线保存保留 drift 因子、0.50–2.00 之外的比率被拒。
-
-### 局限 / 未决
-
-- 真机 `hyperex-history (4).json` 里 16 杯带 `evidence.s3`，但**最新一杯（2.2.5，00:27）没有**，那一杯的逐帧 gain 无法重算；本轮用两条 2.2.4 的 evidence.s3 做了 drift 回放（见 HANDOFF §3），最新杯只能核对「平直 + origin=adaptive」。
-- `sameStage3Shape` 的相等判据仍是 0.005（L-13，cut 8）。drift 每杯都会改形状，两杯很难被判成「同形状」；因此保守／温和两档要求「上一条可比证据」时，drift 实际学不动。默认「正常」档不受影响。
-- drift 的 `earlyFactor`/`drift` 仍是每杯 ±20% 的比率步幅，与按档位计的指令步幅是两件事。
-
-## 2.2.15 · 一致性门与三套 S2 估计（cut 8 · L-7 / L-13 / L-15 / L-16）
-
-杯间学习的三套 S2 估计以前各说各话：单杯链路按仿射反解要 4.72 ml/s、稳态前馈因 spread 56% 本不该参与、增益记忆按 `target/r` 给 3.884——最后记忆覆盖了另外两套。这一版把它们收成一个反解，并让人、写都按同一条曲线指令比较。
-
-- **L-7 统一反解**：新增 `s2ReverseEstimate`。先取当杯**实际生效指令**（机器回显 `targetFlowMlS` 末 60% 中位数），算同窗 `r` 与 `target/r`；链路有显著截距（≥目标 10%）时才做仿射检验，且链路斜率必须 ≥ 当杯 `r` 的 75% 才采用——锚在最后一笔还没落定的写入上的「仿射解」是滞后假象，不是稳态。最后 0.9 阻尼 + `policy.s2` 限幅 + 1/16 归档。真机最后一杯：有效 3.938、尾段 4.794、`r_obs=1.2174` → **4.0625 ml/s**，与所需 4.107 差 −1.1%；旧记忆 3.884（−5.4%）、旧晚写仿射 4.72（+14.9%）。
-- **r 做成命令的函数**：`gainMemory` 每段新增 `bands`（`<1.0` … `>=5.0`），每杯只更新自己所在区间；建议时只取同区间先验，跨区标 `crossBand`，不静默套用。旧记录没有 `bands` 时仍按单值 r 兼容。
-- **记忆不再覆盖同杯建议**：有可用的 ADJUST / LUT COMPENSATE 数值时，记忆只报 `role:"prior"`、`applied:false`；只有没有同杯数值时才由记忆填。
-- **L-13 半档相等**：`sameScalarAdaptiveEvidence` / `sameStage3Shape` 的 command 容差 0.005 → 0.03125（半个 1/16 档）；target 0.01、时序 0.25 s 不变。跨 measurement basis 不再硬拒，改打 `cross-window historical reference` 并把 S3 置信度降一级。真机 `historySearch` 的 4/5 incompatible 由这条消除。
-- **前馈 spread 门真正生效**：两杯 spread ≤5%、三杯以上 ≤10% 才 `eligible`；超限只留遥测参考，`applied` 永远为假，且不参与建议。前馈输出也过 `snapCommandFlow`。
-- **L-16 目标比例一步过渡**：`testOverrideStatus` 在 0.5–2× 内返回 `targetScale`，`manualTestCommand` / `s3ShapeStatus` / `preserveStage` 读取时缩放，`rescaleOverridesForTargets` 负责持久化；超过 2× 仍无效。`mapCreatedAt` 变化仍整套作废（不同 LUT 下的绝对指令没有定义，`gainMemory` 按 §22.1 保留）。
-- **L-15 起步上界**：`startupMetricAllowed` 的 `tailMeanGS` 上界 +8% → +25%，下界 −50%、纹波 12%×factor、过冲 8%×factor 保留。真机 00:25 的 `tailCvPct 15.43` 仍被纹波门拒绝。
-- **HOLD 真正可达**：`nextShotAdaptiveSuggestion` 不再拿 `s2.currentCommandMlS`（有链时是链路末笔 4.3125）与建议比，而是与本杯曲线指令比；S1/S2 的 ADJUST、S3 的三段形状都与曲线同档时转 HOLD。新增 `hold.all = !actionable`：全段都没有真实变化才不重写曲线。真机四杯 S1 都在 ADJUST 的问题由此不再强迫重写。
-- **测试**：tests/verify_v02215.cjs **677/677**（666 条既有 + 11 条 cut 8）。新增覆盖：半档相等（命中与拒绝）、半档历史行命中、真机 00:25 统一反解、落定链路采用仿射、四档 `policy.s2` 限幅、spread 超限前馈不参与、+25% 起步上界、目标一步 rescale、HOLD 与曲线比较 + 全段 HOLD、跨 basis 降置信度、截距植物 5 杯闭环。v02214 测试与 RESULTS 原样保留；安全门零删除。
-
-### 局限 / 未决
-
-- **≥5 ml/s 稳态 r 仍 0 样本**；4–5 区间的 0.88 中位是暂态，不是高流量稳态。高指令标定（5.5 / 6.5 / 7.5 ml/s 各 3 s）仍待做。
-- 目标比例超过 0.5–2× 仍整套作废；要跨数量级，先重跑 Flow Cal。
-- `gainMemorySuggestion` 在 `updateGainMemoryFromRun` 之后调用，同区间先验已含当杯 r（权重最多 0.25，实测影响 <0.01 ml/s）；严格「先验不含当杯」需在更新前快照。
-- 补水植物整体准确度仍不记达标（缺压力/粉饼动态与 ≥5 ml/s 稳态 r）；本版没有动物理参数，`HX_LOOP_REPORT=1` 与 cut 0/1/5 逐项一致（rise 0.60 s、峰值 +33.2%、平台 −19.3%、return 3.875）。

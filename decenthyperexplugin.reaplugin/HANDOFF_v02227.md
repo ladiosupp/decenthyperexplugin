@@ -37,5 +37,13 @@ box.querySelector('[data-refill-key=""floodMaxMlS""]')
 
 ## 待办
 
-1. 用户点头后 commit + tag + Release + 夸克，并提醒 2.2.26 作废。
-2. 真机复测 STEP 1 / STEP 2 能正常准备完毕。
+- 真机复测 STEP 1 / STEP 2 能正常准备完毕。
+
+## 发布记录（2026-11-02）
+
+- commit `d6a3254`，tag `v2.2.27`，分支 `v1.79ds` 已推送。
+- GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.27（附件 `HyperExPulseFilter_v2.2.27.zip`，437,982 字节）。
+- 夸克：`夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.27.zip`，fileId `de53d45448f24254a75cdf020a2878d0`。
+- SHA256：`1EA039AF6EEA50D2B463DDCDB1F2118D8170C59B158ECB1EB78C625A2AA2B3A6`。
+- 打包：从 tag `v2.2.27` 的 `git archive` 构建；解压后 `node --check` 通过、复跑 **714/714**。
+- **2.2.26 作废**，发布说明已注明。

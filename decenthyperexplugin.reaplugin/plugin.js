@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.8";
+  const PLUGIN_VERSION = "2.2.9";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -6941,6 +6941,24 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     if(!(Number(r)>0)||!Number.isFinite(errGS))return min;
     return Math.max(min,Math.min(max,Math.round(Math.abs(errGS)/r*16)));
   }
+  // §22.4 / T-5,T-6,L-8: the ONLY place that decides how far a trim write may
+  // reach. Normal = center ±20%, always inside the driver range and always
+  // containing the command that is actually live (otherwise no state can move).
+  // Rescue = at least the normal ceiling and up to min(8, LUT×2), so entering
+  // rescue can never shrink the reachable set.
+  function commandCeilingFor(phase,mode,ctx) {
+    const min=LIMITS.commandFlowMin,max=LIMITS.commandFlowMax;
+    const num=v=>v!==null&&v!==undefined&&Number.isFinite(Number(v))?Number(v):NaN;
+    const command=num(ctx&&ctx.command),center=num(ctx&&ctx.center),mapped=num(ctx&&ctx.mapped);
+    const anchor=Number.isFinite(center)?center:Number.isFinite(mapped)?mapped:command;
+    let lo=Math.min(anchor*.8,Number.isFinite(mapped)?mapped:anchor);
+    let hi=Math.max(anchor*1.2,Number.isFinite(mapped)?mapped:anchor);
+    if(mode==="rescue"){lo=min;hi=Math.min(max,Math.max(hi,Number.isFinite(mapped)?mapped*2:anchor*2));}
+    if(Number.isFinite(command)){lo=Math.min(lo,command);hi=Math.max(hi,command);}
+    lo=Math.max(min,Math.min(max,Math.ceil(lo*16)/16));
+    hi=Math.max(min,Math.min(max,Math.floor(hi*16)/16));
+    return {lo,hi};
+  }
   function closeLiveTrim(t) {
     if(!t)return;clearS2StartupTimers(t);if(!t.handle)return;const h=t.handle;t.handle=null;
     host.transport.close(h).catch(()=>{});
@@ -7344,8 +7362,13 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       if(predictive){
         controlCenter=liveTrimControlCenter(state.phase,base,t.run);
         const r=Number(controlCenter.r)>0?Number(controlCenter.r):(state.phase==="stage3"?1.8:1.2);
-        const normalMin=state.phase==="stage3"?(predictedRel>=.08?3:2):1;
-        steps=rescueActive?predictiveStepQuanta(errGS,r,8,24):predictiveStepQuanta(errGS,r,normalMin,4);
+        // T-7: the S3 normal floor was 2-3 quanta, i.e. 13-20% of a 2 g/s
+        // target against a 4% deadband -- that is the limit cycle. The normal
+        // action set is 0/±1/±2/±4, so the floor is one quantum everywhere.
+        // T-8: rescue starts from an error-scaled floor (2..8) instead of a
+        // fixed 8, so an S3 rescue writes 0.1-0.2 ml/s rather than 54% of target.
+        const rescueMin=Math.max(2,Math.min(8,Math.round(.25*Math.abs(errGS)/r*16)));
+        steps=rescueActive?predictiveStepQuanta(errGS,r,rescueMin,24):predictiveStepQuanta(errGS,r,1,4);
         row.controlCenterMlS=round(controlCenter.commandMlS,3);row.controlSource=controlCenter.source;row.controlR=controlCenter.r;row.controlBucket=controlCenter.bucketId||null;row.stepQuanta=steps;
       }else{
         steps=trimMode==="lut-compensate"?Math.max(2,vectorStepCount(errGS,t.bigAngleStreak,target)):vectorStepCount(errGS,t.bigAngleStreak,target);
@@ -7355,14 +7378,8 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       let lo,hi;
       if(predictive){
         const center=Number.isFinite(Number(controlCenter&&controlCenter.commandMlS))?Number(controlCenter.commandMlS):base;
-        if(rescueActive){
-          lo=LIMITS.commandFlowMin;
-          hi=Math.floor((Number.isFinite(Number(mapped))?Math.min(LIMITS.commandFlowMax,Number(mapped)*2):LIMITS.commandFlowMax)*16)/16;
-        }else{
-          const floor=Number.isFinite(Number(mapped))?Number(mapped):center;
-          lo=Math.ceil(Math.min(center*.8,floor)*16)/16;
-          hi=Math.floor(Math.max(center*1.2,floor)*16)/16;
-        }
+        const ceiling=commandCeilingFor(state.phase,rescueActive?"rescue":"normal",{center,mapped,command});
+        lo=ceiling.lo;hi=ceiling.hi;
       }else{
         // Legacy envelope: base ±20% at native 1/16 quanta.
         lo=Math.ceil(base*0.8*16)/16;hi=Math.floor(base*1.2*16)/16;
@@ -7370,6 +7387,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       }
       if(!(hi>=lo)){row.reason="control-center-envelope-invalid";return;}
       const candidate=Math.max(lo,Math.min(hi,raw));
+      row.intendedQuanta=steps;row.actualQuanta=Math.round(Math.abs(candidate-command)*16);
       if(candidate===command||candidate<LIMITS.commandFlowMin||candidate>LIMITS.commandFlowMax){row.reason="command-bound-vector";return;}
       if(t.report.writes>=t.report.maxWrites){row.reason=`${t.report.maxWrites}-write-budget`;return;}
       const payload=encodeLiveFlowFrame(step,frame,candidate);
@@ -7386,7 +7404,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         if(state.phase==="stage3"){if(rescueActive)t.report.s3RescueWrites++;else t.report.s3NormalWrites++;}
       }
       t.report.writes++;state.liveTrimDirty=true;
-      liveTrimRecord("write",{frame,commandMlS:candidate,previousMlS:command,retry:!!retry,rawGS:row.rawGS,predictedGS:row.predictedGS,targetGS:target,rescue:rescueActive,steps,controlCenterMlS:row.controlCenterMlS,controlSource:row.controlSource,controlR:row.controlR,controlBucket:row.controlBucket,payload});
+      liveTrimRecord("write",{frame,commandMlS:candidate,previousMlS:command,retry:!!retry,rawGS:row.rawGS,predictedGS:row.predictedGS,targetGS:target,rescue:rescueActive,steps,intendedQuanta:steps,actualQuanta:Math.round(Math.abs(candidate-command)*16),controlCenterMlS:row.controlCenterMlS,controlSource:row.controlSource,controlR:row.controlR,controlBucket:row.controlBucket,payload});
       row.decision="write";row.commandMlS=candidate;
       await host.transport.send(t.handle,{type:"text",data:JSON.stringify({type:"request",operation:"write",characteristicUUID:"A010",payload})});
     }finally{

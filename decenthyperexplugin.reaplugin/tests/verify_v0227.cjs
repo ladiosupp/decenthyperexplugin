@@ -2395,17 +2395,24 @@ test('§22.11 closed loop: max flood then bleed reaches a steep rise with bounde
  // ...and it must go BELOW the platform to arrest the rise (bleed). The old
  // controlBaseMlS floor and the two-value handoffOk pin both forbade this.
  assert(R.refillCmds.every(x=>x.c>=0.10&&x.c<=8),'refill writes stay inside the driver range');
- // The LAW can command below the platform (asserted in the full-range test);
- // whether a refill write gets the window to do it depends on the two-step
- // handoff, which is still pending. Recorded, not gated.
+ // §22.11 handoff: both halves must actually happen in the path this test drives.
+ // A single-step return (2.2.3 style) produces no bleed write at all. A cutoff
+ // that never fires and falls back to holdMs still bleeds, but it keeps flooding
+ // until the timer; that class is caught by the +40% peak tripwire below.
+ const actions=R.refillCmds.map(x=>x.a);
+ assert(actions.includes('bleed'),'the two-step handoff must bleed before the platform; got '+JSON.stringify(R.refillCmds));
+ assert(actions.includes('return'),'the two-step handoff must end on the platform; got '+JSON.stringify(R.refillCmds));
  if(process.env.HX_LOOP_REPORT)console.log('   refill writes:',JSON.stringify(R.refillCmds));
  // Curve shape: steep rise, bounded overshoot measured on SCALE flow (§22.1).
  assert(R.rise2080!==null&&R.rise2080<=1.5,'20-80% rise must be steep, got '+R.rise2080);
  // §22.11 calibrated baseline (2026-11-01): with the puck ceiling removed and
  // r(command), the same two-step handoff measures +33.2% peak instead of the
  // +21.4% the capped plant reported. That number is the baseline the later
- // cuts must beat; the assertion below is only a regression tripwire.
- assert(R.peakPct<=60,'scale-flow overshoot regressed past the calibrated baseline, got +'+R.peakPct.toFixed(1)+'%');
+ // cuts must beat. The tripwire sits at +40%: this plant's physical asymptote
+ // (8 ml/s flood, r->1) is +60%, so a "cutoff never fires, holdMs recovers"
+ // regression peaks near +59% and would slip past a +60 bound. +40% keeps 6.8
+ // points over the deterministic baseline and still fails that regression.
+ assert(R.peakPct<=40,'scale-flow overshoot regressed past the calibrated baseline, got +'+R.peakPct.toFixed(1)+'%');
  assert.equal(R.status,'complete','refill must complete, got '+R.status);
  assert.equal(R.returnCmd,R.platform,'the handoff lands on target/r');
  assert(R.refillWrites.length<=10,'refill writes must stay few, got '+R.refillWrites.length);
@@ -2416,9 +2423,11 @@ test('§22.11 closed loop still converges when the learned gain is off by 20 per
   const R=await refillClosedLoop(e);
   if(process.env.HX_LOOP_REPORT)console.log('   loop r='+r+':',JSON.stringify({rise2080:R.rise2080,peakPct:+R.peakPct.toFixed(1),plateauPct:+R.plateauPct.toFixed(1),platform:R.platform,maxCmd:R.maxCmd,minCmd:R.minCmd,status:R.status}));
   assert(R.maxCmd>R.target,'r='+r);
+  const actions=R.refillCmds.map(x=>x.a);
+  assert(actions.includes('bleed')&&actions.includes('return'),'r='+r+' must run both handoff halves; got '+JSON.stringify(R.refillCmds));
   assert.equal(R.status,'complete','r='+r+' status '+R.status);
   assert.equal(R.returnCmd,R.platform,'r='+r);
-  assert(R.peakPct<=60,'r='+r+' overshoot regressed past the calibrated baseline: +'+R.peakPct.toFixed(1)+'%');
+  assert(R.peakPct<=40,'r='+r+' overshoot regressed past the calibrated baseline: +'+R.peakPct.toFixed(1)+'%');
   assert(Math.abs(R.plateauPct)<=25,'r='+r+' plateau '+R.plateauPct.toFixed(1)+'%');
  }
 });

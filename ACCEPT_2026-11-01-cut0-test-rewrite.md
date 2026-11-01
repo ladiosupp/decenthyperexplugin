@@ -4,7 +4,7 @@
 
 cut 0 完成。`tests/verify_v0227.cjs` 从 **624/637（13 红）** 变为 **642/642 全绿**，13 条红全部按新口径重写或修夹具，**没有删除任何测试**，安全门测试一条未动。本次只改测试，`plugin.js` 零改动。
 
-提交：`9823c34`（分支 `v1.79ds`），只包含 `tests/verify_v0227.cjs` 与 `tests/RESULTS_v0227.txt`。
+提交：`9823c34`（分支 `v1.79ds`，测试与 RESULTS 首版）、`c50cf37`（本文档首版）；`<=40` 绊线与本文档 §5.1 的修订随本提交入库（未打 tag、未推送）。
 
 ## 1. 范围与边界
 
@@ -14,7 +14,15 @@ cut 0 完成。`tests/verify_v0227.cjs` 从 **624/637（13 红）** 变为 **642
 | `tests/verify_v0226.cjs` / `RESULTS_v0226.txt` | 未改动 |
 | 新增测试 | 5 条（bleeding 专项） |
 | 删除测试 | 0 条 |
-| 修改的测试 | 13 条（3 条语义重写、1 条镜像断言改写、9 条只修夹具） |
+| 修改的测试 | 13 条（4 条重写 #1 #2 #6 #7、1 条改断言 #4、8 条只修夹具 #3 #5 #8 #9 #10 #11 #12 #13） |
+
+「删除 0 条」的口径是**相对 v0227 自己的 637 条基线**：637 + 5 条新增 = 642，原有条目一条没少。若直接拿 `tests/verify_v0226.cjs`（635 条）对比，会有 11 个测试名在 v0227 里消失：其中 8 条是改名（4 条是 cut 0 重写，见 §3；另 4 条是 2.2.7 补水重写时改的名——target/r 基准、r 折算、补水预览、版本号一致性），另外 3 条是在 **2.2.7 的补水重写**里、随 `high-flow-direct` 分支一起删除的策略测试（不是 cut 0 删的），它们断言的是 §22.11 明确判定为错的旧策略：
+
+- `high-flow refill floods at the target value without the LUT/r translation`
+- `high-flow refill ignores a lower gain-memory base and hands control back to the S2 command`
+- `refill handoff writes the running S2 command even when the LUT base is lower`
+
+设计层面的替代者是 `§22.11 the flood ceiling reaches the rise-time floor for every cup target`、`§22.11 r greater than 1 lowers the platform and never moves the flood`、`§22.11 refill handoff lands on the platform and a protective return never raises the pump` 这三条不变量测试。
 
 ## 2. 本次遵循的口径
 
@@ -73,9 +81,27 @@ cut 0 完成。`tests/verify_v0227.cjs` 从 **624/637（13 红）** 变为 **642
 | 1.05 | 4.750 | 0.60 s | +33.2% | −15.4% | 同上 |
 | 1.60 | 3.125 | 0.60 s | +33.2% | −22.6% | 同上 |
 
-**+33.2% 取代 +21.4% 成为 v2.2.7 的诚实基线。** +21.4% 是「r=1.29 常数 + 粉饼 5.5 限流」两处失真同时压出来的，不能当验收值。测试里的硬顶从 `<=95%` 改为 `<=60%`，只作回归绊线，不冒充验收标准。
+**+33.2% 取代 +21.4% 成为 v2.2.7 的诚实基线。** +21.4% 是「r=1.29 常数 + 粉饼 5.5 限流」两处失真同时压出来的，不能当验收值。
 
 与台账对照：上升 0.60 s 与 §22.5 的 0.7 s 下限同量级（灌水瞬间给 8，略快于泵台阶）；峰值仍无法用真机校验——≥5 ml/s 稳态 r 仍为 0 样本，**准确度不记达标**。
+
+两条闭环测试的峰值绊线是 **`<=40%`**（不再用 `<=95`，也不能用 `<=60`——§5.1 的实验说明 +60 正好等于本植物的物理渐近线，挡不住「cutoff 从不触发」）。同时两条测试都显式断言 `refillCmds` 里必须同时出现 `bleed` 与 `return`：没有断流就没有两段收口。
+
+### 5.1 绊线有效性实验（一次性，未入库）
+
+做法：把 `plugin.js` 复制到临时目录，只改两处——`s2RefillReturnReason` 在秤失效检查后直接 `return null`（停用流量 cutoff），`boundedRefillCommand` 的 `estimate` 强制为 null（保持 8 ml/s 灌水）。这等价于 2.2.3 那类「cutoff 从不触发、靠 holdMs 定时收回」的回归。用同一植物、同一套 tick 跑：
+
+| 指标 | 结果 |
+|---|---|
+| 峰值杯流 | 7.99976 g/s |
+| 峰值过冲 | **+59.995%** |
+| 状态 / 收回值 | `complete` / 3.875（等于平台） |
+| 补水写入 | boost 8 → bleed 1.375 → return 3.875 |
+| 上升 20→80% | 0.60 s |
+
+结论：旧绊线 `<=60` 会**放行**这条回归（59.995 ≤ 60），而 `status`、`returnCmd`、`bleed+return`、`rise` 全部照旧成立——整条测试依然绿。新绊线 `<=40` 会以约 20 个点的差距判红。这就是把上界从 60 收到 40 的依据。
+
+补充：第一次实验只停 cutoff、保留 trim 整形，峰值仍是 +33.2%（trim 把泵拨到 0.125–0.3125，提前刹住了）。所以这条绊线真正拦的是「固定 boost 到计时器」的整类回归，不是「漏了 bleed 断言」那一种。
 
 ## 6. 副产品发现（不在 cut 0 范围）
 
@@ -99,6 +125,8 @@ node tests/verify_v0226.cjs                 # 616/635，见下
 - [x] `tests/verify_v0226.cjs` 未改动
 - [x] 新测试全部为口径不变量或闭环结果形式；阈值断言用 `target×cutoffFraction` 表达，不写死计划常数
 - [x] 闭环植物按台账改正，峰值基线更新为 +33.2%
+- [x] 两条闭环峰值绊线收到 `<=40%`，并显式断言 `bleed` 与 `return` 都发生
+- [x] 一次性实验证明：停用 cutoff（固定 boost 到 holdMs）峰值 +59.995%，旧 `<=60` 放行、新 `<=40` 判红
 - [x] 技能台账（§ Supporting references → 仿真植物校准台账）追加本次记录
 
 ## 9. 已知限制

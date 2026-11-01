@@ -137,3 +137,16 @@ GitHub Release：
 4. 调流在杯中停止：看 `report.status`（stopped / write-failed）与最后一条 check 时间。
 
 发布：GitHub v2.2.4（SHA256 C7EB96A45FDCE4FD3DAFEA5B5C08FA51C44EA8B2C28F3532D4D878B0075ADA9A）；夸克 来自：Codex/HyperExPulseFilter_v2.2.4.zip。
+
+## 10. 2.2.5（2026-11-01）
+
+2.2.4 三杯（07:29/07:32/07:42 本地）S2 停在 3.6–4.0，并且萃完 Decaid 卡死。详情见包内 `HANDOFF_v0225.md`，这里只记要点：
+
+- S2 增益的分母原本是 `cfg.stage2CommandMlS`（曲线指令），杯内调流覆盖后 r 被算成 0.69 / 1.7；改为 S2 后段机器回显 `targetFlowMlS` 的中位数，同批数据回到 1.19–1.39。
+- `gainMemorySuggestion` 无 regime 时退回最近桶（stale），不再掉回空粉碗 LUT。
+- 历史文件按杯龄分级（最近 4 杯全量），11.79 MB → 4.86 MB；回读改比 writeToken；一杯结束两次落盘合并；启动压缩写推迟到 idle。
+- 诊断页补水预览显示 r 与来源。
+
+未解决：S3 波动；S3 目标设 3 而实测 1.5（导出里那杯跑的是 2.0，`profileReadbackAt` 停在 23:37，需确认设置改动是否触发曲线重建）；诊断页打开时的 `calibration-status` 是否拖住 Decaid。
+
+发布：GitHub v2.2.5（SHA256 D09A0CAFF5709CB4877024421366C0A006CD6ADF7867FA6485DBDD7CEE457B64）；夸克 来自：Codex/HyperExPulseFilter_v2.2.5.zip。

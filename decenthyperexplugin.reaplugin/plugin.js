@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.10";
+  const PLUGIN_VERSION = "2.2.11";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -897,6 +897,8 @@ function createPlugin(host) {
         stages[key]={r:round(r,4),n:Math.max(1,Math.floor(Number(x.n)||1)),
           lastDeviation:Number.isFinite(Number(x.lastDeviation))?round(Number(x.lastDeviation),4):null,
           lastObservedR:Number.isFinite(Number(x.lastObservedR))?round(Number(x.lastObservedR),4):null,
+          lastLocalR:Number.isFinite(Number(x.lastLocalR))?round(Number(x.lastLocalR),4):null,
+          damped:!!x.damped,
           drift:Number.isFinite(Number(x.drift))?round(Number(x.drift),4):null,
           lastRunId:x.lastRunId==null?null:String(x.lastRunId),updatedAt:x.updatedAt||null};
       }
@@ -1002,16 +1004,23 @@ function createPlugin(host) {
     const cfg=run&&run.config||{};
     if(stage==="s2"){
       if(String(cfg.stage2CommandOrigin||"")==="manual")return null;
-      if(evidence&&evidence.liveTrimChain&&evidence.liveTrimChain.usable===false)return null;
+      // L-2: a saturated chain no longer blocks the observation. It forces the
+      // current-shot local estimate and raises alpha to 0.55.
       const quality=controlOutputQuality(run,"stage2");
-      if(!quality||quality.available!==true||!(Number(quality.tailMeanGS)>0)||Number(quality.tailRippleCVPct)>20)return null;
+      if(!quality||quality.available!==true||!(Number(quality.tailMeanGS)>0))return null;
+      const ripple=Number(quality.tailRippleCVPct);
+      if(ripple>25)return null;
       const measured=Number(quality.tailMeanGS);
+      // ⑦: no stale fallback to the profile command. Without the effective
+      // command the observation is not eligible.
       const effective=stage2EffectiveCommand(run);
-      const command=Number.isFinite(effective)&&effective>0?effective:Number(cfg.stage2CommandMlS);
-      if(!(command>0&&measured>0))return null;
+      if(!Number.isFinite(effective)||effective<=0)return null;
+      const command=effective;
       const r=measured/command;
       if(!(r>=.2&&r<=3))return null;
-      return {r,command,measured,source:"S2 steady tail"};
+      const saturated=!!(evidence&&evidence.liveTrimChain&&evidence.liveTrimChain.usable===false);
+      return {r,command,measured,source:saturated?"S2 tail local (actuator saturated)":"S2 steady tail",
+        local:saturated,damped:ripple>=12,alphaOverride:saturated?.55:null};
     }
     if(stage==="s3"){
       if(String(cfg.stage3CommandOrigin||"")==="manual")return null;
@@ -1037,7 +1046,8 @@ function createPlugin(host) {
     let usable=0,nearLimit=0,underCommand=0;
     for(const row of rows){
       const pressure=finiteOrNull(row.pressureBar),flow=finiteOrNull(row.machineFlowMlS);
-      let command=finiteOrNull(cfg[phase+"CommandMlS"]);
+      // L-11: divide by what the pump actually followed, never the stale profile value.
+      let command=phase==="stage2"?finiteOrNull(stage2EffectiveCommand(run)):finiteOrNull(row.targetFlowMlS);
       if(phase==="stage3"&&cfg.stage3Shape&&cfg.stage3Shape.enabled){
         const frame=finiteOrNull(row.profileFrame);
         command=frame===2?finiteOrNull(cfg.stage3Shape.earlyCommand):frame===3?finiteOrNull(cfg.stage3Shape.midCommand):frame===4?finiteOrNull(cfg.stage3Shape.lateCommand):null;
@@ -1070,6 +1080,10 @@ function createPlugin(host) {
       }else{
         deviation=Math.abs(observation.r-current.r)/current.r;
         alpha=gainBackfillAlpha(run,deviation);
+        if(observation.damped)alpha=alpha*.5;
+        if(Number(observation.alphaOverride)>0)alpha=Number(observation.alphaOverride);
+        current.damped=!!observation.damped;
+        if(deviation>GAIN_MEMORY_DEVIATION||observation.local)current.lastLocalR=round(observation.r,4);
         current.r=round(current.r+alpha*(observation.r-current.r),4);
         current.n=(Number(current.n)||1)+1;
         current.lastDeviation=round(deviation,4);
@@ -1109,15 +1123,17 @@ function createPlugin(host) {
     const target=stage==="s2"?Number(cfg.stage2Flow):Number(cfg.stage3Flow);
     const lut=stage==="s2"?Number(cfg.stage2LutCommandMlS):Number(cfg.stage3LutCommandMlS);
     if(!(target>0))return null;
-    const local=Number(stateRow.lastDeviation)>GAIN_MEMORY_DEVIATION&&Number(stateRow.lastObservedR)>0;
-    const r=local?Number(stateRow.lastObservedR):Number(stateRow.r);
+    // L-3: the local estimate is THIS shot's observation, not the previous cup.
+    const localR=Number(stateRow.lastLocalR);
+    const local=Number.isFinite(localR)&&localR>0&&Number(stateRow.lastDeviation)>GAIN_MEMORY_DEVIATION;
+    const r=local?localR:Number(stateRow.r);
     if(!(r>0.05))return null;
     const ceiling=Math.min(LIMITS.commandFlowMax,Number.isFinite(lut)&&lut>0?lut*2:LIMITS.commandFlowMax);
     const command=Math.max(LIMITS.commandFlowMin,Math.min(ceiling,target/r));
     return {stage,bucketId:bucket.id,center:bucket.center,radius:bucket.radius,bucketSamples:stateRow.n,
       stale:!regime,r:round(r,4),smoothedR:round(stateRow.r,4),observedR:stateRow.lastObservedR,
       deviationPct:stateRow.lastDeviation==null?null:round(stateRow.lastDeviation*100,1),local,
-      confidence:gainConfidence(stateRow),targetGS:round(target,3),lutCommandMlS:Number.isFinite(lut)?round(lut,3):null,
+      confidence:local?"LOW":gainConfidence(stateRow),targetGS:round(target,3),lutCommandMlS:Number.isFinite(lut)?round(lut,3):null,
       commandMlS:round(command,3),drift:stateRow.drift==null?null:round(stateRow.drift,4),
       sourceRunId:stateRow.lastRunId||null,applied:false};
   }
@@ -2077,7 +2093,8 @@ function createPlugin(host) {
     let usable=0,nearLimit=0,underCommand=0;
     for (const row of rows) {
       const pressure=finiteOrNull(row.pressureBar), flow=finiteOrNull(row.machineFlowMlS);
-      let command=finiteOrNull(cfg[phase+"CommandMlS"]);
+      // L-11: divide by what the pump actually followed, never the stale profile value.
+      let command=phase==="stage2"?finiteOrNull(stage2EffectiveCommand(run)):finiteOrNull(row.targetFlowMlS);
       if (phase==="stage3" && cfg.stage3Shape && cfg.stage3Shape.enabled) {
         const frame=finiteOrNull(row.profileFrame);
         command=frame===2?finiteOrNull(cfg.stage3Shape.earlyCommand):
@@ -2091,10 +2108,10 @@ function createPlugin(host) {
     }
     const pressureFraction=usable?nearLimit/usable:1;
     const underCommandFraction=usable?underCommand/usable:1;
-    const eligible=usable>=4 && usable>=rows.length*0.8 && pressureFraction<0.20 && underCommandFraction<0.25;
+    const eligible=usable>=4 && usable>=rows.length*0.60 && pressureFraction<0.35 && underCommandFraction<0.40;
     const reason=usable<4 || usable<rows.length*0.8 ? "Coffee machine telemetry/frame coverage insufficient; keep command" :
-      pressureFraction>=0.20 ? "Pressure limiter may be active; cup-flow target may be unreachable. Keep command, do not increase pressure" :
-      underCommandFraction>=0.25 ? "Machine flow is not tracking the shot command; withhold numeric correction" :
+      pressureFraction>=0.35 ? "Pressure limiter may be active; cup-flow target may be unreachable. Keep command, do not increase pressure" :
+      underCommandFraction>=0.40 ? "Machine flow is not tracking the shot command; withhold numeric correction" :
       "Coffee pressure and actuator quality gates passed";
     return {eligible,reason,pressureLimitBar:limit,samples:usable,expectedSamples:rows.length,
       pressureLimitedFraction:round(pressureFraction,3),underCommandFraction:round(underCommandFraction,3)};
@@ -3495,9 +3512,16 @@ function createPlugin(host) {
     if(memoryS2){
       const actual=Number.isFinite(Number(s2.currentCommandMlS))?Number(s2.currentCommandMlS):Number(run.config&&run.config.stage2CommandMlS);
       s2.gainMemory={...memoryS2};
-      if(/SATURATED|LIMITED|VARIABLE|MIXED/.test(String(s2.action||""))){
-        s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory withheld because the current evidence is not admissible";
-      }else if(Number.isFinite(actual)&&Math.abs(memoryS2.commandMlS-actual)>=.005){
+      // L-1: an inadmissible scalar evidence damps the memory, it never withholds
+      // it. target/r still applies; confidence drops one level.
+      const damped=/SATURATED|LIMITED|VARIABLE|MIXED/.test(String(s2.action||""));
+      if(damped){
+        s2.gainMemory.damped=true;
+        const lvl=String(memoryS2.confidence||"LOW");
+        s2.gainMemory.confidence=lvl==="HIGH"?"MEDIUM":lvl==="MEDIUM"?"LOW":"LOW";
+        s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"scalar evidence is not admissible; gain memory applied at reduced confidence";
+      }
+      if(Number.isFinite(actual)&&Math.abs(memoryS2.commandMlS-actual)>=.005){
         s2.usable=true;s2.action=s2.action==="LUT COMPENSATE"?"LUT COMPENSATE":"ADJUST";
         s2.suggestedCommandMlS=memoryS2.commandMlS;s2.gainMemory.applied=true;
         s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory "+memoryS2.bucketId+" maps "+memoryS2.targetGS+" g/s to "+memoryS2.commandMlS+" ml/s (r="+memoryS2.r+", n="+memoryS2.bucketSamples+", "+memoryS2.confidence+")";
@@ -6694,7 +6718,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       const f=Number(m.profileFrame),seed=seedFor(f),v=finiteOrNull(m.targetFlowMlS);
       if(!frames.includes(f)||!Number.isFinite(seed)||seed<=0||v===null||v<=0)return null;
       const base=Math.floor(seed*16+0.5)/16;
-      if(v<LIMITS.commandFlowMin||v>LIMITS.commandFlowMax||v<base*.8-.02||v>base*1.2+.02)return null;
+      if(v<LIMITS.commandFlowMin||v>LIMITS.commandFlowMax||v<base*.65-.02||v>base*1.35+.02)return null;
       // Firmware ramps its observed target through intermediate 1/16 quanta, so
       // an in-envelope echo that does not exactly equal a write is still a known
       // target (real 1.80ds shots: exact-match left only 47% coverage and blocked learning).

@@ -1,4 +1,20 @@
+# HyperEx Pulse Filter 2.2.11
+
+杯间学习的封锁与门槛：不可采信的证据只降权、不再封锁增益记忆；当杯局部估计改成用当杯；同一物理量只留一套门槛。
+
+- **L-1 不再连带封锁增益记忆**：`SATURATED / LIMITED / VARIABLE / MIXED` 的标量证据以前会让 `gainMemory.applied` 直接为假；现在 `target/r` 照常应用，只标记 `damped` 并把置信度降一级（HIGH→MEDIUM→LOW）。真机最近 5 杯 S2 停在 −21%…−29%，其中最后一杯的硬门槛理由是「S2 tail ripple 16.5% exceeds 12% learning limit」——这类杯子今后仍能吃到记忆。
+- **L-2 链路饱和不再同时封掉「学」与「用」**：`gainStageObservation` 删掉 `chain.usable===false → null`，饱和时强制当杯 local 估计并把 α 提到 0.55；观测仍进入记忆更新。
+- **L-3 local 用当杯估计**：local 不再是「上一杯的 `lastObservedR`」，而是本次观测（S2 后段 `tailMeanGS` ÷ `stage2EffectiveCommand`）；local=true 时置信度强制 LOW。真机 g2 平滑 r=1.3574 而杯内用 1.9026（差 29%）的错位由此消除。
+- **L-11 同一物理量一套门槛**：增益观测的纹波门槛统一到 20%，12–20% 之间 α 减半、>25% 才 HOLD；`gainMemoryQualityGuard` 与 `stageActuatorEvidence` 对齐到 0.60 / 0.35 / 0.40（原来分别是 0.60/0.35/0.40 与 0.80/0.20/0.25）；两处的「欠跟踪」分母从 `cfg.stageNCommandMlS` 换成实际生效指令（S2 用 `stage2EffectiveCommand`，S3 用逐帧 `targetFlowMlS`），取不到就判 not-eligible。
+- **L-12 开杯指令窗放宽**：`known()` 的 ±20% 窗改成 ±35%，减少「偏差越大越学不到」的墙。
+- **⑦ 空指令回退删除**：`gainStageObservation` 拿不到实际生效指令时直接返回 null，不再退回旧的 profile 指令当分母。
+- **未做（补水段归属）**：`s2RefillPumpEstimate`（15.6%）与 `stage2StartupPlan`（12%）两处纹波门槛在补水段横幅里，没有动。
+- **测试**：tests/verify_v02211.cjs 651/651。四条旧测试按新口径重写（一条验证「同一门槛」，一条验证「不可采信仍应用」，一条验证「不再 cherry-pick 旧证据」，一条验证「饱和链路仍出观测」），并新增饱和链路 α=0.55 / local 当杯估计的不变量；对 2.2.10 副本跑同一套是 646/651。
+
+## Previous release
+
 # HyperEx Pulse Filter 2.2.10
+
 
 杯内门槛与死参数：角度死区独立成常量、S3 预算按累计档数并可由大角度临时放开、救急判据真正用上剩余时间、救急静默按实测延迟放宽。
 

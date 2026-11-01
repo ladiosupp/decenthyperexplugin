@@ -2982,7 +2982,7 @@ function createPlugin(host) {
   }
 
   function sameScalarAdaptiveEvidence(a,b) {
-    // L-13: the driver grid is 1/16 ml/s. A 0.005 equality window is six
+    // L-13: the driver grid is 1/16 ml/s. A 0.005 equality window is 12.5
     // times finer than the smallest command the machine can express, so a
     // 0.02 drift made every historical row "incompatible" (field: 4 of 5).
     return !!(a && b && Math.abs(Number(a.command)-Number(b.command)) <= COMMAND_EQUAL_TOLERANCE && Math.abs(Number(a.targetGS)-Number(b.targetGS)) <= 0.01);

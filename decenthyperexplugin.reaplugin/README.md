@@ -858,3 +858,24 @@ S3 形状以前有两条并行通路：约 15 条串联硬门的 shape-only 共�
 - 真机 `hyperex-history (4).json` 里 16 杯带 `evidence.s3`，但**最新一杯（2.2.5，00:27）没有**，那一杯的逐帧 gain 无法重算；本轮用两条 2.2.4 的 evidence.s3 做了 drift 回放（见 HANDOFF §3），最新杯只能核对「平直 + origin=adaptive」。
 - `sameStage3Shape` 的相等判据仍是 0.005（L-13，cut 8）。drift 每杯都会改形状，两杯很难被判成「同形状」；因此保守／温和两档要求「上一条可比证据」时，drift 实际学不动。默认「正常」档不受影响。
 - drift 的 `earlyFactor`/`drift` 仍是每杯 ±20% 的比率步幅，与按档位计的指令步幅是两件事。
+
+## 2.2.15 · 一致性门与三套 S2 估计（cut 8 · L-7 / L-13 / L-15 / L-16）
+
+杯间学习的三套 S2 估计以前各说各话：单杯链路按仿射反解要 4.72 ml/s、稳态前馈因 spread 56% 本不该参与、增益记忆按 `target/r` 给 3.884——最后记忆覆盖了另外两套。这一版把它们收成一个反解，并让人、写都按同一条曲线指令比较。
+
+- **L-7 统一反解**：新增 `s2ReverseEstimate`。先取当杯**实际生效指令**（机器回显 `targetFlowMlS` 末 60% 中位数），算同窗 `r` 与 `target/r`；链路有显著截距（≥目标 10%）时才做仿射检验，且链路斜率必须 ≥ 当杯 `r` 的 75% 才采用——锚在最后一笔还没落定的写入上的「仿射解」是滞后假象，不是稳态。最后 0.9 阻尼 + `policy.s2` 限幅 + 1/16 归档。真机最后一杯：有效 3.938、尾段 4.794、`r_obs=1.2174` → **4.0625 ml/s**，与所需 4.107 差 −1.1%；旧记忆 3.884（−5.4%）、旧晚写仿射 4.72（+14.9%）。
+- **r 做成命令的函数**：`gainMemory` 每段新增 `bands`（`<1.0` … `>=5.0`），每杯只更新自己所在区间；建议时只取同区间先验，跨区标 `crossBand`，不静默套用。旧记录没有 `bands` 时仍按单值 r 兼容。
+- **记忆不再覆盖同杯建议**：有可用的 ADJUST / LUT COMPENSATE 数值时，记忆只报 `role:"prior"`、`applied:false`；只有没有同杯数值时才由记忆填。
+- **L-13 半档相等**：`sameScalarAdaptiveEvidence` / `sameStage3Shape` 的 command 容差 0.005 → 0.03125（半个 1/16 档）；target 0.01、时序 0.25 s 不变。跨 measurement basis 不再硬拒，改打 `cross-window historical reference` 并把 S3 置信度降一级。真机 `historySearch` 的 4/5 incompatible 由这条消除。
+- **前馈 spread 门真正生效**：两杯 spread ≤5%、三杯以上 ≤10% 才 `eligible`；超限只留遥测参考，`applied` 永远为假，且不参与建议。前馈输出也过 `snapCommandFlow`。
+- **L-16 目标比例一步过渡**：`testOverrideStatus` 在 0.5–2× 内返回 `targetScale`，`manualTestCommand` / `s3ShapeStatus` / `preserveStage` 读取时缩放，`rescaleOverridesForTargets` 负责持久化；超过 2× 仍无效。`mapCreatedAt` 变化仍整套作废（不同 LUT 下的绝对指令没有定义，`gainMemory` 按 §22.1 保留）。
+- **L-15 起步上界**：`startupMetricAllowed` 的 `tailMeanGS` 上界 +8% → +25%，下界 −50%、纹波 12%×factor、过冲 8%×factor 保留。真机 00:25 的 `tailCvPct 15.43` 仍被纹波门拒绝。
+- **HOLD 真正可达**：`nextShotAdaptiveSuggestion` 不再拿 `s2.currentCommandMlS`（有链时是链路末笔 4.3125）与建议比，而是与本杯曲线指令比；S1/S2 的 ADJUST、S3 的三段形状都与曲线同档时转 HOLD。新增 `hold.all = !actionable`：全段都没有真实变化才不重写曲线。真机四杯 S1 都在 ADJUST 的问题由此不再强迫重写。
+- **测试**：tests/verify_v02215.cjs **677/677**（666 条既有 + 11 条 cut 8）。新增覆盖：半档相等（命中与拒绝）、半档历史行命中、真机 00:25 统一反解、落定链路采用仿射、四档 `policy.s2` 限幅、spread 超限前馈不参与、+25% 起步上界、目标一步 rescale、HOLD 与曲线比较 + 全段 HOLD、跨 basis 降置信度、截距植物 5 杯闭环。v02214 测试与 RESULTS 原样保留；安全门零删除。
+
+### 局限 / 未决
+
+- **≥5 ml/s 稳态 r 仍 0 样本**；4–5 区间的 0.88 中位是暂态，不是高流量稳态。高指令标定（5.5 / 6.5 / 7.5 ml/s 各 3 s）仍待做。
+- 目标比例超过 0.5–2× 仍整套作废；要跨数量级，先重跑 Flow Cal。
+- `gainMemorySuggestion` 在 `updateGainMemoryFromRun` 之后调用，同区间先验已含当杯 r（权重最多 0.25，实测影响 <0.01 ml/s）；严格「先验不含当杯」需在更新前快照。
+- 补水植物整体准确度仍不记达标（缺压力/粉饼动态与 ≥5 ml/s 稳态 r）；本版没有动物理参数，`HX_LOOP_REPORT=1` 与 cut 0/1/5 逐项一致（rise 0.60 s、峰值 +33.2%、平台 −19.3%、return 3.875）。

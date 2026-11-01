@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.14";
+  const PLUGIN_VERSION = "2.2.15";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -793,11 +793,18 @@ function createPlugin(host) {
       return { valid:false, reason:"basket context changed; previous overrides ignored; using LUT baseline", activeStages:[], s3ShapeActive:false };
     }
     if (String(x.mapCreatedAt || "") !== String(binding.mapCreatedAt || "")) return { valid: false, reason: "calibration LUT changed; manual test override ignored", activeStages: [], s3ShapeActive: false };
+    // L-16: a target change is a one-step transition, not a reason to discard
+    // the whole curve. Within 0.5-2x the stored commands are scaled on read;
+    // rescaleOverridesForTargets() persists the same ratio once the LUT and
+    // storage are ready. A larger change leaves the physical neighbourhood.
     const xt = x.targets && typeof x.targets === "object" ? x.targets : {};
+    const targetScale = {};
     for (const stage of ["stage1","stage2","stage3"]) {
-      if (!Number.isFinite(Number(xt[stage])) || !(Number(xt[stage])/Number(binding.targets[stage])>=.5&&Number(xt[stage])/Number(binding.targets[stage])<=2)) {
-        return { valid: false, reason: "real-flow targets changed; manual test override ignored", activeStages: [], s3ShapeActive: false };
+      const before = Number(xt[stage]), now = Number(binding.targets[stage]);
+      if (!(before > 0.1) || !(now > 0.1) || !(now / before >= .5 && now / before <= 2)) {
+        return { valid: false, reason: "real-flow targets changed beyond the one-step transition; manual test override ignored", activeStages: [], s3ShapeActive: false };
       }
+      targetScale[stage] = now / before;
     }
     const activeStages = [];
     for (const stage of ["stage1","stage2","stage3"]) {
@@ -815,7 +822,8 @@ function createPlugin(host) {
       else reason = "manual test active";
     }
     if (baselinePrior && activeStages.length) reason = "empty/pre-upgrade baseline seed; normal coffee learning";
-    return { valid: true, reason, activeStages, s3ShapeActive, adaptiveSource:baselinePrior?null:adaptiveSource, baselinePrior, sourceBasketContext:overrideContext };
+    return { valid: true, reason, activeStages, s3ShapeActive, adaptiveSource:baselinePrior?null:adaptiveSource, baselinePrior, sourceBasketContext:overrideContext, targetScale,
+      targetTransition:["stage1","stage2","stage3"].some(stage=>Math.abs(targetScale[stage]-1)>0.001) };
   }
 
   function s3ShapeStatus() {
@@ -825,7 +833,8 @@ function createPlugin(host) {
     const q = state.testOverrides && state.testOverrides.s3Shape;
     if (!q || typeof q !== "object") return out;
     if (String(q.model || "") === "drift") {
-      const mid = Number(q.midCommand), earlyFactor = Number(q.earlyFactor), drift = Number(q.drift);
+      const scale = Number(os.targetScale && os.targetScale.stage3);
+      const mid = Number(q.midCommand) * (Number.isFinite(scale) && scale > 0 ? scale : 1), earlyFactor = Number(q.earlyFactor), drift = Number(q.drift);
       const earlySeconds = Number(q.earlySeconds), midSeconds = Number(q.midSeconds);
       if (![mid, earlyFactor, drift, earlySeconds, midSeconds].every(Number.isFinite)) return { ...out, reason: "stored S3 drift shape rejected: non-finite value" };
       const early = mid * earlyFactor, late = mid * drift;
@@ -842,7 +851,9 @@ function createPlugin(host) {
         manual, manualTilt: manual && Number.isFinite(manualTilt) ? round(manualTilt, 3) : null
       };
     }
-    const early = Number(q.earlyCommand), mid = Number(q.midCommand), late = Number(q.lateCommand);
+    const scale = Number(os.targetScale && os.targetScale.stage3);
+    const scaleCommand = v => Number(v) * (Number.isFinite(scale) && scale > 0 ? scale : 1);
+    const early = scaleCommand(q.earlyCommand), mid = scaleCommand(q.midCommand), late = scaleCommand(q.lateCommand);
     const earlySeconds = Number(q.earlySeconds), midSeconds = Number(q.midSeconds);
     if (![early,mid,late,earlySeconds,midSeconds].every(Number.isFinite)) return { ...out, reason: "stored S3 shape rejected: non-finite value" };
     if (early < LIMITS.commandFlowMin || early > LIMITS.commandFlowMax ||
@@ -876,7 +887,8 @@ function createPlugin(host) {
     if (!status.valid) return null;
     const q = state.testOverrides && state.testOverrides.stages ? state.testOverrides.stages[stage] : null;
     if (!q || String(q.mode) !== "manual") return null;
-    const v = Number(q.command);
+    const scale = Number(status.targetScale && status.targetScale[stage]);
+    const v = Number(q.command) * (Number.isFinite(scale) && scale > 0 ? scale : 1);
     return Number.isFinite(v) ? clampCommandFlow(v) : null;
   }
 
@@ -943,6 +955,7 @@ function createPlugin(host) {
           drift:Number.isFinite(Number(x.drift))?round(Number(x.drift),4):null,
           commandMlS:Number.isFinite(Number(x.commandMlS))?round(Number(x.commandMlS),4):null,
           commandBand:typeof x.commandBand==="string"?x.commandBand:null,
+          bands:(function(){const b={};for(const k of Object.keys(x.bands&&typeof x.bands==="object"?x.bands:{})){const v=x.bands[k],br=Number(v&&v.r);if(!(br>=GAIN_R_MIN&&br<=GAIN_R_MAX))continue;b[k]={r:round(br,4),n:Math.max(1,Math.floor(Number(v.n)||1)),lastObservedR:Number.isFinite(Number(v.lastObservedR))?round(Number(v.lastObservedR),4):null,updatedAt:v.updatedAt||null};}return Object.keys(b).length?b:null;})(),
           lastRunId:x.lastRunId==null?null:String(x.lastRunId),updatedAt:x.updatedAt||null};
       }
       if(!Object.keys(stages).length)continue;
@@ -1184,6 +1197,21 @@ function createPlugin(host) {
         current.commandMlS=round(observation.command,4);current.commandBand=observation.commandBand||commandBandOf(observation.command);
         current.lastRunId=run.runId;current.updatedAt=now;
       }
+      // cut 8 / L-7: r is a function of the command. Keep one estimate per
+      // command band so a 1.75 ml/s observation cannot pull the 3-4 ml/s
+      // estimate (the real 2.2.4/2.2.5 blend did exactly that: 1.3574 from
+      // the 4-5 band and 1.2174 from the 3-4 band became 1.2874).
+      const obsBand=observation.commandBand||commandBandOf(observation.command);
+      if(obsBand){
+        const bands=current.bands&&typeof current.bands==="object"?current.bands:{};
+        const row=bands[obsBand]&&Number(bands[obsBand].r)>0?bands[obsBand]:null;
+        if(row){
+          const bandAlpha=Number(alpha)>0?Number(alpha):GAIN_MEMORY_ALPHA;
+          row.r=round(row.r+bandAlpha*(observation.r-row.r),4);
+          row.n=(Number(row.n)||1)+1;row.lastObservedR=round(observation.r,4);row.updatedAt=now;
+        }else bands[obsBand]={r:round(observation.r,4),n:1,lastObservedR:round(observation.r,4),updatedAt:now};
+        current.bands=bands;current.band=obsBand;
+      }
       out.stages[stage]={status:"updated",r:current.r,n:current.n,observedR:current.lastObservedR,
         deviationPct:current.lastDeviation==null?null:round(current.lastDeviation*100,1),alpha,
         confidence:gainConfidence(current),source:observation.source,drift:current.drift==null?null:round(current.drift,4),
@@ -1228,19 +1256,27 @@ function createPlugin(host) {
     const lut=stage==="s2"?Number(cfg.stage2LutCommandMlS):Number(cfg.stage3LutCommandMlS);
     if(!(target>0))return null;
     // L-3: the local estimate is THIS shot's observation, not the previous cup.
+    // L-7: the prior is the estimate measured in the same command band; a
+    // cross-band estimate is reported but never silently substituted.
+    const effectiveBand=stage==="s2"?commandBandOf(stage2EffectiveCommand(run)):null;
+    const band=effectiveBand||stateRow.commandBand||commandBandOf(stateRow.commandMlS);
+    const bandRow=band&&stateRow.bands&&stateRow.bands[band]&&Number(stateRow.bands[band].r)>0?stateRow.bands[band]:null;
+    const bandR=bandRow?Number(bandRow.r):null;
+    const bandN=bandRow?Math.max(1,Math.floor(Number(bandRow.n)||1)):0;
     const localR=Number(stateRow.lastLocalR);
     const local=Number.isFinite(localR)&&localR>0&&Number(stateRow.lastDeviation)>GAIN_MEMORY_DEVIATION;
-    const r=local?localR:Number(stateRow.r);
+    const r=local?localR:(bandR||Number(stateRow.r));
     if(!(r>=GAIN_R_MIN&&r<=GAIN_R_MAX))return null;
     const ceiling=Math.min(LIMITS.commandFlowMax,Number.isFinite(lut)&&lut>0?lut*2:LIMITS.commandFlowMax);
     const command=snapCommandFlow(Math.max(LIMITS.commandFlowMin,Math.min(ceiling,target/r)));
     return {stage,bucketId:sourceBucket.id,activeBucketId:activeBucket.id,center:sourceBucket.center,radius:sourceBucket.radius,bucketSamples:stateRow.n,
       stale:!regime||fallback,fallback:fallback?"cross-bucket":null,r:round(r,4),smoothedR:round(stateRow.r,4),observedR:stateRow.lastObservedR,
+      band:band||null,bandR:bandR?round(bandR,4):null,bandN,bandMatched:!!bandRow,
       deviationPct:stateRow.lastDeviation==null?null:round(stateRow.lastDeviation*100,1),local,
       confidence:local?"LOW":gainConfidence(stateRow),targetGS:round(target,3),lutCommandMlS:Number.isFinite(lut)?round(lut,3):null,
       commandMlS:command,drift:stateRow.drift==null?null:round(stateRow.drift,4),
       commandBand:stateRow.commandBand||null,currentBand:commandBandOf(command),
-      crossBand:!!(stateRow.commandBand&&stateRow.commandBand!==commandBandOf(command)),
+      crossBand:!!(stateRow.commandBand&&((band&&stateRow.commandBand!==band)||stateRow.commandBand!==commandBandOf(command))),
       sourceRunId:stateRow.lastRunId||null,applied:false};
   }
   function scalarLearningSuggestion(label,key,current,previous,policy,steadyLarge) {
@@ -1274,7 +1310,8 @@ function createPlugin(host) {
     }
     const total=source.reduce((n,x)=>n+x.seconds,0),overall=source.reduce((n,x)=>n+x.measured*x.seconds,0)/total;
     return {...previous,targetGS:current.targetGS,source,overallGS:overall,lateToEarlyRatio:source[2].measured/source[0].measured,
-      earlySeconds:current.earlySeconds,midSeconds:current.midSeconds,measurementBasis:current.measurementBasis,comparisonModel:"per-frame command and timing reference model"};
+      earlySeconds:current.earlySeconds,midSeconds:current.midSeconds,measurementBasis:current.measurementBasis,
+      comparisonModel:stage3ShapeFamily(current)!==stage3ShapeFamily(previous)?"cross-window historical reference":"per-frame command and timing reference model"};
   }
   function projectS3Commands(values,old,policy,weights) {
     // L-6: the three frames are no longer forced into EARLY ≤ MID ≤ LATE. The
@@ -1388,30 +1425,101 @@ function createPlugin(host) {
     return {...previous,command:a,measured:round(Number(previous.measured)*ratio,3),
       originalCommandMlS:b,originalMeasuredGS:Number(previous.measured),comparisonModel:"nearby-command local proportional model"};
   }
+  // cut 8 / L-7: one reverse-mapping policy for the S2 next shot.
+  //
+  // The ratio model (next = target / r) assumes cup flow is a line through the
+  // origin. The single-shot chain gives two (command, cup) points, so it can
+  // test that assumption: a significant intercept (>=10% of target) means the
+  // ratio, not the command, is the wrong variable. The affine solution is used
+  // only when the chord slope is consistent with the steady ratio at the
+  // command the pump actually held. A chord anchored on the last write is a
+  // transient -- on the real 00:25 cup the last write (4.3125) had not settled,
+  // while the machine echo held 3.938; the chord slope 0.45 was 37% of the
+  // steady ratio 1.217, and its 4.77 ml/s answer was a lag artefact.
+  //
+  // r is a function of command (skill ledger): 1-4 ml/s ~1.23, high flow ~1.
+  // The memory is kept per command band and only the same-band prior is used.
+  function s2ReverseEstimate(run,current,chain,memory,effectiveOverride) {
+    const target=Number(run&&run.config&&run.config.stage2Flow);
+    if(!(target>0))return null;
+    const quality=chain?null:controlOutputQuality(run,"stage2");
+    const measured=Number(chain?chain.endGS:(quality&&quality.available?quality.tailMeanGS:current&&current.measured));
+    const rawEnd=Number(chain&&chain.commandMlS);
+    const effective=Number.isFinite(Number(effectiveOverride))&&Number(effectiveOverride)>0?Number(effectiveOverride):stage2EffectiveCommand(run);
+    const startCommand=Number(chain&&chain.startCommandMlS),startGS=Number(chain&&chain.startGS);
+    const withinChain=!!(chain&&Number.isFinite(effective)&&effective>=startCommand*.98&&effective<=rawEnd*1.02);
+    const configCommand=Number(run&&run.config&&run.config.stage2CommandMlS);
+    const base=chain?(withinChain?effective:rawEnd):(Number.isFinite(effective)&&effective>0?effective:configCommand);
+    if(!(base>0)||!(measured>0))return null;
+    const rObs=measured/base;
+    if(!(rObs>=GAIN_R_MIN&&rObs<=GAIN_R_MAX))return null;
+    const band=commandBandOf(base);
+    const sameBand=!!(memory&&memory.bandMatched&&memory.band===band&&Number(memory.bandR)>0);
+    const priorWeight=sameBand?Math.min(.25,.15*Math.max(1,Number(memory.bandN)||1)):0;
+    const r=sameBand?rObs*(1-priorWeight)+Number(memory.bandR)*priorWeight:rObs;
+    const ratioNeed=target/r;
+    let affine=null,affineNeed=null,affineRejected=null;
+    if(chain&&startCommand>0&&startGS>0&&base>startCommand+1/64){
+      const slope=(measured-startGS)/(base-startCommand);
+      if(slope>0.2&&slope<=3){
+        const intercept=startGS-slope*startCommand,share=Math.abs(intercept)/target;
+        affine={slope:round(slope,4),intercept:round(intercept,4),interceptSharePct:round(share*100,1),needMlS:round((target-intercept)/slope,3)};
+        if(share>=.10){
+          if(slope>=.75*rObs)affineNeed=(target-intercept)/slope;
+          else affineRejected="chord slope "+round(slope,3)+" g/s per ml/s is "+round(slope/rObs*100,0)+"% of the steady ratio "+round(rObs,3)+"; the last write had not settled";
+        }else affineRejected="intercept below 10% of target; the through-origin ratio applies";
+      }
+    }
+    let need=ratioNeed;
+    if(affineNeed!==null){
+      const gap=Math.abs(affineNeed-ratioNeed)/((affineNeed+ratioNeed)/2);
+      if(gap<=.12)need=(affineNeed+ratioNeed)/2;
+      else affineRejected="affine "+round(affineNeed,3)+" and ratio "+round(ratioNeed,3)+" differ by "+round(gap*100,1)+"%";
+    }
+    const policy=learningPolicy(run&&run.config&&run.config.adaptiveLearningLevel),[fraction,absolute]=policy.s2;
+    const span=Math.max(base*fraction,absolute);
+    const bounded=Math.max(base-span,Math.min(base+span,base+(need-base)*.9));
+    const suggested=snapCommandFlow(clampCommandFlow(bounded));
+    if(!Number.isFinite(suggested))return null;
+    return {targetGS:round(target,3),model:"same-window ratio"+(affine?" + affine test":""),effectiveCommandMlS:Number.isFinite(effective)?round(effective,3):null,
+      baseCommandMlS:round(base,3),measuredGS:round(measured,3),rObserved:round(rObs,4),commandBand:band,
+      memoryBand:sameBand?band:memory&&memory.band||null,memoryBandR:sameBand?round(Number(memory.bandR),4):null,memoryBandN:sameBand?Number(memory.bandN)||1:0,memoryWeight:priorWeight,
+      ratioR:round(r,4),ratioNeedMlS:round(ratioNeed,3),affine,affineNeedMlS:affineNeed===null?null:round(affineNeed,3),affineRejected,
+      needMlS:round(need,3),spanMlS:round(span,3),suggestedCommandMlS:suggested,
+      maxStepRule:policy.name+" S2 step ≤"+round(fraction*100,1)+"% / "+absolute+" ml/s around the effective command",
+      source:sameBand?"ratio + same-band memory prior":"same-shot ratio"};
+  }
+
   function s2AdaptiveSuggestion(run,current,previous) {
     const chain=current&&current.liveTrimChain;
     if(chain){
       const target=Number(run&&run.config&&run.config.stage2Flow);
       if(!chain.usable)return {usable:false,action:"SATURATED / HOLD",confidence:"LOW",targetGS:round(target,3),reason:chain.reason+"; hold the next-shot S2 command",maxStepRule:"single-shot chain: command rose but cup flow did not; do not learn a LUT offset"};
-      const need=chain.gain>0?chain.startCommandMlS+(target-chain.startGS)/chain.gain:chain.commandMlS;
-      const suggested=snapCommandFlow(clampCommandFlow(Math.max(chain.startCommandMlS,Math.min(LIMITS.commandFlowMax,chain.commandMlS+(need-chain.commandMlS)*0.9))));
-      return {usable:true,action:"LUT COMPENSATE",confidence:"MEDIUM",targetGS:round(target,3),currentCommandMlS:snapCommandFlow(chain.commandMlS),measuredGS:round(chain.endGS,3),suggestedCommandMlS:suggested,errorPct:round((chain.endGS/target-1)*100,1),maxStepRule:"single-shot chain: reverse the measured gain, 0.9 damping, bounded by the command limit",reason:chain.reason+"; chain "+chain.startCommandMlS+"->"+chain.commandMlS+" ml/s moved cup flow "+chain.startGS+"->"+chain.endGS+" g/s (gain "+round(chain.gain,2)+"); next shot "+formatCommandFlow(suggested)+" ml/s"};
+      const memory=gainMemorySuggestion(run,"s2");
+      const rev=s2ReverseEstimate(run,current,chain,memory);
+      if(rev){
+        return {usable:true,action:"LUT COMPENSATE",confidence:"MEDIUM",targetGS:round(target,3),
+          currentCommandMlS:rev.baseCommandMlS,measuredGS:rev.measuredGS,suggestedCommandMlS:rev.suggestedCommandMlS,
+          errorPct:round((chain.endGS/target-1)*100,1),maxStepRule:rev.maxStepRule,reverseModel:rev,
+          reason:chain.reason+"; chain "+chain.startCommandMlS+"->"+chain.commandMlS+" ml/s moved cup flow "+chain.startGS+"->"+chain.endGS+" g/s (gain "+round(chain.gain,2)+"); base "+formatCommandFlow(rev.baseCommandMlS)+" ml/s, r="+rev.rObserved+"; next shot "+formatCommandFlow(rev.suggestedCommandMlS)+" ml/s"+(rev.affineRejected?"; affine not applied: "+rev.affineRejected:"")};
+      }
     }
     const tail=current&&current.tailGain;
     if(tail&&!previous){
-      const target=Number(run&&run.config&&run.config.stage2Flow),need=Number(target)/Number(tail.k),cur=Number(run&&run.config&&run.config.stage2CommandMlS);
-      if(Number.isFinite(need)&&Number.isFinite(cur)&&cur>0&&Number.isFinite(target)&&target>0){
-        const pol=learningPolicy(run&&run.config&&run.config.adaptiveLearningLevel),[fraction,absolute]=pol.s2;
-        const raw=cur+(need-cur)*0.9;
-        const bounded=Math.max(cur-cur*fraction,cur-absolute,Math.min(cur+cur*fraction,cur+absolute,raw));
-        const suggested=snapCommandFlow(clampCommandFlow(bounded));
-        return {usable:true,action:"LUT COMPENSATE",confidence:"MEDIUM",targetGS:round(target,3),currentCommandMlS:snapCommandFlow(cur),measuredGS:tail.tailMeanGS,suggestedCommandMlS:suggested,errorPct:tail.tailErrorPct,tailGain:tail,maxStepRule:pol.name+" S2 step ≤"+round(fraction*100,1)+"% / "+absolute+" ml/s; single-shot steady tail reverse with 0.9 damping",reason:"steady tail "+tail.tailMeanGS+" g/s at "+tail.machineFlowMlS+" ml/s (gain "+round(tail.k,2)+"); next shot "+formatCommandFlow(suggested)+" ml/s"};
+      const memory=gainMemorySuggestion(run,"s2");
+      const rev=s2ReverseEstimate(run,current,null,memory);
+      if(rev){
+        return {usable:true,action:"LUT COMPENSATE",confidence:"MEDIUM",targetGS:rev.targetGS,currentCommandMlS:rev.baseCommandMlS,
+          measuredGS:rev.measuredGS,suggestedCommandMlS:rev.suggestedCommandMlS,errorPct:tail.tailErrorPct,tailGain:tail,
+          maxStepRule:rev.maxStepRule,reverseModel:rev,
+          reason:"steady tail "+tail.tailMeanGS+" g/s at "+formatCommandFlow(rev.baseCommandMlS)+" ml/s (r="+rev.rObserved+"); next shot "+formatCommandFlow(rev.suggestedCommandMlS)+" ml/s"};
       }
     }
     const policy=learningPolicy(run&&run.config&&run.config.adaptiveLearningLevel),q=controlOutputQuality(run,"stage2"),err=current&&current.targetGS>0?(Number(current.measured)/Number(current.targetGS)-1)*100:0;
     const large=!!(current&&q.available&&q.windows>=2&&q.tailRippleCVPct<=12&&Math.abs(err)>=20&&Math.abs(q.tailErrorPct)>=15&&Math.sign(err)===Math.sign(q.tailErrorPct));
     return {...scalarLearningSuggestion("S2","s2",current,previous,policy,large),outputQuality:q};
   }
+
   function utf8ByteLength(v) {let bytes=0;for(let i=0;i<v.length;i++){const c=v.charCodeAt(i);if(c<128)bytes++;else if(c<2048)bytes+=2;else if(c>=0xd800&&c<=0xdbff&&i+1<v.length&&v.charCodeAt(i+1)>=0xdc00&&v.charCodeAt(i+1)<=0xdfff){bytes+=4;i++;}else bytes+=3;}return bytes;}
   function historyPersistenceAudit(runId) {
     const rows=state.persistentHistoryFile&&state.persistentHistoryFile.shots||[],saved=rows.find(x=>x.runId===runId);
@@ -2308,7 +2416,11 @@ function createPlugin(host) {
     const factor=learningPolicy().qualityWidth;
     const statistical=m.schema===2&&m.headroomPassed===true&&["S2 tail ripple too high for startup boost","S2 overshoot; startup boost withheld","S2 plateau outside startup-assist range"].includes(m.reason);
     const legacy=m.schema===1&&m.reason==="S2 baseline off target; learn level before startup boost";
-    return !!((m.eligible||legacy||statistical)&&Number.isFinite(m.tailMeanGS)&&m.tailMeanGS>=m.targetGS*(1-.5*factor)&&m.tailMeanGS<=m.targetGS*(1+.08*factor)&&Number.isFinite(m.tailCvPct)&&m.tailCvPct<=12*factor&&Number.isFinite(m.overshootPct)&&m.overshootPct<=8*factor);
+    // L-15: the old +8% ceiling only let startup assist fire when the cup was
+    // already almost on target, i.e. when it was not needed. Keep the -50%
+    // lower edge (no boost for a collapsing plateau) and widen the upper edge
+    // to +25%, inside the same quality-width scaling.
+    return !!((m.eligible||legacy||statistical)&&Number.isFinite(m.tailMeanGS)&&m.tailMeanGS>=m.targetGS*(1-.5*factor)&&m.tailMeanGS<=m.targetGS*(1+.25*factor)&&Number.isFinite(m.tailCvPct)&&m.tailCvPct<=12*factor&&Number.isFinite(m.overshootPct)&&m.overshootPct<=8*factor);
   }
   function startupRise(m,basis) {
     const v=basis==="target"?(m.schema===1?m.rise20to80S:m.targetRise20to80S):m.plateauRise20to80S;
@@ -2870,16 +2982,24 @@ function createPlugin(host) {
   }
 
   function sameScalarAdaptiveEvidence(a,b) {
-    return !!(a && b && Math.abs(Number(a.command)-Number(b.command)) <= 0.005 && Math.abs(Number(a.targetGS)-Number(b.targetGS)) <= 0.01);
+    // L-13: the driver grid is 1/16 ml/s. A 0.005 equality window is six
+    // times finer than the smallest command the machine can express, so a
+    // 0.02 drift made every historical row "incompatible" (field: 4 of 5).
+    return !!(a && b && Math.abs(Number(a.command)-Number(b.command)) <= COMMAND_EQUAL_TOLERANCE && Math.abs(Number(a.targetGS)-Number(b.targetGS)) <= 0.01);
+  }
+
+  function stage3ShapeFamily(e) {
+    return e&&e.measurementBasis==="live target-normalized frame windows"?"profile-frame regression":e&&e.measurementBasis==="live target-normalized stability windows"?"stability 25/50/25 fallback":e&&e.measurementBasis;
   }
 
   function sameStage3Shape(a, b) {
     if (!a || !b || !Array.isArray(a.source) || !Array.isArray(b.source) || a.source.length !== 3 || b.source.length !== 3) return false;
-    const family=e=>e.measurementBasis==="live target-normalized frame windows"?"profile-frame regression":e.measurementBasis==="live target-normalized stability windows"?"stability 25/50/25 fallback":e.measurementBasis;
-    if (family(a) !== family(b)) return false;
     if (Math.abs(Number(a.earlySeconds) - Number(b.earlySeconds)) > 0.25 || Math.abs(Number(a.midSeconds) - Number(b.midSeconds)) > 0.25) return false;
     if (Math.abs(Number(a.targetGS)-Number(b.targetGS)) > 0.01) return false;
-    for (let i = 0; i < 3; i++) if (Math.abs(Number(a.source[i].command) - Number(b.source[i].command)) > 0.005) return false;
+    // L-13: one half-quantum, not 0.005. A different measurement basis is a
+    // cross-window reference (§6.3), not a different cup; the search marks it
+    // and the caller lowers confidence instead of dropping the row.
+    for (let i = 0; i < 3; i++) if (Math.abs(Number(a.source[i].command) - Number(b.source[i].command)) > COMMAND_EQUAL_TOLERANCE) return false;
     return true;
   }
 
@@ -3358,6 +3478,7 @@ function createPlugin(host) {
       let matches=false;try{matches=key==="s3"?sameStage3Shape(current,evidence):sameScalarAdaptiveEvidence(current,evidence);}catch(_){result.malformed++;continue;}
       if(!matches&&(key==="s1"||key==="s2")){const comparable=s2NearbyEvidence(current,evidence,key);if(comparable){evidence=comparable;matches=true;result.nearbyCommandComparisons=(result.nearbyCommandComparisons||0)+1;}}
       if(!matches&&key==="s3"){const comparable=stage3ReferenceEvidence(current,evidence);if(comparable){evidence=comparable;matches=true;result.nearbyCommandComparisons=(result.nearbyCommandComparisons||0)+1;}}
+      if(matches&&key==="s3"&&stage3ShapeFamily(current)!==stage3ShapeFamily(evidence))evidence={...evidence,comparisonModel:"cross-window historical reference"};
       if(!matches){result.incompatibleCommands++;continue;}
       // Choose the newest comparable row, BEFORE considering the error direction.
       // Never search for an older agreeing error to bypass a newer conflicting cup.
@@ -3411,6 +3532,48 @@ function createPlugin(host) {
     const last=rows[rows.length-1];
     return {samples:rows.length,k,spread,command:last.cmd,measured:last.m,sources:rows.map(x=>x.runId).filter(Boolean).slice(-8)};
   }
+  // cut 8 / L-14 follow-up: HOLD must compare with what the profile will
+  // actually run. s2.currentCommandMlS is the live-trim chain tail (on the real
+  // 00:25 cup: 4.3125) while the curve carried 3.067; comparing there made
+  // HOLD unreachable even when the learned command already matched.
+  function curveCommandsForRun(run) {
+    const c=run&&run.config||{},sh=c.stage3Shape;
+    let s3;
+    if(sh&&sh.enabled===true&&String(sh.model||"")==="drift"){
+      const mid=snapCommandFlow(Number(sh.midCommand)),ef=Number(sh.earlyFactor),dr=Number(sh.drift);
+      s3=[snapCommandFlow(mid*ef),mid,snapCommandFlow(mid*dr)];
+    }else if(sh&&sh.enabled===true){
+      s3=[snapCommandFlow(Number(sh.earlyCommand)),snapCommandFlow(Number(sh.midCommand)),snapCommandFlow(Number(sh.lateCommand))];
+    }else{
+      const flat=snapCommandFlow(Number(c.stage3CommandMlS));
+      s3=[flat,flat,flat];
+    }
+    return {s1:snapCommandFlow(Number(c.stage1CommandMlS)),s2:snapCommandFlow(Number(c.stage2CommandMlS)),s3};
+  }
+
+  function reconcileStageWithCurve(node,curve,label,shape) {
+    if(!node||node.usable===false)return false;
+    if(shape){
+      let proposed=null;
+      if(node.driftShape){
+        const mid=snapCommandFlow(Number(node.driftShape.midCommand));
+        proposed=[snapCommandFlow(mid*Number(node.driftShape.earlyFactor)),mid,snapCommandFlow(mid*Number(node.driftShape.drift))];
+      }else if(node.suggestedShape){
+        proposed=[snapCommandFlow(Number(node.suggestedShape.earlyCommand)),snapCommandFlow(Number(node.suggestedShape.midCommand)),snapCommandFlow(Number(node.suggestedShape.lateCommand))];
+      }
+      if(!proposed||!curve.every((v,i)=>Number.isFinite(v)&&sameCommandFlow(proposed[i],v)))return false;
+      node.action="HOLD";delete node.suggestedShape;delete node.driftShape;
+      node.reason=(node.reason?String(node.reason)+"; ":"")+label+" already matches the curve commands";
+      return true;
+    }
+    if(!Number.isFinite(Number(node.suggestedCommandMlS)))return false;
+    if(node.action!=="ADJUST"&&node.action!=="LUT COMPENSATE")return false;
+    if(!sameCommandFlow(node.suggestedCommandMlS,curve))return false;
+    node.action="HOLD";delete node.suggestedCommandMlS;
+    node.reason=(node.reason?String(node.reason)+"; ":"")+label+" already matches the curve command";
+    return true;
+  }
+
   function nextShotAdaptiveSuggestion(run) {
     if (!trustedAdaptiveRun(run)) return null;
     const s1ev=stage1AdaptiveEvidence(run), s2ev=stage2AdaptiveEvidence(run), s3ev=stage3AdaptiveEvidence(run);
@@ -3551,6 +3714,11 @@ function createPlugin(host) {
       const proposed=[s3.suggestedShape.earlyCommand,s3.suggestedShape.midCommand,s3.suggestedShape.lateCommand],old=s3ev.source.map(x=>Number(x.command));
       if(!proposed.some((v,i)=>Math.abs(v-old[i])>=.005)){delete s3.suggestedShape;s3.action="HOLD";s3.reason+="; Bounded projection retains the current commands";}
     }
+    if(s3Search.evidence&&s3Search.evidence.comparisonModel==="cross-window historical reference"){
+      s3.crossBasis=true;const lvl=String(s3.confidence||"LOW");
+      s3.confidence=lvl==="HIGH"?"MEDIUM":lvl==="MEDIUM"?"LOW":"LOW";
+      s3.reason=(s3.reason?String(s3.reason)+"; ":"")+"cross-window measurement basis; confidence reduced";
+    }
     s3.learningLevel=policy.name;s3.maxStepRule=`${policy.name}: S3 step ≤ max(${round(policy.s3[0]*100,1)}%, ${policy.s3[1]} ml/s, one 1/16 step) per frame; adjacent-rise bound retained`;
     const gainS2=stageGainEstimate("s2",run,s2ev),gainS3=stageGainEstimate("s3",run,s3ev);
     const addGain=(targetNode,gain,stageKey,limits)=>{
@@ -3563,11 +3731,19 @@ function createPlugin(host) {
       // S3 shares this helper with S2; only S3 needs the one-step floor, and
       // the S2 bounds (12% / 0.35 ml/s) are already far wider than a step.
       const span=stageKey==="s3"?s3StepLimit(cmd,frac,abs):Math.max(cmd*frac,abs);
-      const bounded=Math.max(cmd-span,Math.min(cmd+span,ff));
+      // Q-1 follow-up: the feed-forward is a learning output like any other and
+      // must land on the 1/16 grid before it becomes a suggested command.
+      const bounded=snapCommandFlow(clampCommandFlow(Math.max(cmd-span,Math.min(cmd+span,ff))));
+      if(!Number.isFinite(bounded))return;
       // Two agreeing shots are enough once their spread is <=5% (a <=10%
       // relative difference); three or more shots may use the wider 10% band.
+      // §19: two shots must agree within a 10% relative difference (spread
+      // <= 5%); three or more may use spread <= 10%. Beyond that the estimate
+      // is a reference only and must not touch the suggestion (cut 8 / L-7:
+      // the real 00:25 cup had spread 0.563 and still published a target
+      // command that could be mistaken for a usable one).
       const ok=gain.samples>=3?gain.spread<=.10:gain.samples===2&&gain.spread<=.05;
-      const info={stage:stageKey,samples:gain.samples,k:round(gain.k,3),spread:round(gain.spread,3),targetGS:round(target,3),currentCommandMlS:round(cmd,3),targetCommandMlS:round(ff,3),boundedCommandMlS:round(bounded,3),sources:gain.sources,applied:false};
+      const info={stage:stageKey,samples:gain.samples,k:round(gain.k,3),spread:round(gain.spread,3),targetGS:round(target,3),currentCommandMlS:round(cmd,3),targetCommandMlS:round(ff,3),boundedCommandMlS:round(bounded,3),sources:gain.sources,eligible:!!ok,reason:ok?null:"spread "+round(gain.spread*100,1)+"% exceeds the "+(gain.samples>=3?"10%":"5%")+" agreement gate",applied:false};
       node.gainFeedForward=info;
       if(!ok)return;
       if(stageKey==="s2"){
@@ -3589,8 +3765,7 @@ function createPlugin(host) {
     addGain(s2ev,gainS2,"s2",policy.s2);addGain(s3ev,gainS3,"s3",policy.s3);
     const memoryS2=gainMemorySuggestion(run,"s2"),memoryS3=gainMemorySuggestion(run,"s3");
     if(memoryS2){
-      const actual=Number.isFinite(Number(s2.currentCommandMlS))?Number(s2.currentCommandMlS):Number(run.config&&run.config.stage2CommandMlS);
-      s2.gainMemory={...memoryS2};
+      s2.gainMemory={...memoryS2,applied:false};
       // L-1: an inadmissible scalar evidence damps the memory, it never withholds
       // it. target/r still applies; confidence drops one level.
       const damped=/SATURATED|LIMITED|VARIABLE|MIXED/.test(String(s2.action||""));
@@ -3600,13 +3775,21 @@ function createPlugin(host) {
         s2.gainMemory.confidence=lvl==="HIGH"?"MEDIUM":lvl==="MEDIUM"?"LOW":"LOW";
         s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"scalar evidence is not admissible; gain memory applied at reduced confidence";
       }
-      if(Number.isFinite(actual)&&!sameCommandFlow(memoryS2.commandMlS,actual)){
+      const curve=Number(run.config&&run.config.stage2CommandMlS);
+      const numeric=s2.usable!==false&&(s2.action==="ADJUST"||s2.action==="LUT COMPENSATE")&&Number.isFinite(Number(s2.suggestedCommandMlS));
+      if(numeric){
+        // L-7: the memory is the same-band prior used by the reverse mapping.
+        // It never replaces a same-shot reverse result (the weak-estimator-wins
+        // path was target/r=3.884 overwriting the chain's 4.72).
+        s2.gainMemory.role="prior";
+        s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory "+memoryS2.bucketId+" band "+(memoryS2.band||"—")+" r="+memoryS2.r+" is a prior; the same-shot reverse keeps the command";
+      }else if(Number.isFinite(curve)&&sameCommandFlow(memoryS2.commandMlS,curve)){
+        s2.usable=true;s2.action="HOLD";delete s2.suggestedCommandMlS;
+        s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory already maps to the curve command";
+      }else{
         s2.usable=true;s2.action=s2.action==="LUT COMPENSATE"?"LUT COMPENSATE":"ADJUST";
         s2.suggestedCommandMlS=memoryS2.commandMlS;s2.gainMemory.applied=true;
         s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory "+memoryS2.bucketId+" maps "+memoryS2.targetGS+" g/s to "+memoryS2.commandMlS+" ml/s (r="+memoryS2.r+", n="+memoryS2.bucketSamples+", "+memoryS2.confidence+")";
-      }else if(s2.action==="ADJUST"||s2.action==="LUT COMPENSATE"){
-        s2.action="HOLD";delete s2.suggestedCommandMlS;
-        s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory already maps to the current command";
       }
     }
     if(memoryS3){
@@ -3636,8 +3819,16 @@ function createPlugin(host) {
       delete s3.suggestedShape;delete s3.driftShape;if(s3.gainMemory)s3.gainMemory.applied=false;
       s3.reason="Manual S3 drift shape is locked; automatic S3 updates withheld";
     }
+    // Final HOLD reconciliation: every stage compares with the curve command
+    // that the next shot would run, not with a live-trim tail. The curve is
+    // rewritten only when at least one stage actually differs (all-HOLD => no
+    // write). This is the cut-6 L-14 invariant, extended to S1/S3 so an
+    // ADJUST that lands on the current command cannot force a rewrite.
+    const curveCommands=curveCommandsForRun(run);
+    const hold={s1:reconcileStageWithCurve(s1,curveCommands.s1,"S1"),s2:reconcileStageWithCurve(s2,curveCommands.s2,"S2"),s3:reconcileStageWithCurve(s3,curveCommands.s3,"S3",true)};
     const actionable=!!((s1.usable&&s1.action==="ADJUST"&&Number.isFinite(Number(s1.suggestedCommandMlS)))||(s2.usable&&(s2.action==="ADJUST"||s2.action==="LUT COMPENSATE")&&Number.isFinite(Number(s2.suggestedCommandMlS)))||(s3.usable&&(s3.suggestedShape||s3.driftShape)));
-    return {usable:!!(s1.usable||s2.usable||s3.usable),actionable,basketContext:run.config.basketContext||"unknown",actuatorGuards,runId:run.runId,mode:"SHOT-TO-SHOT ONLY",learningLevel:policy.name,s1,s2,s3,note:run.config.experimentalLiveTrim?"Experimental live trim ran in this shot. This table proposes NEXT-SHOT changes only; normalized response is a local model. Actual RAW tracking metrics remain separate; LUT unchanged.":"All three stages use completed-shot evidence only. No running-shot scale control, no extra skipStep calls, and the calibration LUT is never rewritten."};
+    hold.all=!actionable;
+    return {usable:!!(s1.usable||s2.usable||s3.usable),actionable,curveCommands,hold,basketContext:run.config.basketContext||"unknown",actuatorGuards,runId:run.runId,mode:"SHOT-TO-SHOT ONLY",learningLevel:policy.name,s1,s2,s3,note:run.config.experimentalLiveTrim?"Experimental live trim ran in this shot. This table proposes NEXT-SHOT changes only; normalized response is a local model. Actual RAW tracking metrics remain separate; LUT unchanged.":"All three stages use completed-shot evidence only. No running-shot scale control, no extra skipStep calls, and the calibration LUT is never rewritten."};
   }
 
 
@@ -3662,7 +3853,8 @@ function createPlugin(host) {
       }
       const q = prevStages[stage] && typeof prevStages[stage] === "object" ? prevStages[stage] : {};
       if (String(q.mode) === "manual" && Number.isFinite(Number(q.command))) {
-        return { mode:"manual",origin:stageCommandOrigin(stage,false), command:snapCommandFlow(clampCommandFlow(Number(q.command))) };
+        const scale = Number(os.targetScale && os.targetScale[stage]);
+        return { mode:"manual",origin:stageCommandOrigin(stage,false), command:snapCommandFlow(clampCommandFlow(Number(q.command)*(Number.isFinite(scale)&&scale>0?scale:1))) };
       }
       return { mode:"auto", command:null };
     };

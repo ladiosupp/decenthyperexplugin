@@ -45,7 +45,14 @@
 
 `tests/verify_v02224.cjs` = **707/707**（v02223 的 706 条 + 1 条 30% 起收），日志 `tests/RESULTS_v02224.txt`；`node --check` 通过。v02223 及其 RESULTS 原样保留。
 
-## 待办（用户批准后）
+## 待办
 
-1. commit（`v2.2.24`）+ tag + Release + 夸克。
-2. 真机：同条件 85 / 70 / 50 / 30 各一杯，看 trim 笔是否出现、峰值过冲与 20–80% 上升时间；重点确认 30% 不会因为跳过阈值降到 1.5 g/s 而把该补水的杯子跳过。
+- 真机：同条件 85 / 70 / 50 / 30 各一杯，看 trim 笔是否出现、峰值过冲与 20–80% 上升时间；重点确认 30% 不会因为跳过阈值降到 1.5 g/s 而把该补水的杯子跳过。
+
+## 发布记录（2026-11-01）
+
+- commit `4dd030c`，tag `v2.2.24`，分支 `v1.79ds` 已推送。
+- GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.24（附件 `HyperExPulseFilter_v2.2.24.zip`，431,756 字节）。
+- 夸克：`夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.24.zip`，fileId `687dbf77043642689b6a6f851698e579`。
+- SHA256：`0D75A31FFD73294B40850617792FF967B307005CF63E5200C0F07859AF7F3A12`。
+- 打包：从 tag `v2.2.24` 的 `git archive` 构建（不压工作区），解压后 `node --check` 通过、复跑 **707/707**。

@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.15";
+  const PLUGIN_VERSION = "2.2.16";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -81,14 +81,16 @@ function createPlugin(host) {
   const STORAGE_S1_STARTUP = "stage1StartupCorrection";
   const STORAGE_TEST_OVERRIDES = "manualTestOverrides";
   const STORAGE_S2_REFILL="s2RefillSettingsV1";
-  const S2_REFILL_DEFAULTS=Object.freeze({startDelayMs:0,targetPercent:160,cutoffPercent:85,maxDurationMs:4000,approachMs:200});
+  // T-11: approachMs 200 was shorter than one 250 ms tick, so the handover guards
+  // could be skipped entirely. 800 covers about three ticks at level 3.
+  const S2_REFILL_DEFAULTS=Object.freeze({startDelayMs:0,targetPercent:160,cutoffPercent:85,maxDurationMs:4000,approachMs:800});
   const S2_REFILL_BASES=Object.freeze(["pump-command","cup-target"]);
   const S2_REFILL_LIMITS=Object.freeze({startDelayMs:[0,1500,50],targetPercent:[100,160,1],cutoffPercent:[50,99,1],maxDurationMs:[500,4000,100],approachMs:[200,6000,100]});
   // ---------------------------------------------------------------------
   // 补水段（S2 refill）所有权标记 — 2026-11-01 流量控制审查（三轮合并）
   // 口径：decentplugin 技能 §22.10 / §22.11 / §22.12（2026-11-01 用户定稿）
   // 审查文档：D:/vscode/decenthyperexplugin/REVIEW_2026-11-01-flow-control.md
-  // 归属本节的符号：S2_REFILL_TRIM_MS、S2_REFILL_TRIM_MAX_QUANTA、
+  // 归属本节的符号：S2_REFILL_TRIM_MS、S2_REFILL_BLEED_MS、S2_REFILL_BLEED_FRACTION、
   //   S2_REFILL_SETTLE_MS、boundedRefillControlBase、boundedRefillCommand、
   //   stage2StartupPlan 的 bounded 分支、s2RefillReturnReason、
   //   dispatchS2Startup 的 boost|trim|return、liveTrimTick 的 startup 分支。
@@ -109,7 +111,13 @@ function createPlugin(host) {
   // confirmed return never feed the gain, the chain evidence or the output
   // quality. A strong refill step needs about 0.35 s dead time + 0.85 s ramp +
   // 0.4 s first order to settle before the cup flow carries a usable gain.
-  const S2_REFILL_SETTLE_MS=1500;
+  // F2 (user 2026-11-01): split the post-refill settle. liveTrimChainEvidence
+  // integrates the recovery ramp into a gain, so it keeps the full pump-settle
+  // window (0.35 dead + 0.85 ramp + 0.4 first order = ~1.6 s). The measurement
+  // windows only need the pump to stop moving, so they use the shorter settle and
+  // keep more of a short S2 available for learning.
+  const S2_REFILL_SETTLE_MS=800;
+  const S2_REFILL_CHAIN_SETTLE_MS=1500;
   const GAIN_MEMORY_SCHEMA=1;
   const GAIN_MEMORY_ALPHA=.35;
   const GAIN_MEMORY_DEVIATION_ALPHA=.55;
@@ -1016,7 +1024,7 @@ function createPlugin(host) {
     return {signature:round(signature,4),samples:values.length,
       pressureBar:round(median(values.map(x=>x.pressure)),3),
       machineFlowMlS:round(median(values.map(x=>x.flow)),3),
-      basis:"S2 late 40% pressure / machine flow"};
+      basis:"S2 late 60% pressure / machine flow"};
   }
   // The band a bucket may claim: its own hysteresis radius, clipped to the
   // midpoint towards the nearest other centre. Membership becomes a partition,
@@ -1083,7 +1091,9 @@ function createPlugin(host) {
   // so the gain must divide by what the pump actually followed. The machine
   // echoes that as targetFlowMlS; take the median over the S2 tail.
   function stage2EffectiveCommand(run) {
-    const win=s2LearningWindow(run),cutoffMs=Number.isFinite(win.startMs)?win.startMs:null;
+    const win=s2LearningWindow(run);
+    if(win.refill&&!win.confirmed)return null; // R-5: never fall back to unwindowed data
+    const cutoffMs=Number.isFinite(win.startMs)?win.startMs:null;
     const rows0=(run&&Array.isArray(run.samples)?run.samples:[]).filter(x=>x&&x.phase==="stage2"&&x.machineTelemetryValid===true&&Number.isFinite(Number(x.targetFlowMlS))&&Number(x.targetFlowMlS)>0);
     const raw0=phaseRawSamples(run,"stage2");
     const rows=cutoffMs===null?rows0:rows0.filter(x=>Number(x.tMs)>=cutoffMs),raw=cutoffMs===null?raw0:raw0.filter(x=>Number(x.tMs)>=cutoffMs);
@@ -1937,19 +1947,21 @@ function createPlugin(host) {
   // cup is still recovering used to be measured as a steady gain (2026-11-01
   // 00:25: chain 2.25->4.3125 ml/s read gain 0.45, r 2.2, while the settled tail
   // gain was 1.29).
-  function s2LearningWindow(run){
-    const out={refill:false,confirmed:false,startMs:null,fromMs:null,settleMs:S2_REFILL_SETTLE_MS};
+  // consumer "chain" gets the longer settle (F2). R-5: an unconfirmed return must
+  // NOT degrade into "no window" - that used to let the flood and its recovery
+  // straight into r, the chain evidence and the output-quality tail.
+  function s2LearningWindow(run,consumer){
+    const settleMs=consumer==="chain"?S2_REFILL_CHAIN_SETTLE_MS:S2_REFILL_SETTLE_MS;
+    const out={refill:false,confirmed:false,startMs:null,settleMs,chainSettleMs:S2_REFILL_CHAIN_SETTLE_MS,reason:null};
     const cfg=run&&run.config||{},trace=run&&run.liveFlowTrim&&run.liveFlowTrim.trace||[];
     const plan=cfg.s2StartupPlan||{};
     const boost=trace.find(x=>x.kind==="write"&&x.startupAction==="boost");
     if(plan.strategy!=="refill-85"||!boost)return out;
     out.refill=true;
-    const start=(run.events||[]).find(x=>x.name==="stage2_start");
-    out.fromMs=start&&Number.isFinite(Number(start.tMs))?Number(start.tMs):Number(boost.tMs);
     const complete=trace.find(x=>x.kind==="startup-complete"&&Number(x.frame)===1);
-    if(!complete)return out;
+    if(!complete){out.reason="refill-return-unconfirmed";return out;}
     out.confirmed=true;
-    out.startMs=Number(complete.tMs)+S2_REFILL_SETTLE_MS;
+    out.startMs=Number(complete.tMs)+settleMs;
     return out;
   }
   function regressionForRawSamples(samples) {
@@ -2509,11 +2521,13 @@ function createPlugin(host) {
     const first=Number(raw[0].tMs),last=Number(raw[raw.length-1].tMs),limit=Number(prior.config.stage2PressureLimit);
     const tail=(prior.samples||[]).filter(x=>x.phase==="stage2"&&Number(x.tMs)>=first+(last-first)*.4);
     const fresh=tail.filter(x=>x.machineTelemetryValid===true&&Number(x.machineAgeMs)<=600&&Number(x.machineFlowMlS)>=previousCommand*.85&&Number(x.machineFlowMlS)<=previousCommand*1.15&&Number(x.pressureBar)<limit*.9);
-    if(!(q.tailRippleCVPct<=15.6)||!(q.tailMeanGS>=targetGS*.5&&q.tailMeanGS<=targetGS*1.5))return null;
+    // Cut 9: aligned with the unified ripple policy (2.2.11 on the learning side):
+    // >25% HOLD, 12-20% damped. Was a private 15.6% hard cut.
+    if(!(q.tailRippleCVPct<=25)||!(q.tailMeanGS>=targetGS*.5&&q.tailMeanGS<=targetGS*1.5))return null;
     if(fresh.length<8||fresh.length<tail.length*.8)return null;
     const estimate=previousCommand*targetGS/Math.max(.1,q.tailMeanGS);
     if(!Number.isFinite(estimate)||estimate<LIMITS.commandFlowMin||estimate>LIMITS.commandFlowMax)return null;
-    return {command:estimate,basis:"target-cup-flow observed-tail local model",referenceTailGS:round(q.tailMeanGS,3),sourceRunId:prior.runId,previousCommandMlS:round(previousCommand,4)};
+    return {command:estimate,basis:"target-cup-flow observed-tail local model",referenceTailGS:round(q.tailMeanGS,3),sourceRunId:prior.runId,previousCommandMlS:round(previousCommand,4),rippleCVPct:round(q.tailRippleCVPct,2),rippleDamped:q.tailRippleCVPct>=12};
   }
   function boundedRefillControlBase(targetGS,profileBase) {
     // The driver only accepts 1/16 ml/s steps. A raw target/r base such as
@@ -2584,7 +2598,7 @@ function createPlugin(host) {
     const out={commandMlS:base,basis:"verified profile base; no clean holding reference",sourceRunId:null};
     const run=state.diagnosticLast;if(!run||!trustedAdaptiveRun(run))return out;
     const q=controlOutputQuality(run,"stage2"),raw=phaseRawSamples(run,"stage2");
-    if(!q.available||!raw.length||q.tailRippleCVPct>12||q.tailMeanGS<state.cfg.stage2Flow*.5||q.tailMeanGS>state.cfg.stage2Flow*1.5)return out;
+    if(!q.available||!raw.length||q.tailRippleCVPct>25||q.tailMeanGS<state.cfg.stage2Flow*.5||q.tailMeanGS>state.cfg.stage2Flow*1.5)return out;
     const start=Number(raw[0].tMs),end=Number(raw[raw.length-1].tMs),writes=run.liveFlowTrim&&run.liveFlowTrim.trace||[];
     const known=[Number(run.config.stage2CommandMlS),...writes.filter(x=>x.kind==="write"&&Number(x.frame)===1).map(x=>Number(x.commandMlS))];
     const tail=(run.samples||[]).filter(x=>x.phase==="stage2"&&Number(x.tMs)>=start+(end-start)*.4);
@@ -2592,7 +2606,9 @@ function createPlugin(host) {
     if(good.length<8||good.length<tail.length*.8)return out;
     const previous=median(good.map(x=>Number(x.targetFlowMlS)));if(!(previous>0))return out;
     // Partial correction of a settled observed cup response, never the refill spike.
-    const requested=previous*(1+.5*(state.cfg.stage2Flow/q.tailMeanGS-1));
+    // Cut 9: 12-20% ripple halves the partial correction instead of refusing the
+    // reference outright (was a private 12% hard cut).
+    const requested=previous*(1+(q.tailRippleCVPct>=12?.25:.5)*(state.cfg.stage2Flow/q.tailMeanGS-1));
     const command=Math.floor((Math.min(boost,base*1.2,8,Math.max(base,requested))+1e-9)*16)/16;
     return {commandMlS:Math.max(base,command),basis:"bounded settled-cup holding reference",sourceRunId:run.runId,referenceTailGS:q.tailMeanGS};
   }
@@ -2618,7 +2634,11 @@ function createPlugin(host) {
     const plan={schema:5,strategy:"refill-85",enabled:false,reason:"S2 refill assist disabled",baseCommandMlS:base,
       refillPumpBaseMlS:round(refillBase,4),controlBaseMlS:round(controlBase,4),controlGain,controlSource,
       boundedModel:bounded,floodCommandMlS:round(floodCommandMlS,4),refillTargetFraction:settings.targetPercent/100,cutoffFraction:settings.cutoffPercent/100,
-      startDelayMs:settings.startDelayMs,predictionSeconds:1.5,holdMs:settings.maxDurationMs,dispatchWindowMs:settings.startDelayMs+4000,approachMs:settings.approachMs,approachWriteIntervalMs:750,settings:{...settings},
+      // T-11: approachWriteIntervalMs (750) is gone. It sat in the same tick
+      // BEFORE the 1200/800 ms predictive silence gate, so it could never permit
+      // a write the stricter gate would block - a dead parameter that read like a
+      // handover-specific cadence.
+      startDelayMs:settings.startDelayMs,predictionSeconds:1.5,holdMs:settings.maxDurationMs,dispatchWindowMs:settings.startDelayMs+4000,approachMs:settings.approachMs,settings:{...settings},
       sourceRunIds:estimate?[estimate.sourceRunId]:[],learningLevel:learningPolicy().name};
     if(settings.basis==="cup-target"){plan.refillTargetGS=round(cupTarget,3);if(estimate)plan.referenceTailGS=estimate.referenceTailGS;plan.commandBasis=estimate?estimate.basis:"target-cup-flow base fallback (no observed tail)";}
     if(!state.cfg.s2StartupAssist||!state.cfg.liveFlowTrimTest)return plan;
@@ -2626,7 +2646,9 @@ function createPlugin(host) {
     if(!Number.isFinite(refillBase)||refillBase<LIMITS.commandFlowMin||refillBase>LIMITS.commandFlowMax){plan.reason="S2 refill target estimate invalid";return plan;}
     // The UI basis is cup/g-s. targetPercent and cutoffPercent are flow-domain
     // bounds; LUT/r only translates the desired g/s into a pump command.
-    const flowMaxGS=bounded?cupTarget:cupTarget*settings.targetPercent/100;
+    // R-7: flowMaxGS is gone. It only ever clamped the prediction inside
+    // boundedRefillCommand, and 2.2.7 removed that clamp so the law can see an
+    // overshoot and bleed. Nothing read it afterwards.
     const flowCutoffGS=cupTarget*settings.cutoffPercent/100;
     const requested=bounded?LIMITS.commandFlowMax:refillBase*settings.targetPercent/100;
     if(settings.basis!=="cup-target")plan.commandBasis="base-pump-command multiplier";
@@ -2637,8 +2659,11 @@ function createPlugin(host) {
     // starving the flood: §22.11 needs >=7.0 ml/s to reach the 0.7 s rise floor.
     const ceiling=floodCommandMlS;
     const boost=Math.floor((Math.min(ceiling,Math.max(refillBase,requested))+1e-9)*16)/16;
-    plan.flowMaxGS=round(flowMaxGS,3);plan.flowCutoffGS=round(flowCutoffGS,3);
-    plan.requestedCommandMlS=round(requested,4);plan.commandLimited=requested>ceiling;
+    plan.flowCutoffGS=round(flowCutoffGS,3);
+    // R-7: in bounded mode requested is always the 8 ml/s envelope, so the old
+    // requested>ceiling test was a constant. Report whether the flood itself hit
+    // the driver ceiling instead.
+    plan.requestedCommandMlS=round(requested,4);plan.commandLimited=bounded?boost>=LIMITS.commandFlowMax:requested>ceiling;
     plan.controlMaxMlS=bounded?round(boost,4):null;
     plan.refillMaxCommandMlS=boost;
     if(boost<(bounded?refillBase:base)+1/16){plan.reason=requested<=refillBase?"S2 refill target needs no extra command":"S2 refill has no command headroom";return plan;}
@@ -2653,7 +2678,9 @@ function createPlugin(host) {
     // the rest of the way up.
     const bleedCommandMlS=bounded&&settings.basis==="cup-target"?snapCommandFlow(Math.max(LIMITS.commandFlowMin,refillBase*S2_REFILL_BLEED_FRACTION)):null;
     const basisReason=bounded?(settings.basis==="cup-target"?"S2 refill bounded by target-equivalent command; targetPercent is an upper bound":"S2 refill bounded by profile command; targetPercent is an upper bound"):(settings.basis==="cup-target"?(estimate?"S2 refill aims at the S2 cup target using the observed tail":"S2 refill aims at the S2 cup target; profile base pump command, no clean observed tail"):"S2 configurable refill");
-    return {...plan,returnCommandMlS:holding.commandMlS,bleedCommandMlS,bleedMs:S2_REFILL_BLEED_MS,holdingReference:holding,enabled:true,reason:basisReason+"; measured cup-flow cutoff or safety deadline",maximumExtraCommandMl:round(Math.max(0,boost-refillBase)*plan.holdMs/1000,3),
+    return {...plan,returnCommandMlS:holding.commandMlS,bleedCommandMlS,bleedMs:S2_REFILL_BLEED_MS,holdingReference:holding,enabled:true,reason:basisReason+"; measured cup-flow cutoff or safety deadline",// R-7: extra water is measured against the command S2 would otherwise run
+      // (the profile base), not against the refill control base.
+      maximumExtraCommandMl:round(Math.max(0,boost-base)*plan.holdMs/1000,3),
       boostCommandMlS:boost,boostQuanta:Math.round((boost-refillBase)*16)};
   }
   function s2RefillFlowEstimate(t) {
@@ -4575,8 +4602,8 @@ function refillLearningLine(tl){
  const l=tl&&tl.learning;if(!l||!l.refill)return '';
  if(!l.confirmed)return '<br>学习窗口：补水收回未确认 → 本杯不学 S2 稳态';
  const start=tl.stage2StartMs!=null&&l.startMs!=null?((l.startMs-tl.stage2StartMs)/1000).toFixed(2)+' s':'—';
- const settle=(Number(l.settleMs)||0)/1000;
- return '<br>学习窗口：'+start+' 起 · 已排除补水 + '+settle.toFixed(1)+' s 沉降';
+ const settle=(Number(l.settleMs)||0)/1000,chain=(Number(l.chainSettleMs)||0)/1000;
+ return '<br>学习窗口：'+start+' 起 · 已排除补水 + 测量 '+settle.toFixed(1)+' s / 链路 '+chain.toFixed(1)+' s 沉降';
 }
 function renderRefillEditor(){
  const box=$('curverefill');if(!box||!curveDraft||!curveDraft.refill||!curveLatest.refillLimits)return;
@@ -6921,7 +6948,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         g.status=g.errorReductionGS>target*.02?"组后目标误差减小":g.errorReductionGS< -target*.02?"组后目标误差增大":"组前后变化较小";
       }
       return {phase,status,output:q,writes:phaseWrites.length,actionGroups:groups,
-        learningStatus:excluded?"Shot excluded from learning":learning.applicable?(learning.eligible?"已纳入学习候选；仍经过杯间共识与限幅":"暂未纳入："+learning.reason):"使用原固定曲线学习规则"};
+        learningStatus:excluded?"Shot excluded from learning":learning.applicable?(learning.eligible?"已纳入学习候选；仍经过杯间共识与限幅":"暂未纳入："+learning.reason+(learning.outputQualityReason?"（S2 输出质量："+learning.outputQualityReason+"）":"")):"使用原固定曲线学习规则"};
     });
     const good=phases.every(x=>x.output.available&&Math.abs(x.output.tailErrorPct)<=8&&x.output.tailRippleCVPct<=10);
     return {status:good?"本杯后段目标跟踪及平滑度良好":"本杯仍有偏差或数据不足，详情见阶段诊断",phases,
@@ -6933,8 +6960,12 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
   function controlOutputQuality(run,phase) {
     const target=desiredRealForRunPhase(run,phase),whole=diagnosticRawRegression(run,phase);
     const win=phase==="stage2"?s2LearningWindow(run):null,cutoffMs=win&&Number.isFinite(win.startMs)?win.startMs:null;
+    if(win&&win.refill&&!win.confirmed)return {available:false,reason:"refill-return-unconfirmed"}; // R-5
     const all=phaseRawSamples(run,phase),raw=cutoffMs===null?all:all.filter(x=>Number(x.tMs)>=cutoffMs);
-    if(!target||raw.length<6)return {available:false};
+    if(!target)return {available:false,reason:"no-target"};
+    // F2: a short S2 can be emptied by the settle window. Report that separately
+    // from a genuinely sparse phase, otherwise the diagnostics cannot tell them.
+    if(raw.length<6)return {available:false,reason:cutoffMs===null||all.length<6?"raw-samples-insufficient":"learning-window-too-short",rawSamples:all.length,windowSamples:raw.length};
     const stamps=new Set(),data=raw.filter(x=>{const t=finiteOrNull(x.scaleTimestampSeconds);if(t===null||stamps.has(t))return false;stamps.add(t);return true;});
     if(data.length<6)return {available:false};
     const lo=Number(data[0].scaleTimestampSeconds),hi=Number(data[data.length-1].scaleTimestampSeconds),tail=lo+(hi-lo)*.4;
@@ -6986,6 +7017,11 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     const frames=phase==="stage2"?[1]:(c.stage3Shape&&c.stage3Shape.enabled?[2,3,4]:[2]);
     const changed=!!c.experimentalLiveTrim&&trace.some(x=>x.kind==="write"&&frames.includes(Number(x.frame)));
     const report={admissionFactor:admission.factor,applicable:changed,eligible:false,basis:"confirmed-target windows normalized to shot-start seed (local model)",reason:"Original fixed-command evidence path",frames:[],outputQuality:changed?controlOutputQuality(run,phase):null,angleStats:computeAngleStats(run.liveFlowTrim,trace)};
+    // F2 / cut 9: a settle window that empties a short S2 must be distinguishable
+    // from a genuinely sparse phase, otherwise the diagnostics only say "not
+    // enough data" and the operator cannot tell which knob to move.
+    const oq=report.outputQuality;
+    if(oq&&oq.available===false&&oq.reason)report.outputQualityReason=oq.reason+(Number.isFinite(oq.windowSamples)?" (window "+oq.windowSamples+" / phase "+oq.rawSamples+" raw samples)":"");
     if(!changed)return report;
     if(phase==="stage2"&&report.outputQuality&&report.outputQuality.available&&report.outputQuality.tailRippleCVPct>admission.spread(12)){report.reason=`S2 tail ripple ${report.outputQuality.tailRippleCVPct}% exceeds ${round(admission.spread(12),2)}% learning limit`;return report;}
     const onset=phase==="stage2"?stage2CupOnset(run):null;
@@ -7128,7 +7164,9 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
   // the old "wait 2 s and keep a 5 s stable window" gate for next-shot learning.
   function liveTrimChainEvidence(run){
     const trace=(run&&run.liveFlowTrim&&run.liveFlowTrim.trace)||[];
-    const win=s2LearningWindow(run),afterMs=Number.isFinite(win.startMs)?win.startMs:null;
+    const win=s2LearningWindow(run,"chain");
+    if(win.refill&&!win.confirmed)return null; // R-5
+    const afterMs=Number.isFinite(win.startMs)?win.startMs:null;
     const allWrites=trace.filter(x=>x.kind==="write"&&Number(x.frame)===1&&!x.startupAction&&Number.isFinite(Number(x.commandMlS)));
     const writes=afterMs===null?allWrites:allWrites.filter(x=>Number(x.tMs)>=afterMs);
     if(writes.length<2)return null;
@@ -7565,13 +7603,14 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       const handover=state.phase==="stage2"&&t.startup&&t.startup.plan.strategy==="refill-85"&&Number.isFinite(t.startup.approachAt)&&Date.now()-t.startup.approachAt<t.startup.plan.approachMs;
       const fraction=handover?Math.min(1,Math.max(0,(Date.now()-t.startup.approachAt)/t.startup.plan.approachMs)):1;
       const target=finalTarget; // Cup target never drops to85% after refill.
-      row.finalTargetGS=finalTarget;row.approachFraction=1;row.handoverProgress=round(fraction,3);row.handoverActive=!!handover;
+      // T-11: approachFraction was hardcoded 1 while the real ramp went into
+      // handoverProgress, so the trace claimed a finished handover on every row.
+      row.finalTargetGS=finalTarget;row.handoverProgress=round(fraction,3);row.handoverActive=!!handover;
       if(handover&&reg.slope>target*1.02){
         const fast=s2RefillFlowEstimate(t);
         if(!fast||fast.slope<=target*1.02||fast.predicted<=target*1.02){row.reason="S2 handover falling response; avoid an extra decrease";return;}
       }
       if(handover&&reg.slope<target){
-        if(t.lastWriteAt!==null&&Date.now()-t.lastWriteAt<t.startup.plan.approachWriteIntervalMs){row.reason="S2 approach upward-write spacing";return;}
         const fast=s2RefillFlowEstimate(t);
         if(fast&&fast.predicted>=target){row.reason="S2 approach rising response; hold for inertia";return;}
       }

@@ -1,3 +1,20 @@
+# HyperEx Pulse Filter 2.2.16
+
+cut 9 · 补水收尾：学习沉降窗拆两档、收回未确认不再退化成无窗口、handover 三处死参数清掉、补水侧纹波门与学习侧对齐。**补水段归 2026-11-01 流量控制审查所有，改前必读技能 §22.10–§22.12 与 plugin.js 常量区横幅注释。**
+
+- **学习沉降窗拆两档（F2，用户拍板）**：测量窗（controlOutputQuality / stage2EffectiveCommand / controlLearningAssessment）**800 ms**，链路证据窗（liveTrimChainEvidence）**1500 ms**。链路会把恢复斜坡积分成增益（00:25 那杯量出 0.45，落定尾段其实是 1.29），必须等泵完全沉降约 1.6 s；测量窗只需泵停止移动，800 ms 够，还能给短 S2 多留数据。诊断页显示「已排除补水 + 测量 0.8 s / 链路 1.5 s 沉降」。
+- **收回未确认不再退化成无窗口（R-5）**：补水灌了但收回没确认时（S2 换帧走 frame-ended，不产生 startup-complete），过去三处测量消费方会退回完全不过滤的数据，7.5–8 ml/s 的灌水段直接进了 r、链路增益和尾段质量。现在一律拒绝，reason = refill-return-unconfirmed。
+- **窗口切光可观测**：controlOutputQuality 的 available:false 现在带 reason（refill-return-unconfirmed / no-target / raw-samples-insufficient / learning-window-too-short，后两者附窗口内与全段样本数），经 controlLearningAssessment 与 controlRunReview 显示在既有诊断面板，不新增 UI 元素。
+- **handover 三处死参数（T-11）**：删 approachWriteIntervalMs:750 及其门（它在同一 tick 里排在 1200/800 ms 静默门之前，永远不可能放行）；approachMs 默认 200 → **800**（200 ms 短于一个 250 ms tick，守卫可能整段被跳过）；删恒为 1 的 row.approachFraction。
+- **补水侧纹波门对齐 2.2.11**：s2RefillPumpEstimate 的私有 15.6% 与 s2HoldingReference 的私有 12% 都改成 >25% 拒绝、12–25% damped（后者把部分修正系数由 0.5 减半到 0.25，而不是整条参考作废）。
+- **报告字段修正（R-7）**：maximumExtraCommandMl 改按曲线指令算（原按平台值，偏小约 1/3）；commandLimited 在 bounded 模式原恒为 false，改报灌水是否顶到驱动上限；删已无消费方的 plan.flowMaxGS；gainRegimeForRun 的 basis 由「S2 late 40%」改正为「S2 late 60%」；常量区横幅补 S2_REFILL_BLEED_MS / S2_REFILL_BLEED_FRACTION、删已不存在的 S2_REFILL_TRIM_MAX_QUANTA。
+- **真机交叉验证**：hyperex-history (4).json 里 4 杯有 stage2 采样的完成杯，800 ms 测量窗后仍剩 71–93 个原始样本、1500 ms 链路窗后剩 64–87 个（controlOutputQuality 只要 6 个），两个窗口都不会把 S2 切光。另 6 杯显示切光的是中止杯或无 stage2 采样的杯，本来就被 completed at 排除在学习外。
+- **没做**：strategy 值 refill-85 的改名。它是随 history JSON 落盘的持久化字段，12 处分支与 3 处测试断言依赖它，改名要么两名并存要么让旧 history 的学习窗失效，而 cutoff 默认回到 85% 后这名字又对上了。见 ACCEPT_2026-11-01-cut9-refill-closeout.md §5。
+- **测试**：tests/verify_v02216.cjs **679/679**（v02215 原样保留）。新增 2 条不变量测试，改写 4 条既有测试匹配新口径，骨架补导出 stage2EffectiveCommand。安全门测试一条没删没弱化，没有新增镜像断言。
+- **遗留**：补水过冲（闭环 +33.2%，绊线 ≤40%）本 cut 未改善，旋钮是 cutoffPercent 与 bleedMs；≥5 ml/s 稳态 r 仍 0 样本，需先做高指令标定。
+
+## Previous release
+
 # HyperEx Pulse Filter 2.2.12
 
 增益记忆的结构：桶中心跟随实测、命中改成最近邻分区、缺段跨桶回退、LRU 淘汰、r 只有一套范围、分子分母同窗。

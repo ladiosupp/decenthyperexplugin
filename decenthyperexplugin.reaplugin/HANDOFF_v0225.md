@@ -37,9 +37,11 @@
 - `recordNextShotApplied` 在 3 秒内合并进 `historyWriteDirty` 并延时 1.2 s 落盘，不再整份重写两次。
 - 启动时压缩老文件的那次重写改成 `scheduleHistoryTrimWrite()`：3 s 后检查，非 idle 每 5 s 重试、最多 12 次，idle 才写。诊断页对历史文件只读不写。
 
-## 三、S3 目标与实测不符
+## 三、S3 目标（已澄清，不是 bug）
 
-导出里最后一杯（23:42）跑的是 S3 target **2.0**，不是 3：`commands.stage3.desiredGS=2`、`workflowProfileCommands.stage3CommandMlS=0.75`，实际杯流 1.686；按机器回显 0.783 算 r≈2.15，自洽。`profileReadbackAt` 停在 23:37，之后没有重建过曲线。若界面上已是 3，说明那杯启动时曲线还是 2——需要确认改设置的时间，或检查设置改动是否触发了下一杯曲线重写。
+作者确认是记错了：S3 目标是 2，S1 才是 3。与导出一致——最后一杯 `commands.stage3.desiredGS=2`、曲线 0.75 ml/s、杯流 1.686（NEAR，−15.7%）；`commands.stage1.desiredGS=3`、指令 1.172，S1 判为 STARTUP，本来就不看稳态流量。
+
+剩下的 16% 缺口是空粉碗 LUT 与真实粉饼的差：LUT 的 S3 r≈2.64（2 g/s ↔ 0.719），实测 r≈2.15（0.783 → 1.686），按实测 r 算 2 g/s 需要约 0.93 ml/s。S3 的学习路径用的是实际 MID 指令，不受 S2 那个分母 bug 影响，下一两杯应该自己补上。
 
 ## 四、仍未解决
 

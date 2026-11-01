@@ -147,6 +147,8 @@ GitHub Release：
 - 历史文件按杯龄分级（最近 4 杯全量），11.79 MB → 4.86 MB；回读改比 writeToken；一杯结束两次落盘合并；启动压缩写推迟到 idle。
 - 诊断页补水预览显示 r 与来源。
 
-未解决：S3 波动；S3 目标设 3 而实测 1.5（导出里那杯跑的是 2.0，`profileReadbackAt` 停在 23:37，需确认设置改动是否触发曲线重建）；诊断页打开时的 `calibration-status` 是否拖住 Decaid。
+未解决：S3 波动；诊断页打开时的 `calibration-status` 是否拖住 Decaid。
+
+已澄清：作者记错了，S3 目标是 2、S1 才是 3，与导出一致（S3 0.75 ml/s → 1.686 g/s，r≈2.15；S1 判 STARTUP 不看稳态）。S3 剩下的 ~16% 缺口是空粉碗 LUT（r≈2.64）与真实粉饼（r≈2.15）的差，S3 学习用实际 MID 指令，不受 S2 分母 bug 影响，等它自己收敛。
 
 发布：GitHub v2.2.5（SHA256 D09A0CAFF5709CB4877024421366C0A006CD6ADF7867FA6485DBDD7CEE457B64）；夸克 来自：Codex/HyperExPulseFilter_v2.2.5.zip。

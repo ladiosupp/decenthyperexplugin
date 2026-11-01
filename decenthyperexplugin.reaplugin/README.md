@@ -1,3 +1,17 @@
+# HyperEx Pulse Filter 2.2.22
+
+第二轮复查 P2-1，按最小修法只补 **LATE 侧**的相邻增幅门：drift 的读回、自动建议、应用与手动倾斜四条路径，现在都和曲线编辑器一样拒绝 `LATE > max(MID + 0.25, MID × 1.35)` 的形状。EARLY 高于 MID 是 drift 的合法形状（0.50–2.00），保持不动。
+
+- **`s3ShapeStatus` drift 读回**：新增 LATE 边检查，超限返回 `enabled:false`，reason 与 legacy 分支同一句 `adjacent rise exceeds test bound`。容差 0.001 ml/s，只吸收因子 4 位小数舍入，远小于一档 0.0625。
+- **`driftShapeSuggestion`**：计划 LATE 超限时夹到上限内最大的 1/16 档（`floor(limit×16)/16`），按夹后的 `late / mid` 重算 `drift`；夹完等于当前指令就返回 null（该杯 HOLD）。
+- **`applyNextShotAdaptiveSuggestion`**：写 drift 前再校验 LATE 边，超限同样夹住并重算因子，不写编辑器会拒绝的形状。
+- **`applyTestCommands` / `test-command-set`**：手动倾斜算出的 `MID×drift` 超限时用与编辑器相同的提示拒绝（UI 预先拦，服务端再兜一层 409）。
+- 实测：mid .75、drift 1.583（late 1.1875 > 1.0125）读回 rejected、自动路径夹到 1.0；EARLY>MID（earlyFactor 1.45）仍正常应用；手动 tilt=+1（late .6）仍通过。
+- **测试**：tests/verify_v02222.cjs **706/706**（从 v02221 的 698 重建，新增 8 条 P2-1；v02221 原样保留）。
+- **没做**：没有新增 EARLY 限制，没有动 `s3StepLimit` / 学习门 / 档位，没有碰 S2 补水、`liveTrimTick`、增益记忆或桶几何。未 commit / tag / push。
+
+## Previous release
+
 # HyperEx Pulse Filter 2.2.21
 
 第二轮复查补水段三项：P2-4 收回笔 trace 的 `previousMlS`、P3-6 bounded 的「指令上限」显示语义、P2-5 按用户 **2026-11-01 选定的 C**（cutoff 一值三用，控制律不动，只把联动讲清楚）。

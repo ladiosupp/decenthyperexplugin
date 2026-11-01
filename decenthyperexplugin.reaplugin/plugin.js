@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.21";
+  const PLUGIN_VERSION = "2.2.22";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -851,6 +851,11 @@ function createPlugin(host) {
       if (earlyFactor < 0.50 || earlyFactor > 2.00 || drift < 0.50 || drift > 2.00) return { ...out, reason: "stored S3 drift shape rejected: factor outside 0.50–2.00" };
       if (![early, mid, late].every(v => v >= LIMITS.commandFlowMin && v <= LIMITS.commandFlowMax)) return { ...out, reason: "stored S3 drift shape rejected: command outside hard limits" };
       if (earlySeconds < 3 || earlySeconds > 30 || midSeconds < 3 || midSeconds > 30) return { ...out, reason: "stored S3 drift shape rejected: timing outside 3–30 s" };
+      // P2-1: the LATE edge must satisfy the same adjacent-rise bound the curve
+      // editor enforces. EARLY above MID stays free; only a LATE above
+      // max(MID + 0.25, MID x 1.35) is rejected. A small tolerance absorbs the
+      // 4-decimal factor rounding, well below one 1/16 driver step.
+      if (late > Math.max(mid + 0.25, mid * 1.35) + 0.001) return { ...out, reason: "stored S3 shape rejected: adjacent rise exceeds test bound" };
       return {
         enabled: true, model: "drift", reason: "DRIFT MODEL",
         earlyCommand: round(early, 3), earlyFactor: round(earlyFactor, 4), earlySeconds: round(earlySeconds, 1),
@@ -1418,7 +1423,13 @@ function createPlugin(host) {
     const [fraction,absolute]=policy.s3,midLimit=s3StepLimit(midNow,fraction,absolute);
     const midCommand=snapCommandFlow(Math.max(midNow-midLimit,Math.min(midNow+midLimit,midTarget)));
     const lut=Number(run.config.stage3LutCommandMlS),ceiling=Math.min(LIMITS.commandFlowMax,Number.isFinite(lut)&&lut>0?lut*2:LIMITS.commandFlowMax);
-    const early=snapCommandFlow(midCommand*earlyFactor),late=snapCommandFlow(midCommand*drift);
+    // P2-1: bound only the LATE edge to what the curve editor can save
+    // (EARLY above MID is a legal drift shape). Clamp to the largest driver
+    // step that stays inside max(MID + 0.25, MID x 1.35).
+    const lateLimit=Math.max(midCommand+.25,midCommand*1.35);
+    const latePlanned=snapCommandFlow(midCommand*drift);
+    const late=latePlanned>lateLimit+1e-9?Math.floor((lateLimit+1e-9)*16)/16:latePlanned;
+    const early=snapCommandFlow(midCommand*earlyFactor);
     if(![midCommand,early,late].every(v=>Number.isFinite(v)&&v>=LIMITS.commandFlowMin&&v<=ceiling))return null;
     // Publish the factors of the quantised commands, not of the pre-snap
     // product, so the stored override reproduces exactly this shape.
@@ -3942,8 +3953,14 @@ function createPlugin(host) {
       : (os.valid && state.testOverrides && state.testOverrides.s3Shape ? JSON.parse(JSON.stringify(state.testOverrides.s3Shape)) : { enabled:false });
     if (suggestion.s3 && suggestion.s3.usable && suggestion.s3.driftShape) {
       const q = suggestion.s3.driftShape, mid = snapCommandFlow(clampCommandFlow(Number(q.midCommand)));
-      const earlyFactor = Math.max(.50, Math.min(2.00, Number(q.earlyFactor))), drift = Math.max(.50, Math.min(2.00, Number(q.drift)));
-      s3Shape = { enabled:true, model:"drift", origin:"adaptive", midCommand:mid, midSeconds:round(Math.max(3,Math.min(30,Number(q.midSeconds))),1), earlySeconds:round(Math.max(3,Math.min(30,Number(q.earlySeconds))),1), earlyFactor:round(earlyFactor,4), drift:round(drift,4), earlyCommand:snapCommandFlow(clampCommandFlow(mid*earlyFactor)), lateCommand:snapCommandFlow(clampCommandFlow(mid*drift)) };
+      const earlyFactor = Math.max(.50, Math.min(2.00, Number(q.earlyFactor))), driftIn = Math.max(.50, Math.min(2.00, Number(q.drift)));
+      // P2-1: the stored shape must be one the curve editor can also save.
+      // Only the LATE edge is bounded; EARLY above MID stays free.
+      const lateLimit = Math.max(mid + .25, mid * 1.35);
+      let lateCommand = snapCommandFlow(clampCommandFlow(mid * driftIn));
+      if (lateCommand > lateLimit + 1e-9) lateCommand = Math.floor((lateLimit + 1e-9) * 16) / 16;
+      const drift = round(lateCommand / mid, 4);
+      s3Shape = { enabled:true, model:"drift", origin:"adaptive", midCommand:mid, midSeconds:round(Math.max(3,Math.min(30,Number(q.midSeconds))),1), earlySeconds:round(Math.max(3,Math.min(30,Number(q.earlySeconds))),1), earlyFactor:round(earlyFactor,4), drift, earlyCommand:snapCommandFlow(clampCommandFlow(mid*earlyFactor)), lateCommand };
     } else if (run.config.s3DriftModel !== true && suggestion.s3 && suggestion.s3.usable && suggestion.s3.suggestedShape) {
       const q = suggestion.s3.suggestedShape;
       s3Shape = { enabled:true,origin:"adaptive", earlyCommand:snapCommandFlow(clampCommandFlow(Number(q.earlyCommand))), earlySeconds:round(Math.max(3,Math.min(30,Number(q.earlySeconds))),1), midCommand:snapCommandFlow(clampCommandFlow(Number(q.midCommand))), midSeconds:round(Math.max(3,Math.min(30,Number(q.midSeconds))),1), lateCommand:snapCommandFlow(clampCommandFlow(Number(q.lateCommand))) };
@@ -4891,6 +4908,7 @@ if(manualShape){
  const mid=Number($('s3shape_mid').value),earlyFactor=1+0.45*manualTilt,drift=1-0.20*manualTilt,earlySeconds=Number($('s3shape_early_s').value),midSeconds=Number($('s3shape_mid_s').value);
  if(![mid,earlySeconds,midSeconds].every(Number.isFinite)||mid<.10||mid>8||earlySeconds<3||earlySeconds>30||midSeconds<3||midSeconds>30){alert('S3 manual drift needs MID 0.10–8.00 ml/s and times 3–30 s.');return}
  if(![mid*earlyFactor,mid*drift].every(v=>v>=.10&&v<=8)){alert('S3 drift-derived command outside 0.10–8.00 ml/s.');return}
+ if(mid*drift>Math.max(mid+.25,mid*1.35)+1e-9){alert('S3 相邻增幅必须在上限内（max +0.25 ml/s / ×1.35）');return}
  s3Shape={enabled:true,model:'drift',manual:true,manualTilt,midCommand:mid,earlyFactor,drift,earlySeconds,midSeconds};
 }else{
  s3Shape={enabled:!!sm&&sm.value==='decay',earlyCommand:Number($('s3shape_early').value),earlySeconds:Number($('s3shape_early_s').value),midCommand:Number($('s3shape_mid').value),midSeconds:Number($('s3shape_mid_s').value),lateCommand:Number($('s3shape_late').value)};
@@ -8510,6 +8528,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
             if(earlySeconds<3||earlySeconds>30||midSeconds<3||midSeconds>30)throw new Error("S3 shape EARLY/MID times must be 3–30 seconds");
             const earlyCommand=midCommand*earlyFactor,lateCommand=midCommand*drift;
             if(![earlyCommand,lateCommand].every(v=>v>=LIMITS.commandFlowMin&&v<=LIMITS.commandFlowMax))throw new Error("S3 drift-derived command outside hard limits");
+            if(lateCommand>Math.max(midCommand+.25,midCommand*1.35)+1e-9)throw new Error("S3 相邻增幅必须在上限内（max +0.25 ml/s / ×1.35）");
             s3Shape={enabled:true,model:"drift",origin:"manual",manual,manualTilt,midCommand:round(midCommand,3),earlyFactor:round(earlyFactor,4),drift:round(drift,4),earlySeconds:round(earlySeconds,1),midSeconds:round(midSeconds,1),earlyCommand:round(earlyCommand,3),lateCommand:round(lateCommand,3)};
             const previousShape=s3ShapeStatus();if(previousShape.enabled&&previousShape.model==="drift"&&["midCommand","earlyFactor","drift","earlySeconds","midSeconds"].every(k=>Math.abs(Number(previousShape[k])-Number(s3Shape[k]))<.00001))s3Shape.origin=stageCommandOrigin("stage3",true);
           } else if (shapeEnabled) {

@@ -797,7 +797,7 @@ User-authorized defaults now enable live trim at level3:250ms checks,2000check c
 
 Step2 now contains a visual command editor with5 selectable handles: S1,S2,S3 EARLY/MID/LATE. Select a handle and drag vertically, use ↑/↓ buttons, or keyboard arrows. Each button advances to the next native1/16ml/s command level. Preview the draft and current commands, inspect generated parameters, then click 应用到下一杯. This is an explicit next-shot application, never a running-shot edit. Preview does not write to the machine.
 
-The vertical axis is DE1 flow command ml/s, not measured cup g/s. Gray dashed is current setup; orange is draft. This is a stage diagram: S1/S2 remain weight-triggered, release/soak are omitted, and the S3 handles show their actual0/early/early+mid second starts. Change S3 EARLY/MID durations with±1s buttons (3–30s); late runs to final weight. S3 retains non-decreasing commands and existing adjacent-rise limits. No free-form profile frames, extra skipStep calls, physical-response guarantee or invented delay model.
+The vertical axis is DE1 flow command ml/s, not measured cup g/s. Gray dashed is current setup; orange is draft. This is a stage diagram: S1/S2 remain weight-triggered, release/soak are omitted, and the S3 handles show their actual0/early/early+mid second starts. Change S3 EARLY/MID durations with±1s buttons (3–30s); late runs to final weight. S3 shape may place EARLY above MID or LATE below MID; only an adjacent rise is bounded. No free-form profile frames, extra skipStep calls, physical-response guarantee or invented delay model.
 
 Editing S1/S2 preserves other stage modes and current commands. Editing S3 enables the3-part shape; switching shape off gives flat S3 at the middle command. Flow command bounds remain0.1–8ml/s. Draft/current visibility switches are separate. Dirty drafts survive refresh; changed applied parameters disable applying an obsolete draft until reloaded. Applying requires selected verified HyperEx, idle state, valid LUT, a fresh unchanged workflow, upload acknowledgement and final readback. Failure rolls back previous overrides. A successful upload followed by a page-refresh failure remains labelled applied, with a refresh warning. A successful application updates Step2 APPLIED PROFILE and provenance. Old-run automatic or manual adaptive proposals cannot overwrite the new curve; new completed coffees continue normal learning. Numeric precision editor remains under optional Step3 details, using the same storage/profile source, verification/rollback and prior-run supersession. RETURN ALL TO LUT also verifies application and suppresses stale old-run proposals. AUTO APPLY remains unchanged.
 
@@ -840,3 +840,21 @@ Run node --check plugin.js and node tests/verify_v0174.cjs. Current HANDOFF_v017
 真机对照：REVIEW §1.4 的 00:25 那杯曲线 3.875、记忆 r=1.2874 → 3.884，旧比较恒为 ADJUST；归档后 3.875 与曲线一致，同一条件的下一杯走 HOLD，不再改写 profile。
 
 已知边界（留给 cut 7 / 待用户定口径）：S3 在 0.75 ml/s 附近一档约 8.3%，而 S3 形状门是 4% / 0.05 ml/s、正常学习门是 8%（0.06 ml/s），档位粒度已经大于门槛。量化后这些形状修正无法表达，会落成 HOLD。S3 形状与学习门槛需要按档位计，而不是按百分比计。
+
+## 2.2.14 · S3 形状：删串联门、拆非递减、门槛按档位（cut 7 · L-5 / L-6）
+
+S3 形状以前有两条并行通路：约 15 条串联硬门的 shape-only 共识，和 drift 模型。前者实际不可达；后者因为学习快照没带 `s3DriftModel`，在生产里从来没跑过——真机形状因此一直是平直（0.777/0.777/0.777，origin 标 adaptive）。
+
+- **L-5 删除 `stage3ShapeOnlyConsensus`**：同指令、同时序、同 basis、两杯 LATE DECAY、lateToEarlyRatio<0.80、overallR2≥0.95、逐帧 r2/秒数、shapeVar/overallVar、profileRatio 互差、逐帧 ≤0.05/4%、非递减、相邻增幅、曝光变化 ≤0.2%、至少一帧变化 ≥0.005——整块删除。S3 形状只剩 drift 一个写入口；`s3DriftModel` 关闭时旧 LEVEL+SHAPE 建议仍可作回退。
+- **drift 真的能跑**：诊断快照 `run.config` 现在带 `s3DriftModel`。以前 `driftShapeSuggestion` 读 `run.config.s3DriftModel`，快照里却没有这个键，函数永远返回 null；EARLY 帧的 S2→S3 沉降排除也因此从未生效。两处一起修好。
+- **L-6 非递减三处拆除**：`projectS3Commands`、`curveLimits`、`applyCurveEditorDraft` 不再要求 EARLY ≤ MID ≤ LATE，只保留相邻增幅 ≤ max(+0.25 ml/s, ×1.35)。`s3ShapeStatus` 读回 legacy 形状时也不再因顺序拒绝；stall 恢复路径与高级手动编辑器里的同一限制一并删掉。
+- **按档位计的门槛**：新增 `s3StepLimit(command, fraction, absolute) = max(1/16, |command|×fraction, absolute)`。形状门与学习门以「1 个 1/16 档」为最小可表达单位；4% / 0.05 ml/s 这类阈值只作档内死区（理想修正 < 半档 → HOLD），不再当外部硬门。0.75 ml/s 处一档 = 8.3%，正好越过 4% 与 8% 的旧门。套用处：`projectS3Commands`、两处 `bounded()`、levelFactor 的 ±5%、`stage3SingleSuggestion` 的死区与步幅、`driftShapeSuggestion` 的 MID 步幅、`addGain` 的 S3 feed-forward。
+- **曲线编辑器按 model 分支**：形状值不变时原样保留已存对象（只改补水参数不再重写 S3）；真正编辑形状时写 `model:"drift"` + `earlyFactor` + `drift` + `manual`/`manualTilt`，不再把 drift 降级成 legacy，也不会让 `manualS3ShapeLocked` 失效。`curveLimits` 只限制相邻增幅（MID 相对 EARLY、LATE 相对 MID 的上限）。
+- **UI 文案**：「一档 = 1/16 ml/s…」「输入值按档位归档…」「当前控制点允许范围…」与静态页面同步改成「S3 允许前段高于中段、后段低于中段；只限制相邻增幅」。
+- **测试**：tests/verify_v02214.cjs 666/666。新增：删除不变量（源码不再含 `stage3ShapeOnlyConsensus`）、诊断快照携带 `s3DriftModel`、0.75 ml/s 一档步幅、单杯 6.7% 误差产出一档修正而 1.3% 落 HOLD、drift 投影保持非单调形状、drift 学习并写进曲线（EARLY>MID、LATE<MID）、曲线编辑器保存 drift 不降级、后续曲线保存保留 drift 因子、0.50–2.00 之外的比率被拒。
+
+### 局限 / 未决
+
+- 真机 `hyperex-history (4).json` 里 16 杯带 `evidence.s3`，但**最新一杯（2.2.5，00:27）没有**，那一杯的逐帧 gain 无法重算；本轮用两条 2.2.4 的 evidence.s3 做了 drift 回放（见 HANDOFF §3），最新杯只能核对「平直 + origin=adaptive」。
+- `sameStage3Shape` 的相等判据仍是 0.005（L-13，cut 8）。drift 每杯都会改形状，两杯很难被判成「同形状」；因此保守／温和两档要求「上一条可比证据」时，drift 实际学不动。默认「正常」档不受影响。
+- drift 的 `earlyFactor`/`drift` 仍是每杯 ±20% 的比率步幅，与按档位计的指令步幅是两件事。

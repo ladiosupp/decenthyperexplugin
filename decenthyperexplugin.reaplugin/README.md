@@ -829,3 +829,14 @@ Live trim defaults ON at level3; diagnostic slider/native dropdown. Saved explic
 Full browser visual/touch rendering was unavailable (Chromium/Firefox and SVG raster delegate not installed); simulated DOM/pointer checks are not hardware or full WebView validation. Existing handheld/tablet screenshots remain the actual1.60 evidence. No1.65 device results yet.
 
 Run node --check plugin.js and node tests/verify_v0174.cjs. Current HANDOFF_v0174.md and tests/RESULTS_v0174.txt accompany this package. LICENSE and original calibration JSON are unchanged. Delivered older ZIPs remain immutable; old remote files retained for history.
+
+
+## 2.2.13 · 指令归档统一（Q-1 / L-14）
+
+驱动只走 1/16 ml/s（0.0625）档位。2.2.12 及以前只有写入面归档：`resolvedStageCommandFlow` 返回 2.507 这类未归档值，`gainMemorySuggestion` 的 target/r 用 `round(...,3)`，「指令是否相同」用 0.005 比较——比一档细 12.5 倍。结果配置面、UI 面、学习面、写入面各说各话，`gain memory already maps to the current command` 分支不可达，AUTO APPLY 每杯重写内容寻址 profile。
+
+本版：`resolvedStageCommandFlow`、`liveTrimControlCenter`、`gainMemorySuggestion`、`driftShapeSuggestion`、`scalarLearningSuggestion` / `scalarConsensusSuggestion` 的 suggested、学习输出写回、`rescaleOverridesForTargets`、手动曲线保存、`curveSetValue` 全部过 `snapCommandFlow`；新增 `sameCommandFlow(a,b)`（两侧先归档，半个档位内视为同一条指令），用于 HOLD 判定、读回校验、`keep` 模式识别。学习输出直接存档位值，不再 `round(...,3)`（3.0625 存成 3.063 会让读回和比较再次失配）。
+
+真机对照：REVIEW §1.4 的 00:25 那杯曲线 3.875、记忆 r=1.2874 → 3.884，旧比较恒为 ADJUST；归档后 3.875 与曲线一致，同一条件的下一杯走 HOLD，不再改写 profile。
+
+已知边界（留给 cut 7 / 待用户定口径）：S3 在 0.75 ml/s 附近一档约 8.3%，而 S3 形状门是 4% / 0.05 ml/s、正常学习门是 8%（0.06 ml/s），档位粒度已经大于门槛。量化后这些形状修正无法表达，会落成 HOLD。S3 形状与学习门槛需要按档位计，而不是按百分比计。

@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.19";
+  const PLUGIN_VERSION = "2.2.20";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -1189,16 +1189,28 @@ function createPlugin(host) {
     const memory=gainMemoryState(true);
     if(!memory)return null;
     const selected=selectGainBucket(memory,regime.signature);
+    const scratch=!selected.bucket&&!selected.absorb;
     const bucket=selected.bucket||selected.absorb||createGainBucket(memory,regime.signature);
+    const now=new Date().toISOString(),out={status:"updated",bucketId:bucket.id,bucketCreated:scratch,absorbed:!!selected.absorb,hysteresis:false,center:bucket.center,radius:bucket.radius,signature:regime.signature,signatureSamples:(Array.isArray(bucket.samples)?bucket.samples:[]).length,regime,stages:{},updatedAt:now};
+    // P2-3: evaluate the cup before touching the bucket. A completed cup with no
+    // qualifying S2/S3 evidence (short S2, ripple, missing frames) must not drag
+    // the centre/radius of an existing bucket or leave a scratch bucket behind.
+    const observations={};
+    for(const stage of ["s2","s3"]) observations[stage]=gainStageObservation(run,stage==="s3"&&evidence.s3?evidence.s3:evidence,stage);
+    if(!observations.s2&&!observations.s3){
+      if(scratch)memory.buckets=memory.buckets.filter(x=>x.id!==bucket.id);
+      out.stages={s2:{status:"no-observation"},s3:{status:"no-observation"}};
+      return {...out,status:"no-observation"};
+    }
     // The centre follows the median of the signatures this regime actually
     // produced and the radius follows their spread; a near-duplicate signature
     // widens the nearest bucket instead of creating a fragment (L-4).
     bucket.samples=(Array.isArray(bucket.samples)?bucket.samples.slice(-(GAIN_MEMORY_SIGNATURE_SAMPLES-1)):[]).concat([round(regime.signature,4)]);
     bucket.center=round(median(bucket.samples),4);
     bucket.radius=round(gainBucketRadius(bucket.samples),4);
-    const now=new Date().toISOString(),out={status:"updated",bucketId:bucket.id,bucketCreated:!selected.bucket&&!selected.absorb,absorbed:!!selected.absorb,hysteresis:false,center:bucket.center,radius:bucket.radius,signature:regime.signature,signatureSamples:bucket.samples.length,regime,stages:{},updatedAt:now};
+    out.center=bucket.center;out.radius=bucket.radius;out.signatureSamples=bucket.samples.length;
     for(const stage of ["s2","s3"]){
-      const observation=gainStageObservation(run,stage==="s3"&&evidence.s3?evidence.s3:evidence,stage);
+      const observation=observations[stage];
       if(!observation){out.stages[stage]={status:"no-observation"};continue;}
       let current=bucket.stages[stage],deviation=null,alpha=null;
       if(!current||!(Number(current.r)>0)){
@@ -1237,10 +1249,6 @@ function createPlugin(host) {
         deviationPct:current.lastDeviation==null?null:round(current.lastDeviation*100,1),alpha,
         confidence:gainConfidence(current),source:observation.source,drift:current.drift==null?null:round(current.drift,4),
         commandBand:current.commandBand||null,window:observation.window||null};
-    }
-    if(!Object.values(out.stages).some(x=>x.status==="updated")){
-      if(!selected.bucket&&!selected.absorb)memory.buckets=memory.buckets.filter(x=>x.id!==bucket.id);
-      return {...out,status:"no-observation"};
     }
     memory.lastBucketId=bucket.id;memory.updatedAt=now;bucket.updatedAt=now;run.gainMemoryBucketId=bucket.id;
     return out;

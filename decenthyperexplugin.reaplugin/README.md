@@ -1,3 +1,13 @@
+# HyperEx Pulse Filter 2.2.20
+
+第二轮复查退回的 P2-3：没有合格观测的完成杯不再改桶几何。
+
+- **P2-3 先判观测、后提交几何**：`updateGainMemoryFromRun` 先算 S2 / S3 的 `observations`；两段都 `no-observation` 时只删除本次新建的 scratch 桶（absorb 的桶保持原样），直接返回 `no-observation`，不写 `bucket.samples / center / radius / updatedAt`，也不写 `memory.lastBucketId / updatedAt` 与 `run.gainMemoryBucketId`。以前短 S2、纹波过大、帧缺失的完成杯会把已有桶的中心和半径往该杯签名拖，下一杯的最近邻/半径判定随之变化。
+- **至少一段有观测才提交**：有观测的杯子照常追加签名、center 取中位数、radius 取离散度，再走原有的逐段更新与分带（`bands`）逻辑。
+- **测试**：tests/verify_v02220.cjs 692/692（v02219 的 689 + 3 条 P2-3）。第 1 条预置桶后喂一杯两段都 `no-observation` 的运行，断言整桶 `JSON.stringify` 逐字节不变；第 2 条断言远处的签名不残留新桶；第 3 条断言有效观测杯仍提交。v02219 对 2.2.20 只红版本号（688/689）。
+
+## Previous release
+
 # HyperEx Pulse Filter 2.2.19
 
 第二轮复查的 cut 4 三项：稳态增益只用过滤后的历史、α 按阶段取救急笔数、覆盖门文案对齐阈值。

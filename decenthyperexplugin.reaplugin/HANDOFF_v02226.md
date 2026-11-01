@@ -40,5 +40,12 @@
 
 ## 待办
 
-1. 用户确认后 commit + tag + Release + 夸克。
-2. 真机：同条件固定 7 / 固定 8 / 自适应各一杯，看第一笔、trim 笔与峰值过冲；重点确认自适应在高 r 纸上的上升时间是否可接受。
+- 真机：同条件固定 7 / 固定 8 / 自适应各一杯，看第一笔、trim 笔与峰值过冲；重点确认自适应在高 r 纸上的上升时间是否可接受。
+
+## 发布记录（2026-11-01）
+
+- commit `e3820a8`，tag `v2.2.26`，分支 `v1.79ds` 已推送。
+- GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.26（附件 `HyperExPulseFilter_v2.2.26.zip`，437,678 字节）。
+- 夸克：`夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.26.zip`，fileId `beb43917c3d84a6e9e1e102e7a82ec58`。
+- SHA256：`95CD46B3C115D6F90784537C59232515547045940031CD3F36A0A82B24931205`。
+- 打包：从 tag `v2.2.26` 的 `git archive` 构建；解压后 `node --check` 通过、复跑 **713/713**。

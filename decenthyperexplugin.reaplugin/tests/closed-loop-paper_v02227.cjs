@@ -73,7 +73,7 @@ function rawWrites(e){return e.calls.filter(c=>c.transport==='send'&&JSON.parse(
 function trimAck(e){e.mock.rawListener({type:'data',data:JSON.stringify({type:'response',operation:'write',characteristicUUID:'A010',payload:''})});}
 function normalEnv(level='正常'){const e=setup();e.s.cfg.adaptiveLearningLevel=level;return e;}
 async function refillLoopEnv(r,{cutoffPercent=85,floodMode='fixed',floodMaxMlS=7,paper='low',pumpKernel='fast'}={}){
- const e=normalEnv();e.s.testPaper=paper;e.s.testPumpKernel=pumpKernel;e.s.cfg.liveFlowTrimTest=true;e.s.cfg.liveFlowTrimLevel=3;e.s.cfg.s2RefillBoundedModel=true;e.s.runtimeProfileVerified=true;
+ const e=normalEnv();e.s.testPaper=paper;e.s.testPumpKernel=pumpKernel;e.s.cfg.liveTrimDecisionModel=true;e.s.cfg.liveFlowTrimTest=true;e.s.cfg.liveFlowTrimLevel=3;e.s.cfg.s2RefillBoundedModel=true;e.s.runtimeProfileVerified=true;
  e.s.s2RefillSettings={basis:'cup-target',startDelayMs:0,targetPercent:100,cutoffPercent,maxDurationMs:4000,approachMs:800,floodMode,floodMaxMlS};
  const prior=evidenceRun(e,'loop-prior');prior.config.stage2Flow=5;prior.config.stage2LutCommandMlS=2.507;prior.samples=[];
  e.s.diagnosticLast=prior;
@@ -85,7 +85,7 @@ async function refillLoopEnv(r,{cutoffPercent=85,floodMode='fixed',floodMaxMlS=7
  t.report.startupExecution={status:'armed',reason:p.reason};e.s.lastFlow=.1;
  return e;
 }
-async function refillClosedLoop(e,{totalMs=8000,stepMs=50,tickEvery=5}={}){
+async function refillClosedLoop(e,{totalMs=8000,stepMs=50,tickEvery=5,settleMs=4000}={}){
  const t=e.s.liveTrim,target=e.s.cfg.stage2Flow,startMs=t.run.startedAtMs;const paper=e.s.testPaper||'low',pumpKernel=e.s.testPumpKernel||'fast';
  const limiter=Number(t.profile.steps[1].limiter.value),baseCmd=Number(t.profile.steps[1].flow);
  const plan=t.startup.plan,platform=plan.controlBaseMlS,cutoff=target*plan.cutoffFraction;
@@ -101,7 +101,7 @@ async function refillClosedLoop(e,{totalMs=8000,stepMs=50,tickEvery=5}={}){
   // asymptote equals the pump command (r -> 1), so a flood at 8 ml/s lifts the cup
   // toward 8 g/s. The old plant pinned the basket at 5.5 ml/s and applied the
   // learned r everywhere; both made the reported overshoot optimistic.
-  const plantR=paper==='high'?cmd=>cmd<=4?.92:cmd>=4.5?.86:.92-(cmd-4)*.12:cmd=>cmd<=4?1.23:cmd>=4.5?1:1.23-(cmd-4)*.46;
+  const plantR=paper==='high'?cmd=>cmd<=4?.92:cmd>=4.5?.86:.92-(cmd-4)*.12:cmd=>cmd<=4?1.23:cmd>=7?.8:1.23-(cmd-4)*(.43/3);
   if(pumpKernel==='real'){
    const latest=cmds[cmds.length-1];
    if(latest&&(!rampKey||latest.atMs!==rampKey.atMs||latest.cmd!==rampKey.cmd)){rampFrom=pumpTarget;rampTo=latest.cmd;rampStart=latest.atMs+350;rampKey=latest;}
@@ -123,7 +123,7 @@ async function refillClosedLoop(e,{totalMs=8000,stepMs=50,tickEvery=5}={}){
   t.run.rawScaleSamples=scale.slice(-30);
   e.h.observeLiveTrimMachine({machineState:'espresso',telemetryValid:true,profileFrame:1,targetFlow:goal,flow:mach,pressure:e.s.lastPressure,substate:'pouring'});
   if(step%tickEvery===0)await trimTick(e);
-  if(t.startup.status==='complete'&&elapsed>4000)break;
+  if(t.startup.status==='complete'&&elapsed>settleMs)break;
  }
  const rise=(lo,hi)=>{const a=curve.find(x=>x.cup>=lo*target),b=curve.find(x=>x.cup>=hi*target);return a&&b?(b.tMs-a.tMs)/1000:null;};
  const peak=Math.max(...curve.map(x=>x.cup));
@@ -157,6 +157,18 @@ test('2.2.29 low paper r=1.29 with the real pump kernel keeps a bounded rise and
  assert(R.rise2080!==null&&R.rise2080>=0.4&&R.rise2080<=1.5,'real pump 20-80% rise '+R.rise2080);
  assert(R.peakPct<=45,'low paper peak +'+R.peakPct.toFixed(1)+'%');
  assert(Math.abs(R.plateauPct)<=25,'low paper plateau '+R.plateauPct.toFixed(1)+'%');
+});
+
+test('2.2.29 7 s predictive closed loop holds the paper platform',async()=>{
+ for(const [paper,r] of [['low',1.29],['high',0.86]]){
+  const e=await refillLoopEnv(r,{paper,pumpKernel:'real'});
+  const R=await refillClosedLoop(e,{settleMs:7000});
+  if(process.env.HX_LOOP_REPORT)console.log('   7s '+paper+':',JSON.stringify({peak:+R.peakPct.toFixed(1),plateau:+R.plateauPct.toFixed(1),platform:R.platform,returnCmd:R.returnCmd,status:R.status}));
+  assert.equal(R.status,'complete',paper);
+  assert.equal(R.returnCmd,R.platform,paper);
+  assert(Math.abs(R.plateauPct)<=15,paper+' 7s plateau '+R.plateauPct.toFixed(1)+'%');
+  assert(R.peakPct<=45,paper+' 7s peak +'+R.peakPct.toFixed(1)+'%');
+ }
 });
 
 (async()=>{let failed=0;for(const [name,fn] of tests){try{await fn();console.log('PASS '+name);}catch(err){failed++;console.error('FAIL '+name+String.fromCharCode(10)+err.stack);}}console.log(String.fromCharCode(10)+(tests.length-failed)+'/'+tests.length+' checks passed');process.exitCode=failed?1:0;})();

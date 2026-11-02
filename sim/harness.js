@@ -34,12 +34,18 @@ function applyLimiter(measurement, limiter) {
 // at 1.0 so identical params reproduce identical results.
 function puckResistance(shotSecs, plant) {
   const rPeak = Number(plant.rPeak) > 0 ? Number(plant.rPeak) : PUCK.rPeak;
+  const rErodeRaw = Number(plant.rErode) > 0 ? Number(plant.rErode) : PUCK.rErode;
+  // A low-paper rPeak (0.26/0.53) is below the official rErode 2.5; using the
+  // official erosion in that case would make resistance RISE over time. Clamp
+  // the erosion endpoint to the peak so the default official curve is unchanged
+  // and the paper presets stay monotone non-increasing.
+  const rErode = Math.min(rErodeRaw, rPeak);
   if (shotSecs <= PUCK.peakSecs) {
     const s = shotSecs / PUCK.peakSecs;
     return PUCK.rDry + (rPeak - PUCK.rDry) * s * s * s;
   }
   const e = Math.min((shotSecs - PUCK.peakSecs) / PUCK.erodeSecs, 1);
-  return rPeak - (rPeak - PUCK.rErode) * e;
+  return rPeak - (rPeak - rErode) * e;
 }
 
 // Recorded real shots from the official Streamline demo (mock/seed/sim_shots.json),
@@ -273,8 +279,22 @@ function createEnv(logs) {
 }
 
 function plantDefaults() {
-  return { efficiency: 1.0, cupGain: 1.883, cupExp: 0.564, pumpResponse: 0.35, deadTime: 0.2, noise: 0.015, rPeak: 4.2 };
+  return { efficiency: 1.0, cupGain: 1.883, cupExp: 0.564, pumpResponse: 0.35, deadTime: 0.2, noise: 0.015, rPeak: 4.2, rErode: PUCK.rErode, rampSec: 0 };
 }
+
+// Field-calibrated paper presets (2026-10-31 / 2.2.27 ledger). The official
+// mock 4.2 rPeak stays the default for demo replay; these presets are for
+// "does this strategy survive the real paper" experiments.
+const PAPER_PRESETS = Object.freeze({
+  low:  { rPeak: 0.26, cupGain: 1.956, cupExp: 0.634, rErode: 0.26 },
+  high: { rPeak: 0.53, cupGain: 1.240, cupExp: 0.796, rErode: 0.53 },
+});
+// Official mock pump vs the measured DE1 kernel: 0.35 s dead, 0.85 s ramp,
+// tau ~0.4 s. rampSec=0 keeps the official 0.35/tick first-order behavior.
+const PUMP_PRESETS = Object.freeze({
+  official: { deadTime: 0.2, pumpResponse: 0.35, rampSec: 0 },
+  realDe1:  { deadTime: 0.35, pumpResponse: 0.22, rampSec: 0.85 },
+});
 
 // Cup yield fitted to the user's 0.1.77 history (20 steady S2/S3 points):
 // cup = cupGain * machineFlow^cupExp, R2 = 0.984. The exponent below 1 is what
@@ -358,6 +378,12 @@ async function runShot(params) {
   const p = { ...defaults, ...input };
   for (const key of ['targets', 'weights', 'liveTrim', 'refill', 'plant', 'commands']) {
     p[key] = { ...defaults[key], ...(input[key] || {}) };
+  }
+  if (p.plant.paper && PAPER_PRESETS[p.plant.paper]) {
+    p.plant = { ...p.plant, ...PAPER_PRESETS[p.plant.paper], ...(input.plant || {}) };
+  }
+  if (p.plant.pump && PUMP_PRESETS[p.plant.pump]) {
+    p.plant = { ...p.plant, ...PUMP_PRESETS[p.plant.pump], ...(input.plant || {}) };
   }
 
   // Replay mode: drive the machine from a real recorded shot instead of the
@@ -525,9 +551,20 @@ async function runShot(params) {
       // limiter hit pulls flow back toward limiter/resistance. The physical
       // 11 bar ceiling is a hard cap that also pulls flow back.
       const rate = Math.min(1, Math.max(0.01, p.plant.pumpResponse));
+      const rampSec = Number(p.plant.rampSec) > 0 ? Number(p.plant.rampSec) : 0;
+      let flowTarget = targetMlS;
+      if (rampSec > 0) {
+        if (!Number.isFinite(m.rampTarget) || m.rampTarget !== targetMlS) {
+          m.rampFrom = m.machineFlow;
+          m.rampTarget = targetMlS;
+          m.rampStart = t;
+        }
+        const rf = Math.min(1, Math.max(0, (t - m.rampStart) / rampSec));
+        flowTarget = m.rampFrom + (m.rampTarget - m.rampFrom) * rf;
+      }
       const shotSecs = m.shotStartSec == null ? 0 : Math.max(0, t - m.shotStartSec);
       const resistance = puckResistance(shotSecs, p.plant);
-      let newFlow = m.machineFlow + (targetMlS - m.machineFlow) * rate;
+      let newFlow = m.machineFlow + (flowTarget - m.machineFlow) * rate;
       if (newFlow > targetMlS) newFlow = targetMlS; // flow step: never overshoot target
       let newPressure = m.pressure + (newFlow * resistance - m.pressure) * rate;
       const limitedPressure = applyLimiter(newPressure, step.limiter);
@@ -628,7 +665,7 @@ async function runShot(params) {
   };
 }
 
-module.exports = { runShot, plantDefaults, PLUGIN_FILE, recordings, historyRecordings };
+module.exports = { runShot, plantDefaults, PAPER_PRESETS, PUMP_PRESETS, PLUGIN_FILE, recordings, historyRecordings };
 
 if (require.main === module) {
   const params = process.argv[2] ? JSON.parse(process.argv[2]) : {};

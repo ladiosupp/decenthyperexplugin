@@ -1,0 +1,6 @@
+PASS field 2.2.27 22:47 S2 return uses the running profile base, not the empty-basket LUT
+PASS field 2.2.27 23:06 high-pressure S2 memory returns the high platform, not 4.06
+PASS field 2.2.27 23:06 S3 control uses the current g2 bucket, not the previous g3
+PASS field 2.2.27 22:47 S2 plateau uses the post-peak window and the effective command
+
+4/4 checks passed

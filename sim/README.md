@@ -58,6 +58,24 @@ weight      = ∫ cupFlow dt + 称重噪声
 
 Decaid 的 `skipStep` 语义（推进一个 profile step、重置计时）、`espresso` 重置、`pouringDone → idle` 与 `state/substate` 字段名都按它的实现对齐。
 
+## 纸种 / 泵预设（2.2.27 实测，2026-11-02）
+
+官方 mock 的 4.2 rPeak 继续作为默认，用来回放 demo；真实纸的预设是 opt-in：
+
+- 低压纸：plant: { paper: "low", pump: "realDe1" }
+  - rPeak 0.26、cupGain 1.956、cupExp 0.634；2.2.27 S2 实测 r≈1.15–1.29。
+- 高压纸：plant: { paper: "high", pump: "realDe1" }
+  - rPeak 0.53、cupGain 1.240、cupExp 0.796；2.2.27 23:06 实测 S2 r≈0.86。
+- 泵：pump: "realDe1" = 0.35 s 死区 + 0.85 s 爬升 + 0.22/100ms（τ≈0.4 s）；默认 official 仍是 mock 的 0.35/100ms。
+- 低 rPeak 时 rErode 会自动夹到 rPeak，避免官方 2.5 的侵蚀项在低压纸上把阻力反向抬高；paper 预设直接令 rErode = rPeak（不模拟侵蚀）。
+
+命令示例（在 D:/vscode/decenthyperexplugin 下）：
+
+node sim/harness.js '{"mode":"continuous","plant":{"paper":"low","pump":"realDe1"}}'
+node sim/harness.js '{"mode":"continuous","plant":{"paper":"high","pump":"realDe1"}}'
+
+这些预设仍只用于方向比较：S3 late 下漂不是官方侵蚀能表达的，绝对流量仍以真机为准。
+
 ## 页面能做什么
 
 - 改 S1/S2/S3 目标、触发重量、浸泡时间、调流档位、S2 补水五个参数、学习策略和植物参数。

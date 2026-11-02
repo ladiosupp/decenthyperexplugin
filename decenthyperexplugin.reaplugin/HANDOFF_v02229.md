@@ -17,9 +17,10 @@
 - tests/verify_v02229.cjs **725/725**；tests/RESULTS_v02229.txt。
 - 2.2.28 的 721 条保留；2.2.28 旧测试保留为历史。
 
-## 发布
+## 发布记录（2026-11-02）
 
-- GitHub Release：待填
-- GitHub 资产：release/HyperExPulseFilter_v2.2.29.zip
-- SHA256：待填
-- 夸克：待填
+- commit a4d88f3，tag v2.2.29，分支 v1.79ds 已推送。
+- GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.29（附件 HyperExPulseFilter_v2.2.29.zip，444,853 字节）。
+- 夸克：夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.29.zip，fileId 74b24a822eec4c9296b32108ad5376e2。
+- SHA256：383AD7F4749E3338834A01487C1BA3F94472CCFA6EA9BC704338EC6F34DB6FFB。
+- 打包：从 tag v2.2.29 的 git archive 构建；解压后 node --check 通过、复跑 725/725。

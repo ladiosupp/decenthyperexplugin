@@ -1,3 +1,18 @@
+# HyperEx Pulse Filter 2.2.34
+
+2.2.32–2.2.34 收三组：S3 形状上限不再整条丢弃、S2 晚峰能学、S1/S2 的桶身份提前。
+
+- **2.2.32 S3 形状超限夹取**：`driftShapeSuggestion` 的 `ceiling = 2×LUT` 超限不再返回 null，而是把 mid/early/late 夹到上限。2.2.31 23:12 高压纸 mid 1.143 / early-late 1.1875 vs 1.138，整条被丢，S3 停在 0.563（0.96 g/s，−36%）；夹取后 1.125/1.125/1.125，按当杯 r 约 MID 1.48 / EARLY-LATE 1.39，整体 1.4–1.47。
+- **2.2.33 S2 晚峰学习窗**：`stage2PlateauStartMs` 在 peak+1.5 s 之后不足 1.2 s 时回退到 S2 末 1.2 s（不早于 refill settle），`controlOutputQuality` 返回 `plateauFallback:true`。2.2.31 23:12 旧窗口 windowSamples 0、S2 完全学不到；回退后尾段可学，下一杯基值能从 4.31 往上走。
+- **2.2.34 S1 软提示 + S2 签名提前 + 正常下调实际门**：
+  - S1 首次到 0.5 g/s ≥6.3 s 或 S1 时长 ≥8 s → high-pressure candidate（LOW），只在 S2 签名尚未拿到时优先最高中心桶。
+  - S2 有补水时用 return +2~4 s 的压力/机器流量签名（低压 0.302–0.319、高压 0.481–0.610），无补水仍用后段 60%；桶中心不变。S3 控制中心当杯就能用 g4 的 r=1.3126（1.5 → 1.125）。
+  - S2 正常下调时实测 `reg.slope ≤ target×1.04` 记 `s2-actual-in-band-down-hold`、不写；实测 >4% 的真实过冲照常下调。2.2.31 22:52 的 5 g/s 平台在 26.07 s 被 `raw 5.063 / +1.3%`、`预测 5.682 / +13.6%` 的 −4 档打掉到 4.47；这道门只挡预测伪过冲。
+- **兼容**：已有历史/桶保留；S1 阈值只有 3 杯支撑，标 LOW；第一个高压杯的 S2 基值仍要等 2.2.33 的尾段学习，下一杯才吃到。
+- **测试**：`tests/verify_v02234.cjs` **734/734**；`node --check` 通过。
+
+## Previous release
+
 # HyperEx Pulse Filter 2.2.31
 
 2.2.31 收两件事：S2 杯内救急加「实测误差」门槛，历史记录上限从 30 放宽到 80。

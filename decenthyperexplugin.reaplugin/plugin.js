@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.32";
+  const PLUGIN_VERSION = "2.2.33";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -1150,7 +1150,17 @@ function createPlugin(host) {
     if(!peakRow)return null;
     const peakAt=Number(peakRow.tMs);
     const afterPeak=Number.isFinite(peakAt)?peakAt+1500:null;
-    return base===null?afterPeak:Math.max(base,afterPeak);
+    const start=base===null?afterPeak:Math.max(base,afterPeak);
+    // 2.2.33: a slow/high-pressure rise can put the 95% peak in the last 1.5 s
+    // of S2, so peak+1.5 s leaves no regression window and the cup cannot learn
+    // S2 at all (2.2.31 23:12: windowSamples 0). Keep at least one 1.2 s
+    // regression before the phase end, but never before the refill settle base.
+    const lastAt=Number(raw[raw.length-1].tMs);
+    if(Number.isFinite(lastAt)&&Number.isFinite(start)&&start>lastAt-1200){
+      const floor=base===null?lastAt-1200:Math.max(base,lastAt-1200);
+      return floor;
+    }
+    return start;
   }
 
   function gainStageObservation(run,evidence,stage) {
@@ -7365,6 +7375,8 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     const cutoffMs=phase==="stage2"?(plateauStart!==null?plateauStart:(win&&Number.isFinite(win.startMs)?win.startMs:null)):(win&&Number.isFinite(win.startMs)?win.startMs:null);
     if(win&&win.refill&&!win.confirmed)return {available:false,reason:"refill-return-unconfirmed",windowSettleMs:win.settleMs,chainSettleMs:win.chainSettleMs}; // R-5
     const all=phaseRawSamples(run,phase),raw=cutoffMs===null?all:all.filter(x=>Number(x.tMs)>=cutoffMs);
+    const lastAt=all.length?Number(all[all.length-1].tMs):null;
+    const plateauFallback=phase==="stage2"&&plateauStart!==null&&Number.isFinite(lastAt)&&plateauStart>=lastAt-1200-1;
     if(!target)return {available:false,reason:"no-target"};
     // F2: a short S2 can be emptied by the settle window. Report that separately
     // from a genuinely sparse phase, otherwise the diagnostics cannot tell them.
@@ -7384,7 +7396,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       tailMeanGS:round(mean,3),tailErrorPct:mean===null?null:round((mean/target-1)*100,2),tailRippleCVPct:mean?round(Math.sqrt(variance)/mean*100,2):null,
       tailRMSEGS:flows.length?round(Math.sqrt(average(flows.map(x=>(x-target)*(x-target)))),3):null,
       tailOvershootPct:flows.length?round(Math.max(0,Math.max(...flows)/target-1)*100,2):null,windows:flows.length,
-      windowSettleMs:win?win.settleMs:null,chainSettleMs:win?win.chainSettleMs:null,tailFraction:phase==="stage2"&&plateauStart!==null?1:.6,basisDetail:phase==="stage2"?(plateauStart!==null?"after refill peak + 1.5 s (settle "+((win&&win.settleMs)||0)+" ms); plateau regression":(win?"refill settle "+win.settleMs+" ms; final 60% regression":"final 60% regression")):"final 60% of phase regression",basis:"actual RAW g/s; rolling regressions over the plateau (S2) or final60% (S1/S3), separate from normalized learning model"};
+      windowSettleMs:win?win.settleMs:null,chainSettleMs:win?win.chainSettleMs:null,tailFraction:phase==="stage2"&&plateauStart!==null?1:.6,plateauFallback,basisDetail:phase==="stage2"?(plateauFallback?"late peak; last 1.2 s regression (settle "+((win&&win.settleMs)||0)+" ms)":(plateauStart!==null?"after refill peak + 1.5 s (settle "+((win&&win.settleMs)||0)+" ms); plateau regression":(win?"refill settle "+win.settleMs+" ms; final 60% regression":"final 60% regression"))):"final 60% of phase regression",basis:"actual RAW g/s; rolling regressions over the plateau (S2) or final60% (S1/S3), separate from normalized learning model"};
   }
 
   // Steady-tail machine gain: cup flow (RAW) divided by the machine's own flow

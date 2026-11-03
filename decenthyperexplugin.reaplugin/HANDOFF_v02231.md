@@ -1,6 +1,6 @@
 # v2.2.31 交接 — S2 救急实测门槛 + 历史 80 杯（2026-11-03）
 
-状态：已改完、已提交（未发版）。基线 HEAD = `fec293d`（2.2.31 代码提交），版本 2.2.31。
+状态：已改完、已提交、已发版。代码基线 = `fec293d`（2.2.31 代码提交），发布提交 = `81fb48f`，tag `v2.2.31`。
 
 ## 用户口径
 
@@ -33,4 +33,11 @@
 
 ## 发布记录
 
-（待发版）
+（2026-11-03）
+
+- commit `81fb48f`，tag `v2.2.31`，分支 `v1.79ds` 已推送。
+- GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.31（附件 `HyperExPulseFilter_v2.2.31.zip`，442,765 字节）。
+- 夸克：`夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.31.zip`，fileId `352961c15a704ddb8c70fddd458c04e7`。
+- SHA256：`432EB39481C46A7E642DF2809086F234B720EEFAB3F92D64ECC81DFF9F7D6262`。
+- 打包：从 tag `v2.2.31` 的 `git archive` 构建（不压工作区），解压后 `node --check` 通过、复跑 **727/727**。
+- 备注：夸克上传使用官方 skill 的 CLI，落在同一目录。

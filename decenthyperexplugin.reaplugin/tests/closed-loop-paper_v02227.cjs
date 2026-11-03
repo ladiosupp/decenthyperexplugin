@@ -96,12 +96,12 @@ async function refillClosedLoop(e,{totalMs=8000,stepMs=50,tickEvery=5,settleMs=4
   for(let i=seen;i<all.length;i++){cmds.push({atMs:elapsed,cmd:parseInt(JSON.parse(all[i].payload.data).payload.slice(4,6),16)/16});trimAck(e);}
   seen=all.length;
   let goal=baseCmd;for(const w of cmds)if(elapsed-w.atMs>=350)goal=w.cmd;
-  // §22.11 plant calibration (2026-11-01 real-machine ledger): r is a function of
-  // the command, not a constant. 1-4 ml/s sits at ~1.23 and the high-flow region
-  // asymptote equals the pump command (r -> 1), so a flood at 8 ml/s lifts the cup
-  // toward 8 g/s. The old plant pinned the basket at 5.5 ml/s and applied the
-  // learned r everywhere; both made the reported overshoot optimistic.
-  const plantR=paper==='high'?cmd=>cmd<=4?.92:cmd>=4.5?.86:.92-(cmd-4)*.12:cmd=>cmd<=4?1.23:cmd>=7?.8:1.23-(cmd-4)*(.43/3);
+  // §22.11 plant calibration (2026-11-03 / 2.2.27+ ledger): one power law per
+  // paper, cup = cupGain * flow^cupExp. Same parameters as sim/harness.js:
+  // low 2.177/0.524 (ten steady S2-tail + S3-MID points, R2 0.980), high
+  // 1.240/0.796 (only the 2.2.27 23:06 high-paper cup). Do not reintroduce a
+  // constant r: that under-predicts low-flow S3 by ~44% (0.92 vs 1.66-2.09 g/s).
+  const plantCup=paper==='high'?cmd=>1.240*Math.pow(Math.max(0,cmd),0.796):cmd=>2.177*Math.pow(Math.max(0,cmd),0.524);
   if(pumpKernel==='real'){
    const latest=cmds[cmds.length-1];
    if(latest&&(!rampKey||latest.atMs!==rampKey.atMs||latest.cmd!==rampKey.cmd)){rampFrom=pumpTarget;rampTo=latest.cmd;rampStart=latest.atMs+350;rampKey=latest;}
@@ -111,7 +111,7 @@ async function refillClosedLoop(e,{totalMs=8000,stepMs=50,tickEvery=5,settleMs=4
   }else{
    mach+=(Math.max(0,goal)-mach)*Math.min(1,stepMs/400);
   }
-  cup+=(plantR(mach)*mach-cup)*Math.min(1,stepMs/200);
+  cup+=(plantCup(mach)-cup)*Math.min(1,stepMs/200);
   weight+=cup*stepMs/1000;
   e.advance(stepMs);elapsed+=stepMs;step++;
   const tMs=e.now()-startMs;

@@ -63,7 +63,7 @@ Decaid 的 `skipStep` 语义（推进一个 profile step、重置计时）、`es
 官方 mock 的 4.2 rPeak 继续作为默认，用来回放 demo；真实纸的预设是 opt-in：
 
 - 低压纸：plant: { paper: "low", pump: "realDe1" }
-  - rPeak 0.26、cupGain 1.956、cupExp 0.634；2.2.27 S2 实测 r≈1.15–1.29。
+  - rPeak 0.26、cupGain 2.177、cupExp 0.524；2.2.27 以后十点拟合（R² 0.980，S2 尾段 + S3 MID，中位 3.4%）。
 - 高压纸：plant: { paper: "high", pump: "realDe1" }
   - rPeak 0.53、cupGain 1.240、cupExp 0.796；2.2.27 23:06 实测 S2 r≈0.86。
 - 泵：pump: "realDe1" = 0.35 s 死区 + 0.85 s 爬升 + 0.22/100ms（τ≈0.4 s）；默认 official 仍是 mock 的 0.35/100ms。

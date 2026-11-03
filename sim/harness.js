@@ -282,11 +282,12 @@ function plantDefaults() {
   return { efficiency: 1.0, cupGain: 1.883, cupExp: 0.564, pumpResponse: 0.35, deadTime: 0.2, noise: 0.015, rPeak: 4.2, rErode: PUCK.rErode, rampSec: 0 };
 }
 
-// Field-calibrated paper presets (2026-10-31 / 2.2.27 ledger). The official
+// Field-calibrated paper presets (2026-11-03 / 2.2.27+ ledger). The official
 // mock 4.2 rPeak stays the default for demo replay; these presets are for
-// "does this strategy survive the real paper" experiments.
+// "does this strategy survive the real paper" experiments. low: ten steady
+// S2-tail + S3-MID points, cup = 2.177 * flow^0.524 (R2 0.980, median 3.4%).
 const PAPER_PRESETS = Object.freeze({
-  low:  { rPeak: 0.26, cupGain: 1.956, cupExp: 0.634, rErode: 0.26 },
+  low:  { rPeak: 0.26, cupGain: 2.177, cupExp: 0.524, rErode: 0.26 },
   high: { rPeak: 0.53, cupGain: 1.240, cupExp: 0.796, rErode: 0.53 },
 });
 // Official mock pump vs the measured DE1 kernel: 0.35 s dead, 0.85 s ramp,

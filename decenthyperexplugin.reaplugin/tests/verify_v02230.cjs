@@ -2029,9 +2029,10 @@ async function innerClosedLoop(e,{totalMs=9000,stepMs=50,tickEvery=5,dipAt=3500,
   for(let i=seen;i<all.length;i++){const cmd=parseInt(JSON.parse(all[i].payload.data).payload.slice(4,6),16)/16;cmds.push({atMs:elapsed,cmd,cup,prevCmd:lastCmd});lastCmd=cmd;trimAck(e);}
   seen=all.length;
   let goal=2.4;for(const w of cmds)if(elapsed-w.atMs>=350)goal=w.cmd;
-  const plantR=c=>c<=4?1.23:c>=4.5?1:1.23-(c-4)*.46;
+  // 2026-11-03 / 2.2.27+ ledger: same low-paper power law as sim/harness.js.
+  const plantCup=c=>2.177*Math.pow(Math.max(0,c),0.524);
   mach+=(Math.max(0,goal)-mach)*Math.min(1,stepMs/400);
-  cup+=(plantR(mach)*mach-cup)*Math.min(1,stepMs/200);
+  cup+=(plantCup(mach)-cup)*Math.min(1,stepMs/200);
   if(dipAt!==null&&elapsed>=dipAt&&elapsed-stepMs<dipAt)cup=Math.max(0,cup-dip);
   weight+=cup*stepMs/1000;
   e.advance(stepMs);elapsed+=stepMs;step++;
@@ -2050,7 +2051,10 @@ async function innerClosedLoop(e,{totalMs=9000,stepMs=50,tickEvery=5,dipAt=3500,
  return {curve,plateau,plateauPct:(plateau/target-1)*100,cmds,downWhileLow,writes:t.report.trace.filter(x=>x.kind==='write').length,status:t.report.status,checks:t.report.trace.filter(x=>x.kind==='check').map(x=>({r:x.rawGS,p:x.predictedGS,reason:x.reason}))};
 }
 test('§22.4 T-2 closed loop: the S2 platform settles without down-writes while the cup is low',async()=>{
- const e=await innerLoopEnv(),R=await innerClosedLoop(e,{dipAt:Number(process.env.HX_DIPAT||3500),dip:Number(process.env.HX_DIP||1.2)});
+ // 2026-11-03 / 2.2.27+ plant: with the low-paper power law the normal-write
+ // cap (4 quanta = 0.25 ml/s every 1.2 s) needs the full S2 duration; 9 s
+ // stopped at -12.3% before convergence. Real S2 runs 10-20 s.
+ const e=await innerLoopEnv(),R=await innerClosedLoop(e,{totalMs:13000,dipAt:Number(process.env.HX_DIPAT||3500),dip:Number(process.env.HX_DIP||1.2)});
  if(process.env.HX_LOOP_REPORT)console.log('   inner loop:',JSON.stringify({plateauPct:+R.plateauPct.toFixed(1),downWhileLow:R.downWhileLow,writes:R.writes,status:R.status,checks:R.checks}));
  assert(Math.abs(R.plateauPct)<=7.5,'S2 plateau within 7.5% (the uncapped 2 s forecast lands at -8.2%), got '+R.plateauPct.toFixed(1)+'%');
  assert.equal(R.downWhileLow,0,'no down-write while the cup flow is still below target, got '+R.downWhileLow);

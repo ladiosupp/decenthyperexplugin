@@ -28,4 +28,11 @@
 
 ## 发布记录
 
-（待补）
+（2026-11-03）
+
+- commit `3fd7a47`，tag `v2.2.30`，分支 `v1.79ds` 已推送。推送时 `git push origin v1.79ds` 报 `src refspec v1.79ds matches more than one`（同名 tag 造成歧义），要用 `refs/heads/v1.79ds:refs/heads/v1.79ds`。
+- GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.30（附件 `HyperExPulseFilter_v2.2.30.zip`，446,669 字节）。
+- 夸克：`夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.30.zip`，fileId `c154961c87ed445b942160cf374198e6`。
+- SHA256：`828322E501BC5A9BE0BC9608614873A002DDA0B965A8B4F973FEFB342D36715D`。
+- 打包：从 tag `v2.2.30` 的 `git archive` 构建（不压工作区），解压后 `node --check` 通过、复跑 **726/726**。
+- 备注：夸克 MCP 的 `upload_file` 仍然稳定返回 `203`（列表/详情正常），继续用官方 skill 的 CLI（`quark-drive upload`）上传，落在同一目录。

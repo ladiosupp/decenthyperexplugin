@@ -1,3 +1,14 @@
+# HyperEx Pulse Filter 2.2.30
+
+STEP 3 的保存入口补齐：03 / 04 / 05 / 07 每折底部各加一个「保存到插件设置」，06 原有的保留，五个按钮全部走同一个 `saveAdvancedSettings`。纯 UI，控制律与设置项都没动。
+
+- **问题**：2.2.25 把 STEP 3 拆成七折后，保存按钮只剩第 06 折「泄压／秤／重试／诊断」里那一个。在第 04 折改 S1/S2/S3 目标或限压，改完找不到保存入口，切走即丢。
+- **改法**：四个折叠底部各放一个同款按钮（`data-save-advanced`），绑定改成 `querySelectorAll('#saveadvanced,[data-save-advanced]')`；提交的仍是整张 `ADV_FIELDS` 表单，不是只存当前这一折。
+- **说明文字**：每个按钮右侧一行「保存提交以上所有折叠的当前值」（英文 `Saving submits the current values of every fold above`），避免以为只存这一折。
+- **测试**：`tests/verify_v02230.cjs` **726/726**（v02229 的 725 条 + 1 条：凡含可编辑 `adv_*` 字段的折叠必须有保存入口，且五个按钮共用一个处理函数）。`node --check` 通过。
+
+## Previous release
+
 # HyperEx Pulse Filter 2.2.29
 
 2.2.28 之后按用户 2026-11-02 的 S3 平滑要求加的三件事：predictive coast、big-angle 90° 门槛、S3 入段 coast。**没有做 S3 刹车**；前段本来就在 1.64–1.73，刹车只会更低。

@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.31";
+  const PLUGIN_VERSION = "2.2.32";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -1467,18 +1467,24 @@ function createPlugin(host) {
     drift=Math.max(currentDrift*.80,Math.min(currentDrift*1.20,drift));
     earlyFactor=Math.max(.50,Math.min(2.00,earlyFactor));drift=Math.max(.50,Math.min(2.00,drift));
     const [fraction,absolute]=policy.s3;
+    const lut=Number(run.config.stage3LutCommandMlS),ceiling=Math.min(LIMITS.commandFlowMax,Number.isFinite(lut)&&lut>0?lut*2:LIMITS.commandFlowMax);
+    // 2.2.32: a shape whose edges exceed the LUT x2 policy ceiling is clamped to
+    // the cap instead of rejecting the whole suggestion. 2.2.31 23:12 high-pressure
+    // paper: mid 1.143, early/late 1.1875 vs ceiling 1.138; dropping the shape left
+    // S3 at 0.563 and 0.96 g/s (-36%). Clamping turns the wall into a one-step
+    // transition (skill 22.8) and lets the level rise to the policy cap.
+    const clampShape=v=>{const s=snapCommandFlow(v);if(s===null)return null;return s>ceiling+1e-9?Math.floor((ceiling+1e-9)*16)/16:s;};
     let midLimit=s3StepLimit(midNow,fraction,absolute);
     if(regimeJump)midLimit=Math.max(midLimit,Math.abs(midTarget-midNow));
-    const midCommand=snapCommandFlow(Math.max(midNow-midLimit,Math.min(midNow+midLimit,midTarget)));
-    const lut=Number(run.config.stage3LutCommandMlS),ceiling=Math.min(LIMITS.commandFlowMax,Number.isFinite(lut)&&lut>0?lut*2:LIMITS.commandFlowMax);
+    const midCommand=clampShape(Math.max(midNow-midLimit,Math.min(midNow+midLimit,midTarget)));
     // P2-1: bound only the LATE edge to what the curve editor can save
     // (EARLY above MID is a legal drift shape). Clamp to the largest driver
     // step that stays inside max(MID + 0.25, MID x 1.35).
     const lateLimit=Math.max(midCommand+.25,midCommand*1.35);
     const latePlanned=snapCommandFlow(midCommand*drift);
-    const late=latePlanned>lateLimit+1e-9?Math.floor((lateLimit+1e-9)*16)/16:latePlanned;
-    const early=snapCommandFlow(midCommand*earlyFactor);
-    if(![midCommand,early,late].every(v=>Number.isFinite(v)&&v>=LIMITS.commandFlowMin&&v<=ceiling))return null;
+    const late=clampShape(latePlanned>lateLimit+1e-9?Math.floor((lateLimit+1e-9)*16)/16:latePlanned);
+    const early=clampShape(midCommand*earlyFactor);
+    if(![midCommand,early,late].every(v=>Number.isFinite(v)&&v>=LIMITS.commandFlowMin&&v<=ceiling+1e-9))return null;
     // Publish the factors of the quantised commands, not of the pre-snap
     // product, so the stored override reproduces exactly this shape.
     earlyFactor=round(early/midCommand,4);drift=round(late/midCommand,4);

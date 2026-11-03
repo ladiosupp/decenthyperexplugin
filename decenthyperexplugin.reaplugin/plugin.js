@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.33";
+  const PLUGIN_VERSION = "2.2.34";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -1029,17 +1029,48 @@ function createPlugin(host) {
     if(Number(deviation)>GAIN_MEMORY_DEVIATION)alpha=Math.max(alpha,GAIN_MEMORY_DEVIATION_ALPHA);
     return alpha;
   }
+  // 2.2.34: S1 soft hint. High-pressure paper shows a later first meaningful
+  // cup flow (0.5 g/s) and a longer S1 than low paper; the 2.2.31 pair measured
+  // 5.76-5.96 s / 6.6-7.6 s on low paper vs 6.85 s / 8.8 s on high paper. This
+  // is only a LOW-confidence candidate: the S2 early signature confirms it.
+  function s1OutflowHint(run) {
+    const rows=((run&&run.rawScaleSamples)||[]).filter(x=>x&&x.phase==="stage1"&&Number.isFinite(Number(x.decaidWeightFlowGS)));
+    if(rows.length<8)return null;
+    const t0=Number(rows[0].tMs),t1=Number(rows[rows.length-1].tMs);
+    if(!(Number.isFinite(t0)&&Number.isFinite(t1)&&t1>t0))return null;
+    const first=rows.find(x=>Number(x.decaidWeightFlowGS)>=.5);
+    const firstOutflowS=first?round((Number(first.tMs)-t0)/1000,2):null;
+    const s1DurationS=round((t1-t0)/1000,2);
+    const high=(firstOutflowS!==null&&firstOutflowS>=6.3)||s1DurationS>=8;
+    return {candidate:high?"high":"low",firstOutflowS,s1DurationS,thresholdS:6.3,durationThresholdS:8,basis:"S1 first 0.5 g/s and S1 duration",confidence:"LOW"};
+  }
   function gainRegimeForRun(run) {
     const rows=((run&&run.samples)||[]).filter(x=>x&&x.phase==="stage2").sort((a,b)=>Number(a.tMs)-Number(b.tMs));
     if(rows.length<GAIN_MEMORY_MIN_SAMPLES)return null;
-    const late=rows.slice(Math.floor(rows.length*.4)),values=[];
-    for(const x of late){
+    // 2.2.34: the refill return +2..4 s window already carries the same
+    // pressure/flow signature as the late 60% (2.2.31: low 0.302-0.319, high
+    // 0.481-0.610). Use it when a refill return exists; otherwise keep the old
+    // late-60% window.
+    const trace=(run&&run.liveFlowTrim&&Array.isArray(run.liveFlowTrim.trace))?run.liveFlowTrim.trace:[];
+    const ret=trace.find(x=>x&&x.kind==="write"&&x.startupAction==="return"&&Number(x.frame)===1);
+    const late=rows.slice(Math.floor(rows.length*.4));
+    let windowRows=late,basis="S2 late 60% pressure / machine flow";
+    if(ret&&Number.isFinite(Number(ret.tMs))){
+      const start=Number(ret.tMs)+2000,end=Number(ret.tMs)+4000;
+      const early=rows.filter(x=>{const t=Number(x.tMs);return Number.isFinite(t)&&t>=start&&t<=end;});
+      if(early.length>=GAIN_MEMORY_MIN_SAMPLES){windowRows=early;basis="S2 refill return +2–4 s pressure / machine flow";}
+    }
+    const collect=list=>{const values=[];for(const x of list){
       const pressure=Number(x.pressureBar),flow=Number(x.machineFlowMlS);
       if(!Number.isFinite(pressure)||!Number.isFinite(flow)||Math.abs(flow)<.15)continue;
       if(x.machineTelemetryValid===false)continue;
       if(Number.isFinite(Number(x.machineAgeMs))&&Number(x.machineAgeMs)>600)continue;
       const ratio=pressure/flow;
       if(Number.isFinite(ratio)&&ratio>0.05&&ratio<=5)values.push({pressure,flow,ratio});
+    }return values;};
+    let values=collect(windowRows);
+    if(values.length<GAIN_MEMORY_MIN_SAMPLES&&windowRows!==late){
+      windowRows=late;basis="S2 late 60% pressure / machine flow";values=collect(windowRows);
     }
     if(values.length<GAIN_MEMORY_MIN_SAMPLES)return null;
     const signature=median(values.map(x=>x.ratio));
@@ -1047,7 +1078,7 @@ function createPlugin(host) {
     return {signature:round(signature,4),samples:values.length,
       pressureBar:round(median(values.map(x=>x.pressure)),3),
       machineFlowMlS:round(median(values.map(x=>x.flow)),3),
-      basis:"S2 late 60% pressure / machine flow"};
+      basis};
   }
   // The band a bucket may claim: its own hysteresis radius, clipped to the
   // midpoint towards the nearest other centre. Membership becomes a partition,
@@ -1301,15 +1332,18 @@ function createPlugin(host) {
     const memory=gainMemoryState(false);
     if(!memory)return null;
     const regime=gainRegimeForRun(run);
-    let bucket=null,fallback=false;
+    const hint=s1OutflowHint(run);
+    let bucket=null,fallback=false,hintBucket=null;
     if(regime){
       bucket=run&&run.gainMemoryBucketId?memory.buckets.find(x=>x.id===run.gainMemoryBucketId):null;
       if(!bucket)bucket=selectGainBucket(memory,regime.signature).bucket;
     }else{
       // No signature yet (fresh plugin load, or the plan is built before this
-      // shot has any S2 sample). Use the last brewed bucket instead of dropping
-      // to the empty-basket LUT; the in-shot deviation check still takes over.
-      bucket=memory.lastBucketId?memory.buckets.find(x=>x.id===memory.lastBucketId):null;
+      // shot has any S2 sample). 2.2.34: if S1 says high-pressure paper, prefer
+      // the highest-centre bucket as a soft candidate; the S2 early signature
+      // overrides it as soon as it exists. Otherwise use the last brewed bucket.
+      if(hint&&hint.candidate==="high")hintBucket=memory.buckets.slice().sort((a,b)=>Number(b.center)-Number(a.center))[0]||null;
+      bucket=hintBucket||(memory.lastBucketId?memory.buckets.find(x=>x.id===memory.lastBucketId):null);
     }
     if(!bucket)return null;
     const activeBucket=bucket;
@@ -1346,11 +1380,11 @@ function createPlugin(host) {
       stale:!regime||fallback,fallback:fallback?"cross-bucket":null,r:round(r,4),smoothedR:round(stateRow.r,4),observedR:stateRow.lastObservedR,
       band:band||null,bandR:bandR?round(bandR,4):null,bandN,bandMatched:!!bandRow,
       deviationPct:stateRow.lastDeviation==null?null:round(stateRow.lastDeviation*100,1),local,
-      confidence:local?"LOW":gainConfidence(stateRow),targetGS:round(target,3),lutCommandMlS:Number.isFinite(lut)?round(lut,3):null,
+      confidence:local?"LOW":(hintBucket?"LOW":gainConfidence(stateRow)),targetGS:round(target,3),lutCommandMlS:Number.isFinite(lut)?round(lut,3):null,
       commandMlS:command,drift:stateRow.drift==null?null:round(stateRow.drift,4),
       commandBand:stateRow.commandBand||null,currentBand:commandBandOf(command),
       crossBand:!!(stateRow.commandBand&&((band&&stateRow.commandBand!==band)||stateRow.commandBand!==commandBandOf(command))),
-      sourceRunId:stateRow.lastRunId||null,applied:false};
+      sourceRunId:stateRow.lastRunId||null,s1Hint:hint||null,hintApplied:!!hintBucket,applied:false};
   }
   function scalarLearningSuggestion(label,key,current,previous,policy,steadyLarge) {
     const opt={deadbandPct:policy.deadband,maxVariability:policy.rank===0?(key==="s1"?.18:.15):.25,gain:policy.gain,maxFraction:policy[key][0],maxAbs:policy[key][1],
@@ -8214,6 +8248,14 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       const candidate=Math.max(lo,Math.min(hi,raw));
       row.intendedQuanta=steps;row.actualQuanta=Math.round(Math.abs(candidate-command)*16);
       if(candidate===command||candidate<LIMITS.commandFlowMin||candidate>LIMITS.commandFlowMax){row.reason="command-bound-vector";return;}
+      // 2.2.34: a normal S2 down-write must not act on a prediction-only
+      // overshoot while the measured cup is still inside the +4% band (2.2.31
+      // 22:52: raw 5.063 / +1.3%, forecast 5.682 / +13.6%, -4 quanta; the 5 g/s
+      // plateau then fell to 4.47). A real measured overshoot (>4%) still
+      // writes; this is a hold, not a wall.
+      if(predictive&&!rescueActive&&state.phase==="stage2"&&candidate<command&&Number.isFinite(reg.slope)&&reg.slope<=target*1.04){
+        row.trimMode="coast";row.reason="s2-actual-in-band-down-hold";return;
+      }
       if(t.report.writes>=t.report.maxWrites){row.reason=`${t.report.maxWrites}-write-budget`;return;}
       const payload=encodeLiveFlowFrame(step,frame,candidate);
       // All preconditions are synchronous immediately before dispatch. No awaiting

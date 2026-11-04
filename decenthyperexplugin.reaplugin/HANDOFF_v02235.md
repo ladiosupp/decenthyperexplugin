@@ -55,3 +55,12 @@ S3（目标 1.5）：
 - S2 斜坡按 B 末端到目标，S2 段均值可能高 3–4%；若以后要严格补面积，需要允许末端低于目标，和 B 冲突。
 - 23:12 高压纸 S3 晚段衰减（r 1.31 → 0.82）不是锯齿问题，未在本版处理。
 - 下一次导出重点看：S2 是否还出现 >2 档单笔/方向反转；S3 10:15 型的 9 笔 7 反转是否消失；S3 中心是否仍被帧边界拉跳。
+
+## 发布记录（2026-11-04）
+
+- 代码提交：`c26e272`（2.2.35 控制律 + 测试 + README/交接）；`8f0bbd4`（交接状态：待发版）。
+- tag `v2.2.35` 指向 `8f0bbd4`；分支 `v1.79ds` 与 tag 已推送。
+- GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.35（附件 `HyperExPulseFilter_v2.2.35.zip`，454,773 字节，GitHub digest 与本地 SHA256 一致）。
+- 夸克：`夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.35.zip`，fileId `c7e247d3f96f426db9c31483b1ea392e`。
+- SHA256：`7FB379B6669D119DA61D2FB63F47D8000EC40CB5553FE8377D96CA1545A72A06`。
+- 打包：从 tag `v2.2.35` 的 `git archive` 构建（不压工作区），解压后 `node --check` 通过、复跑 **736/736**。

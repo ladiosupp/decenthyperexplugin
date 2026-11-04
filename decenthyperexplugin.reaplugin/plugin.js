@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.34";
+  const PLUGIN_VERSION = "2.2.35";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -2904,7 +2904,7 @@ function createPlugin(host) {
   }
   function completeS2Startup(t) {
     if(!t||!t.startup||t.startup.status==="complete")return;
-    clearS2StartupTimers(t);t.startup.status="complete";t.startup.resumeAt=Date.now()+(t.startup.plan.strategy==="refill-85"?50:1600);
+    clearS2StartupTimers(t);t.startup.status="complete";t.startup.completedAt=Date.now();t.s2Recovery=null;t.startup.resumeAt=Date.now()+(t.startup.plan.strategy==="refill-85"?50:1600);
     if(t.startup.plan.strategy==="refill-85")t.startup.approachAt=t.startup.resumeAt;
     t.report.startupExecution={status:"complete",reason:t.startup.returnReason||"S2 startup baseline return confirmed",cutoff:t.startup.cutoff||null,confirmation:t.startup.returnConfirmation||"machine-target-echo"};
     t.pending=null;t.retry=null;liveTrimRecord("startup-complete",{frame:1,strategy:t.startup.plan.strategy||"legacy-pulse",reason:t.report.startupExecution.reason,cutoff:t.startup.cutoff||null,confirmation:t.startup.returnConfirmation||"machine-target-echo"});
@@ -7794,7 +7794,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     state.liveTrim={active:true,started:false,handle:null,run,report,phase:null,frame:null,frameAt:0,
       startup:{status:c.s2StartupPlan&&c.s2StartupPlan.enabled?"armed":"disabled",plan:c.s2StartupPlan||{enabled:false}},
       commands:{},pending:null,retry:null,lastDecisionStamp:{},lastWriteAt:null,sameSignStreak:0,lastSign:0,bigAngleStreak:0,lastCheckGS:null,lastCheckAtMs:0,
-      rescueMode:false,rescueAngleStreak:0,rescueCalmStreak:0,phaseWrites:{stage1:0,stage2:0,stage3:0},phaseRescueWrites:{stage1:0,stage2:0,stage3:0},phaseQuanta:{stage1:{normal:0,rescue:0},stage2:{normal:0,rescue:0},stage3:{normal:0,rescue:0}},profile:JSON.parse(JSON.stringify(profileObject()))};
+      rescueMode:false,rescueAngleStreak:0,rescueCalmStreak:0,s2Recovery:null,s3Mono:null,phaseWrites:{stage1:0,stage2:0,stage3:0},phaseRescueWrites:{stage1:0,stage2:0,stage3:0},phaseQuanta:{stage1:{normal:0,rescue:0},stage2:{normal:0,rescue:0},stage3:{normal:0,rescue:0}},profile:JSON.parse(JSON.stringify(profileObject()))};
     liveTrimRecord("armed",{periodMs:report.periodMs});
   }
   async function startLiveTrim() {
@@ -7946,6 +7946,73 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     const predicted=fastSlope!==null&&early&&early.r2>=.90?Math.max(0,fastSlope+Math.max(-moveCap,Math.min(moveCap,(fastSlope-early.slope)*horizon))):fastSlope;
     return r&&r.r2>=0.90&&r.slope>0?{...r,fastSlope,predicted,sourceEndStamp:end,predictive,windowMs,horizon}:null;
   }
+  // 2.2.35 smoothness governors.
+  // S2: after a refill return, hold through the pump/puck inertia peak, then
+  // move along ONE fixed-slope command ramp to the gain-corrected platform.
+  // S3: hold the measured in-band plateau; only a two-check confirmed error
+  // earns a single quantum, and a reversal needs extra confirmation.
+  function liveTrimGovernor(t,reg,frame,command,target,base){
+    const now=Date.now();
+    if(state.cfg.liveTrimDecisionModel===false)return null;
+    if(t.rescueMode)return null;
+    if(state.phase==="stage2"&&t.startup&&t.startup.status==="complete"&&t.startup.plan&&t.startup.plan.strategy==="refill-85"){
+      const rec=t.s2Recovery||(t.s2Recovery={});
+      if(rec.done)return null;
+      const doneAt=Number(t.startup.completedAt);
+      if(!Number.isFinite(doneAt))return null;
+      const handoverEnd=Math.max(doneAt,Number(t.startup.approachAt||0)+Number(t.startup.plan.approachMs||0));
+      if(now<handoverEnd)return null;
+      const since=now-handoverEnd;
+      const fast=Number.isFinite(Number(reg.fastSlope))?Number(reg.fastSlope):null;
+      if(!rec.active){
+        // A clear undershoot is the existing controller's job; this governor
+        // exists to stop prediction-driven pull-downs after an overshoot.
+        const predicted=Number(reg.predicted);
+        if(Number.isFinite(predicted)&&predicted<=target*1.05&&reg.slope<target*1.01)return null;
+        // Wait for the refill inertia peak; 6 s covers a monotone no-peak rise.
+        if(since<1500||!(fast===null||fast<=0||since>=6000))return {hold:true,reason:"S2 post-refill settle"};
+        const T=Number(target),f0=Number(reg.slope);
+        if(!(T>0)||!(f0>0)){rec.done=true;return null;}
+        const uEnd=snapCommandFlow(Math.max(LIMITS.commandFlowMin,Math.min(LIMITS.commandFlowMax,command*T/f0)));
+        if(Math.abs(uEnd-command)<1/16-1e-9){rec.done=true;return null;}
+        const remainS=Math.max(.5,(Number(t.run.config.stage2Weight)-Number(state.cumulativeWeight))/Math.max(.5,f0));
+        rec.active=true;rec.at=now;rec.u0=command;rec.u1=uEnd;rec.dir=Math.sign(uEnd-command);
+        rec.durationMs=Math.max(1500,Math.min(8000,Math.round(remainS*700)));
+        rec.f0=f0;rec.T=T;
+        return {hold:true,reason:"S2 post-refill ramp armed"};
+      }
+      const elapsed=now-rec.at;
+      if(elapsed>=rec.durationMs){rec.active=false;rec.done=true;return {hold:true,reason:"S2 post-refill ramp complete"};}
+      const frac=Math.min(1,elapsed/rec.durationMs);
+      const ref=snapCommandFlow(rec.u0+(rec.u1-rec.u0)*frac);
+      if(Math.abs(ref-command)<1/16-1e-9)return {hold:true,reason:"S2 post-refill ramp hold"};
+      if(rec.dir&&Math.sign(ref-command)!==rec.dir)return {hold:true,reason:"S2 post-refill ramp one-way"};
+      return {hold:false,ref,mode:"s2-ramp",steps:Math.max(1,Math.round(Math.abs(ref-command)*16))};
+    }
+    if(state.phase==="stage3"){
+      const entryAge=Number(state.stage3StartedAtMs)>0?now-Number(state.stage3StartedAtMs):Infinity;
+      if(entryAge<3500)return null;
+      const mono=t.s3Mono||(t.s3Mono={frame:null,out:0,sign:0,dir:0,holdUntil:0});
+      if(mono.frame!==frame){mono.frame=frame;mono.out=0;mono.sign=0;mono.dir=0;mono.holdUntil=0;}
+      if(now<mono.holdUntil)return {hold:true,reason:"S3 monotone settle"};
+      const T=Number(target),f=Number(reg.slope);
+      if(!(T>0)||!(f>0))return null;
+      const err=f/T-1;
+      if(Math.abs(err)<=0.10){mono.out=0;mono.sign=0;return {hold:true,reason:"coast-trend-stable",trimMode:"coast"};}
+      // Large misses keep the existing bounded step logic; this governor only
+      // removes the near-target limit cycle.
+      if(Math.abs(err)>0.15)return null;
+      const sign=Math.sign(err);
+      if(sign===mono.sign)mono.out++;else{mono.sign=sign;mono.out=1;}
+      if(mono.out<2&&Math.abs(err)<0.12)return {hold:true,reason:"S3 monotone confirm"};
+      const dir=-sign;
+      if(mono.dir&&dir!==mono.dir&&(mono.out<3||Math.abs(err)<0.10))return {hold:true,reason:"S3 monotone hysteresis"};
+      const ref=snapCommandFlow(command+dir/16);
+      if(Math.abs(ref-command)<1/16-1e-9)return {hold:true,reason:"S3 monotone command-bound"};
+      return {hold:false,ref,mode:"s3-mono",steps:1,dir};
+    }
+    return null;
+  }
   async function liveTrimTick(t) {
     const predictiveMode=state.cfg.liveTrimDecisionModel!==false;
     const live=()=>state.liveTrim===t&&t.active&&state.diagnosticCurrent===t.run&&liveTrimPhaseAllowed(t);
@@ -8078,7 +8145,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         const fast=s2RefillFlowEstimate(t);
         if(fast&&fast.predicted>=target){row.reason="S2 approach rising response; hold for inertia";return;}
       }
-      if(state.phase==="stage3"&&reg.slope<target){
+      if(state.phase==="stage3"&&reg.slope<target&&t.refCommand==null){
         // No fixed anti-ripple interval: the trend statistics gate writes. The predicted
         // rise keeps the direction angle from overshooting while the trend is still climbing.
         if(reg.fastSlope!==null&&reg.fastSlope!==undefined&&(reg.fastSlope>=target*.98||reg.predicted>=target)){row.reason="S3 rising response; hold upward correction";return;}
@@ -8087,15 +8154,20 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       // decision and saturated both the error and the rescue gate.
       const decisionGS=predictive&&reg.predicted!==null&&reg.predicted!==undefined&&Number.isFinite(Number(reg.predicted))?Number(reg.predicted):reg.slope;
       row.rawGS=round(reg.slope,3);row.predictedGS=round(decisionGS,3);row.windowMs=reg.windowMs;row.horizonS=reg.horizon;row.targetGS=target;row.errorPct=round((reg.slope/target-1)*100,2);row.r2=round(reg.r2,4);
+      const step=t.profile.steps[frame],base=Math.floor(Number(step.flow)*16+0.5)/16;
+      const command=Number.isFinite(t.commands[frame])?t.commands[frame]:base;
+      t.refCommand=null;t.governorSteps=null;t.governorMode=null;
+      const governor=liveTrimGovernor(t,reg,frame,command,target,base);
+      if(governor&&governor.hold){row.reason=governor.reason;if(governor.trimMode)row.trimMode=governor.trimMode;return;}
+      if(governor&&governor.ref!=null){t.refCommand=governor.ref;t.governorSteps=governor.steps;t.governorMode=governor.mode;row.governor=governor.mode;}
+      row.refCommand=t.refCommand;
       const deadband=(Number(t.report.deadbandPct)||4)/100;
-      if(Math.abs(decisionGS/target-1)<=deadband+1e-9){row.reason="inside-"+Math.round(deadband*100)+"pct-band";return;}
+      if(t.refCommand==null&&Math.abs(decisionGS/target-1)<=deadband+1e-9){row.reason="inside-"+Math.round(deadband*100)+"pct-band";return;}
       if(t.retry&&t.retry.frame!==frame){
         liveTrimRecord("unconfirmed-frame-ended",{frame:t.retry.frame,commandMlS:t.retry.command,nextFrame:frame});
         t.retry=null; // Never carry an unresponsive vector across a frame transition.
       }
       const retry=t.retry;
-      const step=t.profile.steps[frame],base=Math.floor(Number(step.flow)*16+0.5)/16;
-      const command=Number.isFinite(t.commands[frame])?t.commands[frame]:base;
       // A stale direction is held, not blindly retried after the cup error reverses.
       if(retry&&Math.sign(retry.command-command)!==Math.sign(target-reg.slope)){row.reason="unconfirmed-target-direction-changed";return;}
       // One quantum only from a confirmed command; unresolved attempts repeat the same target.
@@ -8104,7 +8176,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       // PD-style bounded amplitude: the sign steers the trajectory direction angle toward
       // the setpoint line; the capped 1/16-quantized amplitude accelerates a wide angle and
       // tapers as the line is approached. Anti-overshoot stays in the statistics gates above.
-      const errGS=target-decisionGS;
+      let errGS=t.refCommand!=null?(t.refCommand-command):(target-decisionGS);
       const dir=decisionGS<target?-1:decisionGS>target?1:0;
       if(dir!==0&&dir===t.lastSign)t.sameSignStreak=(t.sameSignStreak||0)+1;else{t.sameSignStreak=dir!==0?1:0;t.lastSign=dir;}
       t.report.sameSignStreak=t.sameSignStreak;
@@ -8156,6 +8228,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         t.rescueAngleStreak=0;t.rescueMode=false;t.rescueCalmStreak=0;
       }
       const rescueActive=predictive&&!!t.rescueMode&&predictedRel>=.08;
+      if(rescueActive&&t.refCommand!=null){t.refCommand=null;t.governorSteps=null;t.governorMode=null;errGS=target-decisionGS;}
       row.rescue=rescueActive;row.rescueAngleStreak=t.rescueAngleStreak||0;row.predictedErrorPct=round(predictedRel*100,1);
       const limiter=Number(step.limiter&&step.limiter.value);
       const pressureLimited=!Number.isFinite(limiter)||state.lastPressure>=0.95*limiter;
@@ -8179,7 +8252,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       const stage3EntryAge=state.phase==="stage3"&&Number(state.stage3StartedAtMs)>0?Date.now()-Number(state.stage3StartedAtMs):Infinity;
       const stage3EntryCoast=state.phase==="stage3"&&stage3EntryAge<3500&&(reg.slope>target*1.02||(Number.isFinite(trendSlope)&&trendSlope<0));
       const coastBand=state.phase==="stage3"?0.10:0.08;
-      const predictiveCoast=!rescueActive&&!stage3EntryCoast&&Math.abs(errGS/target)<=coastBand&&(closing||trendFlat);
+      const predictiveCoast=t.refCommand==null&&!rescueActive&&!stage3EntryCoast&&Math.abs(errGS/target)<=coastBand&&(closing||trendFlat);
       const trimMode=predictive?(stage3EntryCoast?"coast":rescueActive?"rescue":predictiveCoast?"coast":"vector"):(Math.abs(errGS/target)<=0.06&&(closing||trendFlat)?"coast":(errGS>0&&angleDeg!==null&&angleDeg>=55&&angleDeg<=125?"lut-compensate":"vector"));
       row.trimMode=trimMode;
       if(trimMode==="coast"){row.reason="coast-trend-stable";row.coastEntry=!!stage3EntryCoast;return;}
@@ -8227,7 +8300,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         // error >15%. A 14% error with a 6-quantum write was the 22:56 14.3 s case.
         const bigAngleConfirmed=predictedRel>0.15;
         const normalMax=state.phase==="stage3"?((t.bigAngleStreak||0)>=6&&bigAngleConfirmed?8:(t.bigAngleStreak||0)>=3&&bigAngleConfirmed?6:(predictedRel>0.15?4:2)):((t.bigAngleStreak||0)>=6&&bigAngleConfirmed?8:(t.bigAngleStreak||0)>=3&&bigAngleConfirmed?6:4);
-        steps=rescueActive?predictiveStepQuanta(errGS,r,rescueMin,24):predictiveStepQuanta(errGS,r,1,normalMax);
+        steps=t.governorSteps!=null?t.governorSteps:(rescueActive?predictiveStepQuanta(errGS,r,rescueMin,24):predictiveStepQuanta(errGS,r,1,normalMax));
         row.controlCenterMlS=round(controlCenter.commandMlS,3);row.controlSource=controlCenter.source;row.controlR=controlCenter.r;row.controlBucket=controlCenter.bucketId||null;row.stepQuanta=steps;
       }else{
         steps=trimMode==="lut-compensate"?Math.max(2,vectorStepCount(errGS,t.bigAngleStreak,target)):vectorStepCount(errGS,t.bigAngleStreak,target);
@@ -8253,7 +8326,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       // 22:52: raw 5.063 / +1.3%, forecast 5.682 / +13.6%, -4 quanta; the 5 g/s
       // plateau then fell to 4.47). A real measured overshoot (>4%) still
       // writes; this is a hold, not a wall.
-      if(predictive&&!rescueActive&&state.phase==="stage2"&&candidate<command&&Number.isFinite(reg.slope)&&reg.slope<=target*1.04){
+      if(t.refCommand==null&&predictive&&!rescueActive&&state.phase==="stage2"&&candidate<command&&Number.isFinite(reg.slope)&&reg.slope<=target*1.04){
         row.trimMode="coast";row.reason="s2-actual-in-band-down-hold";return;
       }
       if(t.report.writes>=t.report.maxWrites){row.reason=`${t.report.maxWrites}-write-budget`;return;}
@@ -8274,6 +8347,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         if(rescueActive)t.phaseQuanta[state.phase].rescue+=quantumStep;else t.phaseQuanta[state.phase].normal+=quantumStep;
       }
       t.report.writes++;state.liveTrimDirty=true;
+      if(t.governorMode==="s3-mono"&&t.s3Mono){t.s3Mono.dir=Math.sign(candidate-command)||t.s3Mono.dir;t.s3Mono.out=0;t.s3Mono.holdUntil=Date.now()+2400;}
       liveTrimRecord("write",{frame,commandMlS:candidate,previousMlS:command,retry:!!retry,rawGS:row.rawGS,predictedGS:row.predictedGS,targetGS:target,rescue:rescueActive,steps,intendedQuanta:steps,actualQuanta:Math.round(Math.abs(candidate-command)*16),controlCenterMlS:row.controlCenterMlS,controlSource:row.controlSource,controlR:row.controlR,controlBucket:row.controlBucket,payload});
       row.decision="write";row.commandMlS=candidate;
       await host.transport.send(t.handle,{type:"text",data:JSON.stringify({type:"request",operation:"write",characteristicUUID:"A010",payload})});

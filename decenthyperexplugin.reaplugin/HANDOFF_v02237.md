@@ -31,3 +31,12 @@
 - `p/q` 受粉量、粉碗、豆子、预浸影响；建议只在同豆同粉量下比较，换豆/换粉量先别当研磨结论。
 - 换磨豆机第一杯的桶中心可能还是旧的（g3 vs 新 g5），建议会标 LOW；连续两杯同向再动。
 - 这是建议，不会自动改 S2/S3 指令，也不会改研磨。
+
+## 发布记录（2026-11-05）
+
+- 代码提交：`e7ef53c`（2.2.37 研磨建议 + 琥珀色块）；`6605316`（交接状态：待发版）。
+- tag `v2.2.37` 指向 `6605316`；分支 `v1.79ds` 与 tag 已推送。
+- GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.37（附件 `HyperExPulseFilter_v2.2.37.zip`，457,489 字节，GitHub digest 与本地 SHA256 一致）。
+- 夸克：`夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.37.zip`，fileId `44a45170ad47469faf4abbe9e9245b7d`。
+- SHA256：`122C05505260853ABD5F32158DC63AE4219319A2295F4D2AC645C43551558FF2`。
+- 打包：从 tag `v2.2.37` 的 `git archive` 构建（不压工作区），解压后 `node --check` 通过、复跑 **741/741**。

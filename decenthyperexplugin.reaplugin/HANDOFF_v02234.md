@@ -47,11 +47,11 @@
 
 ## 发布记录
 
-（发版后补）
+（2026-11-04）
 
-- commit：`be059cc`（2.2.34；含 2.2.32/2.2.33）
-- tag：`v2.2.34`
-- 分支：`v1.79ds`
-- GitHub Release：待补
-- 夸克：待补
-- SHA256：待补
+- 代码提交：`be059cc`（2.2.34 控制律）；README/交接：`9192a63`；tag `v2.2.34` 指向 `9192a63`。
+- 分支 `v1.79ds` 与 tag `v2.2.34` 已推送。
+- GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.34（附件 `HyperExPulseFilter_v2.2.34.zip`，453,419 字节）。
+- 夸克：`夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.34.zip`，fileId `955f004015874d33a8096a6008a69618`。
+- SHA256：`569A1CA8CDAF6BD161C0B7C9930559C04435AEC9E32664F05E07135363D9E897`。
+- 打包：从 tag `v2.2.34` 的 `git archive` 构建（不压工作区），解压后 `node --check` 通过、复跑 **734/734**。

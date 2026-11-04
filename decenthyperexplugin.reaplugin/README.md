@@ -1,3 +1,12 @@
+# HyperEx Pulse Filter 2.2.36
+
+2.2.36 只补 2.2.35 的短 S2 边角：剩余 S2 < 4 s 时，settle 从 1.5 s 缩到 0.5 s、直接用当前流量算斜坡，每笔最多 2 档。长 S2 的 2.2.35 行为不变。
+
+- **背景**：06:31 那杯 S2 只剩约 2 s，1.5 s settle + 等峰值把 S2 用完，S2 段均值 +10.2%（尾段 +1.0%）。短窗口现在在 return 后 0.5 s 就能开始写，且每笔 ≤2 档，避免又变成一次大下拉。
+- **测试**：`tests/verify_v02236.cjs` **737/737**；新增短 S2 测试。
+
+## Previous release
+
 # HyperEx Pulse Filter 2.2.35
 
 2.2.35 只改杯内平滑度：S2 补水后的固定斜率恢复斜坡、S3 近目标单调闸。口径按 B：末端落到目标，不为了补面积刻意下冲。
@@ -7,8 +16,6 @@
 - **不碰**：补水段符号、S3 形状学习、LUT、S1 软提示、S2 签名窗口、正常下调实际门全部保留。
 - **兼容**：S2 斜坡只在 `refill-85` + predictive 模式生效；legacy 决策模型仍走原逻辑。
 - **测试**：`tests/verify_v02235.cjs` **736/736**；`node --check` 通过。新增 S2 ramp / S3 mono 两条。
-
-## Previous release
 
 # HyperEx Pulse Filter 2.2.34
 

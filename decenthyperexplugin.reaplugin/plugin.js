@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.35";
+  const PLUGIN_VERSION = "2.2.36";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -7964,27 +7964,35 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       if(now<handoverEnd)return null;
       const since=now-handoverEnd;
       const fast=Number.isFinite(Number(reg.fastSlope))?Number(reg.fastSlope):null;
+      const flowNow=Number(reg.slope);
+      const remainNow=flowNow>0?Math.max(.5,(Number(t.run.config.stage2Weight)-Number(state.cumulativeWeight))/Math.max(.5,flowNow)):Infinity;
+      const shortS2=Number.isFinite(remainNow)&&remainNow<4;
       if(!rec.active){
         // A clear undershoot is the existing controller's job; this governor
         // exists to stop prediction-driven pull-downs after an overshoot.
         const predicted=Number(reg.predicted);
         if(Number.isFinite(predicted)&&predicted<=target*1.05&&reg.slope<target*1.01)return null;
         // Wait for the refill inertia peak; 6 s covers a monotone no-peak rise.
-        if(since<1500||!(fast===null||fast<=0||since>=6000))return {hold:true,reason:"S2 post-refill settle"};
+        // A short S2 (less than 4 s left) cannot afford 1.5 s of waiting: use
+        // the current flow as the peak and start the ramp at 0.5 s.
+        const settleMs=shortS2?500:1500;
+        const peakReady=shortS2?since>=settleMs:(since>=settleMs&&(fast===null||fast<=0||since>=6000));
+        if(!peakReady)return {hold:true,reason:"S2 post-refill settle"};
         const T=Number(target),f0=Number(reg.slope);
         if(!(T>0)||!(f0>0)){rec.done=true;return null;}
         const uEnd=snapCommandFlow(Math.max(LIMITS.commandFlowMin,Math.min(LIMITS.commandFlowMax,command*T/f0)));
         if(Math.abs(uEnd-command)<1/16-1e-9){rec.done=true;return null;}
         const remainS=Math.max(.5,(Number(t.run.config.stage2Weight)-Number(state.cumulativeWeight))/Math.max(.5,f0));
         rec.active=true;rec.at=now;rec.u0=command;rec.u1=uEnd;rec.dir=Math.sign(uEnd-command);
-        rec.durationMs=Math.max(1500,Math.min(8000,Math.round(remainS*700)));
-        rec.f0=f0;rec.T=T;
+        rec.durationMs=shortS2?Math.max(900,Math.min(8000,Math.round(remainS*700))):Math.max(1500,Math.min(8000,Math.round(remainS*700)));
+        rec.f0=f0;rec.T=T;rec.short=shortS2;
         return {hold:true,reason:"S2 post-refill ramp armed"};
       }
       const elapsed=now-rec.at;
       if(elapsed>=rec.durationMs){rec.active=false;rec.done=true;return {hold:true,reason:"S2 post-refill ramp complete"};}
       const frac=Math.min(1,elapsed/rec.durationMs);
-      const ref=snapCommandFlow(rec.u0+(rec.u1-rec.u0)*frac);
+      let ref=snapCommandFlow(rec.u0+(rec.u1-rec.u0)*frac);
+      if(rec.short){const cap=2/16,delta=Math.max(-cap,Math.min(cap,ref-command));ref=snapCommandFlow(command+delta);}
       if(Math.abs(ref-command)<1/16-1e-9)return {hold:true,reason:"S2 post-refill ramp hold"};
       if(rec.dir&&Math.sign(ref-command)!==rec.dir)return {hold:true,reason:"S2 post-refill ramp one-way"};
       return {hold:false,ref,mode:"s2-ramp",steps:Math.max(1,Math.round(Math.abs(ref-command)*16))};
@@ -8159,7 +8167,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       t.refCommand=null;t.governorSteps=null;t.governorMode=null;
       const governor=liveTrimGovernor(t,reg,frame,command,target,base);
       if(governor&&governor.hold){row.reason=governor.reason;if(governor.trimMode)row.trimMode=governor.trimMode;return;}
-      if(governor&&governor.ref!=null){t.refCommand=governor.ref;t.governorSteps=governor.steps;t.governorMode=governor.mode;row.governor=governor.mode;}
+      if(governor&&governor.ref!=null){t.refCommand=governor.ref;t.governorSteps=governor.steps;t.governorMode=governor.mode;row.governor=governor.mode;row.shortS2=!!(t.s2Recovery&&t.s2Recovery.short);}
       row.refCommand=t.refCommand;
       const deadband=(Number(t.report.deadbandPct)||4)/100;
       if(t.refCommand==null&&Math.abs(decisionGS/target-1)<=deadband+1e-9){row.reason="inside-"+Math.round(deadband*100)+"pct-band";return;}
@@ -8348,7 +8356,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       }
       t.report.writes++;state.liveTrimDirty=true;
       if(t.governorMode==="s3-mono"&&t.s3Mono){t.s3Mono.dir=Math.sign(candidate-command)||t.s3Mono.dir;t.s3Mono.out=0;t.s3Mono.holdUntil=Date.now()+2400;}
-      liveTrimRecord("write",{frame,commandMlS:candidate,previousMlS:command,retry:!!retry,rawGS:row.rawGS,predictedGS:row.predictedGS,targetGS:target,rescue:rescueActive,steps,intendedQuanta:steps,actualQuanta:Math.round(Math.abs(candidate-command)*16),controlCenterMlS:row.controlCenterMlS,controlSource:row.controlSource,controlR:row.controlR,controlBucket:row.controlBucket,payload});
+      liveTrimRecord("write",{frame,commandMlS:candidate,previousMlS:command,retry:!!retry,rawGS:row.rawGS,predictedGS:row.predictedGS,targetGS:target,rescue:rescueActive,steps,intendedQuanta:steps,actualQuanta:Math.round(Math.abs(candidate-command)*16),controlCenterMlS:row.controlCenterMlS,controlSource:row.controlSource,controlR:row.controlR,controlBucket:row.controlBucket,shortS2:!!(t.s2Recovery&&t.s2Recovery.short),payload});
       row.decision="write";row.commandMlS=candidate;
       await host.transport.send(t.handle,{type:"text",data:JSON.stringify({type:"request",operation:"write",characteristicUUID:"A010",payload})});
     }finally{

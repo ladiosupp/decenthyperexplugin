@@ -51,7 +51,7 @@ function readParams() {
       noise: val('pNoise', 0.015),
       rPeak: val('pRPeak', 4.2),
     },
-    maxSeconds: val('maxS', 90),
+    maxSeconds: val('maxS', 120),
   };
 }
 

@@ -81,8 +81,11 @@ function historyRecordings(fileText) {
   const out = [];
   const pushRun = (run, idxLabel) => {
     if (!run || typeof run !== 'object') return;
-    const raw = Array.isArray(run.rawScaleSamples) ? run.rawScaleSamples
-      : Array.isArray(run.samples) ? run.samples : null;
+    // 2.2.30+ exports keep the telemetry under fullRecord; older exports put
+    // rawScaleSamples/samples at the shot level. Accept both.
+    const record = run.fullRecord && typeof run.fullRecord === 'object' ? run.fullRecord : run;
+    const raw = Array.isArray(record.rawScaleSamples) ? record.rawScaleSamples
+      : Array.isArray(record.samples) ? record.samples : null;
     if (!raw || !raw.length) return;
     const frames = [];
     for (const x of raw) {
@@ -290,6 +293,22 @@ const PAPER_PRESETS = Object.freeze({
   low:  { rPeak: 0.26, cupGain: 2.177, cupExp: 0.524, rErode: 0.26 },
   high: { rPeak: 0.53, cupGain: 1.240, cupExp: 0.796, rErode: 0.53 },
 });
+// One number for the paper condition: 0 = the measured low-paper state,
+// 1 = the measured high-paper state, in between = a blend. The two real cups
+// from 2026-11-03 differ enough that a single global preset cannot cover both;
+// this turns that difference into an explicit per-run knob instead of adding
+// more hard-coded presets.
+function paperBlend(condition) {
+  const u = Math.max(0, Math.min(1, Number(condition)));
+  const a = PAPER_PRESETS.low, b = PAPER_PRESETS.high;
+  const mix = (x, y) => x + (y - x) * u;
+  return {
+    rPeak: mix(a.rPeak, b.rPeak),
+    rErode: mix(a.rErode, b.rErode),
+    cupGain: mix(a.cupGain, b.cupGain),
+    cupExp: mix(a.cupExp, b.cupExp),
+  };
+}
 // Official mock pump vs the measured DE1 kernel: 0.35 s dead, 0.85 s ramp,
 // tau ~0.4 s. rampSec=0 keeps the official 0.35/tick first-order behavior.
 const PUMP_PRESETS = Object.freeze({
@@ -346,7 +365,9 @@ function applyState(env, p) {
         stage2: { mode: 'manual', origin: 'manual', command: Number(p.commands.s2) },
         stage3: { mode: 'manual', origin: 'manual', command: Number(p.commands.s3) },
       },
-      s3Shape: { enabled: false },
+      s3Shape: p.commands.shape && typeof p.commands.shape === 'object'
+        ? { ...p.commands.shape, enabled: true }
+        : { enabled: false },
       manualCurveSource: { afterRunId: '', appliedAt: at, mode: 'sim-manual' },
     };
   } else {
@@ -372,7 +393,7 @@ async function runShot(params) {
     soakSeconds: 10, liveTrim: { enabled: true, level: 3 },
     commands: { enabled: false, s1: 0.719, s2: 2.507, s3: 0.569 },
     refill: { enabled: true, basis: 'target', startDelayMs: 0, targetPercent: 160, cutoffPercent: 85, maxDurationMs: 4000, approachMs: 3000 },
-    plant: plantDefaults(), policy: '正常', maxSeconds: 90,
+    plant: plantDefaults(), policy: '正常', maxSeconds: 120,
     hardPressureLimit: undefined,
   };
   const input = params || {};
@@ -380,7 +401,10 @@ async function runShot(params) {
   for (const key of ['targets', 'weights', 'liveTrim', 'refill', 'plant', 'commands']) {
     p[key] = { ...defaults[key], ...(input[key] || {}) };
   }
-  if (p.plant.paper && PAPER_PRESETS[p.plant.paper]) {
+  const paperCondition = input.plant ? input.plant.paperCondition : undefined;
+  if (paperCondition !== undefined && paperCondition !== null && paperCondition !== '' && Number.isFinite(Number(paperCondition))) {
+    p.plant = { ...p.plant, ...paperBlend(paperCondition), ...(input.plant || {}), paper: 'blend' };
+  } else if (p.plant.paper && PAPER_PRESETS[p.plant.paper]) {
     p.plant = { ...p.plant, ...PAPER_PRESETS[p.plant.paper], ...(input.plant || {}) };
   }
   if (p.plant.pump && PUMP_PRESETS[p.plant.pump]) {
@@ -402,6 +426,9 @@ async function runShot(params) {
     const recs = historyRecordings(fs.readFileSync(input.replay.file, 'utf8'));
     const idx = Number.isInteger(input.replay.index) ? input.replay.index : recs.length - 1;
     replay = recs[idx] || null;
+    if (!replay) {
+      throw new Error(`replay: ${input.replay.file} has ${recs.length} replayable cup(s); index ${idx} is unavailable`);
+    }
   } else if (input.replay && Number.isInteger(input.replay.index)) {
     const recordingsList = recordings();
     replay = recordingsList[input.replay.index] || null;
@@ -441,9 +468,12 @@ async function runShot(params) {
   m.baseCommand = Number(stepAt(0).flow) || 0;
   m.writeCommand = null;
   if (m.shotStartSec == null) m.shotStartSec = 0;
-  const useReplay = !!replay;
+  let useReplay = !!replay;
   const replayLastT = useReplay ? replay.frames[replay.frames.length - 1].t : 0;
   let replayEnded = false;
+  let handoffDone = false;
+  let handoffInfo = null;
+  let handoffJustNow = false;
 
   // S3 timed subframes advance by profile time, like the machine does.
   let frameEnteredAt = 0, autoFrame = m.frame;
@@ -537,6 +567,39 @@ async function runShot(params) {
         else if (elapsed < replay.preinfusionStopSec) m.substate = 'preinfusion';
         else m.substate = 'pouring';
       }
+      if (!handoffDone && p.handoff && typeof p.handoff === 'object' && m.state === 'espresso'
+          && rec.phase === p.handoff.phase
+          && (p.handoff.frame == null || Number(rec.frame) === Number(p.handoff.frame))) {
+        // Warm start: replay up to the requested real phase/frame, then let the
+        // hydraulic plant take over from the recorded state. The puck is already
+        // wet by this point, so the resistance clock starts at its aged value
+        // instead of restarting from rDry. Default 12 s = the rPeak point.
+        const handoffFrame = Number.isFinite(Number(rec.frame)) ? Number(rec.frame) : 1;
+        const puckAgeSec = Math.max(0, Number.isFinite(Number(p.handoff.puckAgeSec)) ? Number(p.handoff.puckAgeSec) : 12);
+        handoffDone = true;
+        useReplay = false;
+        replayEnded = false;
+        handoffJustNow = true;
+        m.state = 'espresso';
+        m.substate = 'pouring';
+        m.frame = handoffFrame;
+        m.baseFrame = handoffFrame;
+        m.baseCommand = Number(stepAt(handoffFrame).flow) || 0;
+        m.writeCommand = null;
+        m.machineFlow = Math.max(0, rec.f);
+        m.pressure = Math.max(0, rec.p);
+        m.shotStartSec = t - puckAgeSec;
+        m.rampTarget = null;
+        m.rampFrom = m.machineFlow;
+        m.rampStart = t;
+        weight = Math.max(0, rec.w);
+        cupFlow = Math.max(0, rec.wf);
+        handoffInfo = {
+          t: round(t, 2), phase: rec.phase, frame: handoffFrame, puckAgeSec,
+          flow: round(rec.f, 3), pressure: round(rec.p, 3), weight: round(rec.w, 2),
+        };
+        logs.push(`[sim] warm handoff at ${handoffInfo.t}s ${rec.phase} frame ${handoffFrame} (puck age ${puckAgeSec}s)`);
+      }
       if (elapsed >= replayLastT) {
         if (!replayEnded) {
           replayEnded = true;
@@ -585,8 +648,12 @@ async function runShot(params) {
       m.pressure = 0;
     }
     if (!useReplay) {
-      cupFlow = cupFlowForMachineFlow(m.machineFlow, p.plant) * p.plant.efficiency;
-      weight += cupFlow * dt;
+      if (handoffJustNow) {
+        handoffJustNow = false;
+      } else {
+        cupFlow = cupFlowForMachineFlow(m.machineFlow, p.plant) * p.plant.efficiency;
+        weight += cupFlow * dt;
+      }
     }
     const pressure = m.pressure;
 
@@ -623,6 +690,9 @@ async function runShot(params) {
   }
 
   const run = s.diagnosticLast;
+  if (p.handoff && !handoffDone) {
+    logs.push(`[sim] warm handoff not reached: ${JSON.stringify(p.handoff)}`);
+  }
   const trace = (run && run.liveFlowTrim && run.liveFlowTrim.trace) || [];
   const writes = trace.filter(x => x.kind === 'write');
   // The plugin's diagnostic curve is NOT a single sensor line: it is composed
@@ -656,7 +726,8 @@ async function runShot(params) {
     simRefill: { targetPumpMlS: round(targetPumpMlS, 3), events: refillEvents },
     applied: run && run.config ? { s1: run.config.stage1CommandMlS, s2: run.config.stage2CommandMlS, s3: run.config.stage3CommandMlS } : null,
     machineLimits: MACHINE,
-    replay: useReplay ? { index: input.replay.index, title: replay.title, duration: replay.duration, lastT: replayLastT } : null,
+    replay: replay ? { index: input.replay && input.replay.index, title: replay.title, duration: replay.duration, lastT: replayLastT } : null,
+    handoff: handoffInfo,
     violations: env.violations.slice(0, 40),
     startup: run && run.liveFlowTrim ? run.liveFlowTrim.startupExecution : null,
     report: run && run.liveFlowTrim ? { checks: run.liveFlowTrim.checks, writes: run.liveFlowTrim.writes, retries: run.liveFlowTrim.retries, misses: run.liveFlowTrim.targetMisses, status: run.liveFlowTrim.status } : null,
@@ -666,13 +737,14 @@ async function runShot(params) {
   };
 }
 
-module.exports = { runShot, plantDefaults, PAPER_PRESETS, PUMP_PRESETS, PLUGIN_FILE, recordings, historyRecordings };
+module.exports = { runShot, plantDefaults, PAPER_PRESETS, PUMP_PRESETS, paperBlend, PLUGIN_FILE, recordings, historyRecordings };
 
 if (require.main === module) {
   const params = process.argv[2] ? JSON.parse(process.argv[2]) : {};
   runShot(params).then(r => {
     console.log(JSON.stringify({
       ended: r.ended, writes: r.writes.length,
+      replay: r.replay, handoff: r.handoff,
       summary: r.summary && { s1: r.summary.stage1 && r.summary.stage1.rawRegressionGS, s2: r.summary.stage2 && r.summary.stage2.rawRegressionGS, s3: r.summary.stage3 && r.summary.stage3.rawRegressionGS },
       tail: r.series.slice(-3), logs: r.logs.slice(-40),
     }, null, 2));

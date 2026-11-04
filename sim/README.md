@@ -76,6 +76,19 @@ node sim/harness.js '{"mode":"continuous","plant":{"paper":"high","pump":"realDe
 
 这些预设仍只用于方向比较：S3 late 下漂不是官方侵蚀能表达的，绝对流量仍以真机为准。
 
+### 纸况连续档（2026-11-04）
+
+2.2.31 的相邻两杯（shot 30 / 31）给出了接近两端的真实状态：low 能跟住 shot 30 的
+S2/S3 与时长，high 能跟住 shot 31 的 S3 与时长。单靠 low/high 只能夹住，不能表达
+中间的纸况。`plant.paperCondition` 是 0..1 的连续档，0 = low，1 = high，中间线性
+插值 rPeak / rErode / cupGain / cupExp：
+
+```
+node sim/harness.js '{"mode":"continuous","plant":{"paperCondition":0.65,"pump":"realDe1"}}'
+```
+
+它只改变植物，不反写插件；显式传 `cupGain` / `cupExp` / `rPeak` 仍可覆盖插值结果。
+
 ## 页面能做什么
 
 - 改 S1/S2/S3 目标、触发重量、浸泡时间、调流档位、S2 补水五个参数、学习策略和植物参数。
@@ -115,8 +128,36 @@ node sim/harness.js '{"replay":{"file":"C:/Users/ladios/Downloads/hyperex-histor
   压力保护（要放宽就传 hardPressureLimit: 11），机器状态完全按录制相位走。
 - 重量用录制原始秤读数（weightG），插件在 tare/reset 时自己衔接累计（日志可见
   "Detected scale tare/reset … carrying cumulative"），与真机一致。
+- 2.2.30+ 的导出把时序放在 `fullRecord.rawScaleSamples`；harness 现在会先解包
+  `fullRecord`，顶层旧格式继续兼容。文件里没有可回放杯时 `runShot` 直接报错，
+  不再静默退化成一次普通前向仿真。
 - 回放跑的是当前 plugin.js（1.79ds），数值口径与录制当时（0.1.77）的分析可不同
   ——这正是复盘目的：看现在的控制/学习逻辑在真实曲线下会怎么判。
+
+## warm start / handoff（2026-11-04）
+
+回放默认全程用录制数据。要在某个真实相位后切回植物模型，传 `handoff`：
+
+```
+node sim/harness.js '{"replay":{"file":"C:/Users/ladios/Downloads/hyperex-history (7).json","index":2},"handoff":{"phase":"stage2","frame":1}}'
+```
+
+到该 phase/frame 时，机器状态、flow、pressure、weight 从录制接过来，粉饼时钟默认
+设到 12 s（湿粉饼、阻力在 rPeak），之后由植物模型响应插件写入。`puckAgeSec` 可改
+（0 = 干粉饼重新爬）。这样保留 S1 / 浸泡 / 重启的真实时序，只比较 S2/S3 的模型误差；
+输出里的 `handoff` 记录切点，`replay` 元数据在切换后仍保留。
+
+S3 形状可直接通过 `commands.shape` 给三段值：
+
+```
+node sim/harness.js '{"mode":"continuous","commands":{"enabled":true,"s1":1.938,"s2":4.313,"s3":0.625,"shape":{"earlyCommand":0.938,"earlySeconds":8,"midCommand":0.625,"midSeconds":14,"lateCommand":0.75}},"plant":{"paper":"low","pump":"realDe1"}}'
+```
+
+回归测试：
+
+```
+node sim/tests/sim-regression.cjs
+```
 
 ## 边界
 

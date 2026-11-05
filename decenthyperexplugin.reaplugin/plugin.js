@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.40";
+  const PLUGIN_VERSION = "2.2.41";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -5522,7 +5522,7 @@ function renderAdaptive(s){
   if(s3.suggestedShape){const q=s3.suggestedShape;s3next='<b>'+esc(s3.action)+'<br>'+esc(q.earlyCommand)+' × '+esc(q.earlySeconds)+'s → '+esc(q.midCommand)+' × '+esc(q.midSeconds)+'s → '+esc(q.lateCommand)+'</b>';if(s3.levelFactor!=null)s3next+='<br><span class="small">LEVEL ×'+esc(s3.levelFactor)+' · normalized SHAPE '+(s3.shapeFactors||[]).map(x=>'×'+esc(x)).join(' / ')+'</span>'}
   h+='<tr><td>S3</td><td>'+s3meas+'<br>late/early '+esc(s3.lateToEarlyRatio)+' · '+esc(s3.status||'—')+'</td><td>'+s3shot+'</td><td>'+s3next+'</td><td>'+esc(s3.confidence||'—')+'</td></tr>';
   h+='</table><div class="small" style="margin-top:7px">'+esc(a.note||'')+'<br>S1: '+esc(s1.maxStepRule||'')+'<br>'+esc(s1.reason||'—')+'<br>S2: '+esc(s2.maxStepRule||'')+'<br>'+esc(s2.reason||'—')+'<br>S3: '+esc(s3.maxStepRule||'')+'<br>'+esc(s3.reason||'—')+'</div>';
-  const review=s&&s.controlReview;if(review){h+='<div class="manualPanel"><b>本杯控制诊断 · '+esc(review.status)+'</b><div class="small">'+esc(review.note)+' · 杯内状态：'+esc(review.controllerStatus)+'</div>';for(const p of review.phases||[]){const q=p.output||{};h+='<div class="m"><b>'+esc(p.phase==='stage2'?'S2':'S3')+' · '+esc(p.status)+'</b> · 后段误差 '+esc(q.tailErrorPct)+'% · 波动CV '+esc(q.tailRippleCVPct)+'% · 过冲 '+esc(q.tailOvershootPct)+'% · 写入 '+esc(p.writes)+'次<br>'+esc(p.learningStatus)+'</div>';for(const g of p.actionGroups||[])h+='<div class="small">'+esc((g.firstMs/1000).toFixed(1))+'–'+esc((g.lastMs/1000).toFixed(1))+'s · '+esc(g.writes)+'次写入 · '+esc(g.status)+' · '+esc(g.attribution)+'</div>'}h+='</div>'}
+  const review=s&&s.controlReview;if(review){h+='<div class="manualPanel"><b>本杯控制诊断 · '+esc(review.status)+'</b><div class="small">'+esc(review.note)+' · 杯内状态：'+esc(review.controllerStatus)+'</div>';for(const p of review.phases||[]){const q=p.output||{};h+='<div class="m"><b>'+esc(p.phase==='stage2'?'S2':'S3')+' · '+esc(p.status)+'</b> · 后段误差 '+esc(q.tailErrorPct)+'% · 波动CV '+esc(q.tailRippleCVPct)+'% · 过冲 '+esc(q.tailOvershootPct)+'% · p95 '+esc(q.tailP95ErrorPct)+'% · RMSE '+esc(q.tailRMSEGS)+' g/s · 写入 '+esc(p.writes)+'次 · 反转 '+esc(p.directionReversals)+'次<br>'+esc(p.learningStatus)+'</div>';for(const g of p.actionGroups||[])h+='<div class="small">'+esc((g.firstMs/1000).toFixed(1))+'–'+esc((g.lastMs/1000).toFixed(1))+'s · '+esc(g.writes)+'次写入 · '+esc(g.status)+' · '+esc(g.attribution)+'</div>'}h+='</div>'}
   for(const [label,x] of [['S2',s2],['S3',s3]]){const q=x.outputQuality;if(q&&q.available)h+='<div class="small"><b>'+label+' ACTUAL RAW OUTPUT</b> · phase error '+esc(q.wholePhaseErrorPct)+'% · final60% mean '+esc(q.tailMeanGS)+' g/s · error '+esc(q.tailErrorPct)+'% · ripple CV '+esc(q.tailRippleCVPct)+'% · RMSE '+esc(q.tailRMSEGS)+' g/s · overshoot '+esc(q.tailOvershootPct)+'%</div>'}
   const curveSuperseded=latestManualCurveSource&&String(latestManualCurveSource.afterRunId||'')===String(a.runId||'');
   if(curveSuperseded){h+='<div class="manualPanel good"><b>手动曲线已应用到下一杯。</b> 上表保留旧杯算法分析；当前执行以 NEXT SHOT · APPLIED PROFILE 为准。新杯完成后继续自动学习。</div>';}else if(ready){
@@ -7640,15 +7640,27 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
   // User-authorized experiment: direct writes to the current flow frame, never skipStep.
   // Firmware live-frame semantics are unverified; ACK is distinct from target feedback.
 
+  function controlQualityGood(q) {
+    return !!(q&&q.available&&Math.abs(q.tailErrorPct)<=8&&q.tailRippleCVPct<=10
+      &&Number.isFinite(q.tailP95ErrorPct)&&q.tailP95ErrorPct<=15
+      &&q.tailOvershootPct<=20&&q.tailRMSEGS/q.targetGS<=.10);
+  }
   function controlRunReview(run) {
     if(!run||run.kind!=="hyperex")return null;
     const excluded=!learningRunAllowed(run);
     const trace=run.liveFlowTrim&&run.liveFlowTrim.trace||[],writes=trace.filter(x=>x.kind==="write").sort((a,b)=>a.tMs-b.tMs);
     const phases=(run.config&&run.config.activeRelease===false?["stage1","stage2","stage3"]:["stage2","stage3"]).map(phase=>{
       const q=controlOutputQuality(run,phase),learning=controlLearningAssessment(run,phase);
-      const good=q.available&&Math.abs(q.tailErrorPct)<=8&&q.tailRippleCVPct<=10;
+      const good=controlQualityGood(q);
       const status=!q.available?"缺少可靠杯流量窗口":good?"目标跟踪及平滑度良好":Math.abs(q.tailErrorPct)>8?"杯流量仍偏离目标":"均值接近目标，波动仍需改善";
       const phaseWrites=writes.filter(x=>phase==="stage1"?Number(x.frame)===0:phase==="stage2"?Number(x.frame)===1:Number(x.frame)>=2);
+      let directionReversals=0,lastDirection=0,lastDirectionFrame=null;
+      for(const w of phaseWrites){
+        const previous=finiteOrNull(w.previousMlS),next=finiteOrNull(w.commandMlS);
+        const direction=previous===null||next===null?0:Math.sign(next-previous);
+        if(lastDirectionFrame!==w.frame){lastDirection=0;lastDirectionFrame=w.frame;}
+        if(direction){if(lastDirection&&direction!==lastDirection)directionReversals++;lastDirection=direction;}
+      }
       const groups=[];
       for(const w of phaseWrites){const g=groups[groups.length-1];if(g&&g.frame===Number(w.frame)&&w.tMs-g.lastMs<3000){g.lastMs=w.tMs;g.writes++;}else groups.push({frame:Number(w.frame),firstMs:w.tMs,lastMs:w.tMs,writes:1});}
       const raw=phaseRawSamples(run,phase),target=Number(desiredRealForRunPhase(run,phase));
@@ -7661,10 +7673,10 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         g.beforeGS=before.slope;g.afterGS=after.slope;g.errorReductionGS=round(Math.abs(before.slope-target)-Math.abs(after.slope-target),3);
         g.status=g.errorReductionGS>target*.02?"组后目标误差减小":g.errorReductionGS< -target*.02?"组后目标误差增大":"组前后变化较小";
       }
-      return {phase,status,output:q,writes:phaseWrites.length,actionGroups:groups,
+      return {phase,status,output:q,writes:phaseWrites.length,directionReversals,actionGroups:groups,
         learningStatus:excluded?"Shot excluded from learning":learning.applicable?(learning.eligible?"已纳入学习候选；仍经过杯间共识与限幅":"暂未纳入："+learning.reason+(learning.outputQualityReason?"（S2 输出质量："+learning.outputQualityReason+"）":"")):"使用原固定曲线学习规则"};
     });
-    const good=phases.every(x=>x.output.available&&Math.abs(x.output.tailErrorPct)<=8&&x.output.tailRippleCVPct<=10);
+    const good=phases.every(x=>controlQualityGood(x.output));
     return {status:good?"本杯后段目标跟踪及平滑度良好":"本杯仍有偏差或数据不足，详情见阶段诊断",phases,
       controllerStatus:run.liveFlowTrim&&run.liveFlowTrim.status||"未开启杯内调流",writes:writes.length,
       note:"自动分析用于日常判断；动作响应重叠时评价组合效果。无需日常上传截图或CSV；异常时可选择导出深入排查。"};
@@ -7695,8 +7707,10 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       const r=regressionForRawSamples(rows);if(r&&r.seconds>=1.2&&r.r2>=.90&&r.slope>0)flows.push(r.slope);
     }
     const mean=average(flows),variance=mean===null?null:average(flows.map(x=>(x-mean)*(x-mean)));
+    const errors=flows.map(x=>Math.abs(x/target-1)*100).sort((a,b)=>a-b);
     return {available:!!flows.length,targetGS:target,wholePhaseErrorPct:whole?round((whole.slope/target-1)*100,2):null,
       tailMeanGS:round(mean,3),tailErrorPct:mean===null?null:round((mean/target-1)*100,2),tailRippleCVPct:mean?round(Math.sqrt(variance)/mean*100,2):null,
+      tailP95ErrorPct:errors.length?round(errors[Math.max(0,Math.ceil(errors.length*.95)-1)],2):null,
       tailRMSEGS:flows.length?round(Math.sqrt(average(flows.map(x=>(x-target)*(x-target)))),3):null,
       tailOvershootPct:flows.length?round(Math.max(0,Math.max(...flows)/target-1)*100,2):null,windows:flows.length,
       windowSettleMs:win?win.settleMs:null,chainSettleMs:win?win.chainSettleMs:null,tailFraction:phase==="stage2"&&plateauStart!==null?1:.6,plateauFallback,basisDetail:phase==="stage2"?(plateauFallback?"late peak; last 1.2 s regression (settle "+((win&&win.settleMs)||0)+" ms)":(plateauStart!==null?"after refill peak + 1.5 s (settle "+((win&&win.settleMs)||0)+" ms); plateau regression":(win?"refill settle "+win.settleMs+" ms; final 60% regression":"final 60% regression"))):"final 60% of phase regression",basis:"actual RAW g/s; rolling regressions over the plateau (S2) or final60% (S1/S3), separate from normalized learning model"};
@@ -8004,8 +8018,21 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     }
     return null;
   }
-  // Experimental 2.2.40: current-cup gain only from fresh, settled evidence.
+  // Experimental 2.2.41: command-scoped current-cup gain from sustained evidence.
   // It changes the live prior, never the persistent LUT or cross-shot records.
+  function normalTrimQuanta(phase,streak,relativeError) {
+    if(relativeError>.15&&streak>=6)return 8;
+    if(relativeError>.15&&streak>=3)return 6;
+    return phase==="stage3"?(relativeError>.15?4:2):4;
+  }
+  function recoveryTimeEstimate(errorGS,r,phase,streak,relativeError,periodS) {
+    // Average gain is a proxy, not the marginal derivative. Report uncertainty.
+    const quanta=Math.abs(errorGS)/Math.max(.02,r/16);
+    const perWrite=predictiveStepQuanta(errorGS,r,1,normalTrimQuanta(phase,streak,relativeError));
+    const fastestS=1.2+Math.ceil(quanta/Math.max(1,perWrite))*periodS;
+    const slowestS=1.2+Math.ceil(quanta*2/Math.max(1,perWrite))*periodS;
+    return {quanta,perWrite,fastestS,slowestS,basis:"average-gain-proxy-range"};
+  }
   function updateLiveGain(t,reg,frame,command,target) {
     if(!t.liveGains)t.liveGains={};
     const key=state.phase+":"+frame,previous=t.liveGains[key];
@@ -8015,29 +8042,29 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     const stable=quiet&&reg.r2>=.98&&fast!==null&&Math.abs(fast-reg.slope)<=Math.max(.03,target*.03)
       &&!t.pending&&!t.retry&&state.lastPressure<lim*.90&&state.lastFlow>=command*.85
       &&state.lastFlow<=command*1.15&&command>0;
-    if(!stable){if(previous)previous.count=0;return;}
+    if(!stable){delete t.liveGains[key];return;}
     const observed=reg.slope/command;
-    if(!(observed>=GAIN_R_MIN&&observed<=GAIN_R_MAX))return;
-    const row=previous||{r:observed,count:0,n:0,stamp:null,command};
-    if(row.stamp===reg.sourceEndStamp)return;
-    if(Math.abs(row.command-command)>1/32)row.count=0;
+    if(!(observed>=GAIN_R_MIN&&observed<=GAIN_R_MAX)){delete t.liveGains[key];return;}
+    const reset=!previous||Math.abs(previous.command-command)>1/32;
+    const row=reset?{r:observed,count:0,n:0,stamp:null,firstStamp:reg.sourceEndStamp,command}:previous;
+    if(row.stamp!==null&&reg.sourceEndStamp<=row.stamp)return;
+    // A different command starts a new estimate; never blend across command exposure.
     row.stamp=reg.sourceEndStamp;row.command=command;row.count++;row.n++;
-    row.r=row.r+.20*(observed-row.r);row.at=now;t.liveGains[key]=row;
+    row.r=row.r+.20*(observed-row.r);row.at=now;row.coverageS=reg.sourceEndStamp-row.firstStamp;row.requiredCoverageS=reg.windowMs/1000;t.liveGains[key]=row;
   }
   function liveResponseInterval(t,frame,rescue) {
-    const fallback=state.phase==="stage3"?2400:1200;
+    // First observed improvement is not settling time. Keep the established
+    // single writer cadence; this observation is diagnostic only until identified.
+    const ms=rescue?800:(state.phase==="stage3"?2400:1200);
     const entry=t.cupResponseByFrame&&t.cupResponseByFrame[frame];
-    const physical=entry&&Number.isFinite(entry.ms)?entry.ms:null;
-    const min=Math.max(50,Number(t.report.periodMs)||250);
-    // ACK latency is intentionally not a plant-response measurement.
-    const interval=physical===null?(rescue?800:fallback):Math.max(min,Math.min(fallback,Math.round(physical)));
-    return {ms:interval,basis:physical===null?"unmeasured-fallback":"observed-cup-response"};
+    return {ms,basis:"unidentified-response-baseline",observedOnsetMs:entry?entry.ms:null};
   }
+
   function liveTrimControlCenter(phase,fallbackBase,run) {
     const gm=liveTrimMemoryCandidate(phase,run);
     const live=state.liveTrim,frame=state.lastFrame;
     const local=live&&live.run===run&&live.liveGains&&live.liveGains[phase+":"+frame];
-    if(local&&local.count>=3&&Date.now()-local.at<=600){
+    if(local&&local.count>=3&&local.coverageS+1e-9>=local.requiredCoverageS&&Date.now()-local.at<=600){
       const target=phase==="stage2"?run.config.stage2Flow:run.config.stage3Flow;
       const prior=gm&&Number(gm.r)>0?Number(gm.r):local.r;
       const weight=Math.min(.75,.15*(local.count-2));
@@ -8096,7 +8123,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     const budget=[50,150,200,250][level-1];
     const period=level===1?Math.max(300,Math.round(seconds*1000/50)):[0,300,250,200][level-1];
     const report={enabled:true,status:intervention==="off"?"observe-only":(c.activeRelease===false?"armed-for-S1":"armed-for-S2"),algorithmIntervention:intervention,level,decisionModel:state.cfg.liveTrimDecisionModel!==false?"predictive":"legacy",plannedDurationMs:Math.round(seconds*1000),periodMs:period,maxChecks:2000,maxWrites:budget,
-      checks:0,writes:0,normalWrites:0,rescueWrites:0,silenceHolds:0,s3NormalWrites:0,s3RescueWrites:0,acks:0,targetConfirmations:0,targetMissTolerance:3,targetMisses:0,consecutiveTargetMisses:0,retries:0,feedbackReleases:0,feedbackPolicy:"trend-vector-response",degradedRetryIntervalMs:3000,minWriteIntervalMs:50,responseTimeoutMs:2000,deadbandPct:4,coastBandS2Pct:8,coastBandS3Pct:10,trendAngleScale:"relative-per-second",trace:[],zeroDegreeShare:null,meanAngleDeg:null,sameSignStreak:0,bigAngleStreak:0,vectorAngleDeg:null,adaptiveMode:"trend-confirmed-window-and-dynamic-exposure-learning"};
+      checks:0,writes:0,normalWrites:0,rescueWrites:0,silenceHolds:0,s3NormalWrites:0,s3RescueWrites:0,acks:0,targetConfirmations:0,targetMissTolerance:3,targetMisses:0,consecutiveTargetMisses:0,retries:0,feedbackReleases:0,feedbackPolicy:"trend-vector-response",degradedRetryIntervalMs:3000,minWriteIntervalMs:50,responseTimeoutMs:2000,deadbandPct:4,coastBandS2Pct:8,coastBandS3Pct:10,trendAngleScale:"absolute-per-second",trace:[],zeroDegreeShare:null,meanAngleDeg:null,sameSignStreak:0,bigAngleStreak:0,vectorAngleDeg:null,adaptiveMode:"trend-confirmed-window-and-dynamic-exposure-learning"};
     report.learningBand=learningPolicy(c.adaptiveLearningLevel).deadband;report.learningLevel=learningPolicy(c.adaptiveLearningLevel).name;
     report.s2StartupPlan=c.s2StartupPlan||null;report.startupExecution={status:c.s2StartupPlan&&c.s2StartupPlan.enabled?"armed":"not-planned",reason:c.s2StartupPlan&&c.s2StartupPlan.reason||"S2 startup assist disabled"};
     run.liveFlowTrim=report;
@@ -8198,7 +8225,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
        !p.targetSeen){
       // Trend confirmation, never a value-equality check: the first feedback is the RAW cup-flow
       // slope converging toward the setpoint; machine flow moving with the written vector is
-      // corroborating evidence for the pump response. ACK alone advances no command, and a stale
+      // corroborating evidence for the pump response. ACK updates only the command ledger; a stale
       // same-value re-send is meaningless: the next decision recomputes a fresh vector instead.
       const tgt=state.phase==="stage1"?t.run.config.stage1Flow:state.phase==="stage2"?t.run.config.stage2Flow:t.run.config.stage3Flow;
       let trend=false,basis="raw";
@@ -8261,8 +8288,11 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     // invent a step: |predicted - fastSlope| <= 0.6 x target. The uncapped
     // version ran raw 2.532 -> predicted 7.349 on the real machine.
     const targetGS=Number(isS3?state.cfg.stage3Flow:state.cfg.stage2Flow)||0,moveCap=Math.max(.2,.6*targetGS);
-    const predicted=fastSlope!==null&&early&&early.r2>=.90?Math.max(0,fastSlope+Math.max(-moveCap,Math.min(moveCap,(fastSlope-early.slope)*horizon))):fastSlope;
-    return r&&r.r2>=0.90&&r.slope>0?{...r,fastSlope,predicted,sourceEndStamp:end,predictive,windowMs,horizon}:null;
+    const center=a=>average(a.map(p=>p.x));
+    const separationS=fast&&early?center(tail)-center(head):null;
+    const acceleration=fastSlope!==null&&early&&early.r2>=.90&&separationS>.1?(fastSlope-early.slope)/separationS:null;
+    const predicted=acceleration!==null?Math.max(0,fastSlope+Math.max(-moveCap,Math.min(moveCap,acceleration*horizon))):fastSlope;
+    return r&&r.r2>=0.90&&r.slope>0?{...r,fastSlope,predicted,sourceEndStamp:end,predictive,windowMs,horizon,acceleration,separationS}:null;
   }
   // 2.2.35 smoothness governors.
   // S2: after a refill return, hold through the pump/puck inertia peak, then
@@ -8328,9 +8358,16 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       if(now-rec.at>=rec.durationMs){
         rec.active=false;rec.done=true;return null; // return to normal feedback; do not claim endpoint reached
       }
-      const desired=snapCommandFlow(Math.max(LIMITS.commandFlowMin,Math.min(LIMITS.commandFlowMax,command*target/flowNow)));
-      const ref=snapCommandFlow(command+Math.max(-2/16,Math.min(2/16,desired-command)));
-      rec.u1=desired;rec.f0=flowNow;rec.lastFeedbackAt=now;
+      // Fixed trajectory with feedback exits, not a moving proportional endpoint.
+      const progress=Math.max(0,Math.min(1,(now-rec.at)/rec.durationMs));
+      const desired=rec.u0+(rec.u1-rec.u0)*progress;
+      // At most two quanta / 1.2 s, without banking a long pause into a jump.
+      const elapsed=Math.max(0,now-Math.max(rec.at,t.lastWriteAt===null?rec.at:t.lastWriteAt));
+      const allowed=Math.min(2,Math.floor(elapsed/600));
+      const distance=Math.max(0,rec.dir*(desired-command));
+      const quanta=Math.min(allowed,Math.floor(distance*16+1e-9));
+      const ref=snapCommandFlow(command+rec.dir*quanta/16);
+      rec.lastFeedbackAt=now;
       if(Math.abs(ref-command)<1/16-1e-9)return {hold:true,reason:"S2 feedback ramp quantum hold"};
       return {hold:false,ref,mode:"s2-ramp",steps:Math.max(1,Math.round(Math.abs(ref-command)*16))};
     }
@@ -8524,7 +8561,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         const dtS=(Date.now()-prevAt)/1000;
         if(dtS>0.1){
           trendSlope=(reg.slope-prevGS)/dtS;
-          const mag=Math.atan(Math.abs(trendSlope)/Math.max(.3,target))*180/Math.PI,inBand=Math.abs(reg.slope/target-1)<=0.02;
+          const mag=Math.atan(Math.abs(trendSlope))*180/Math.PI,inBand=Math.abs(reg.slope/target-1)<=0.02;
           angleDeg=Math.abs(trendSlope)<1e-9?(inBand?0:90):((target>reg.slope?trendSlope>0:trendSlope<0)?Math.min(90,mag):180-Math.min(90,mag));
         }
       }
@@ -8547,12 +8584,11 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         // steps still needed cannot fit, the controller cannot return in time.
         const ccRescue=liveTrimControlCenter(state.phase,base,t.run);
         const rRescue=Number(ccRescue.r)>0?Number(ccRescue.r):(state.phase==="stage3"?1.8:1.2);
-        const perQuantumGS=Math.max(.02,rRescue/16);
-        const stepsNeeded=Math.abs(target-decisionGS)/perQuantumGS;
-        const writePeriodS=liveResponseInterval(t,frame,false).ms/1000;
-        const timeToReturnS=1.2+stepsNeeded*writePeriodS;
-        const cannotReturn=!Number.isFinite(remainingS)||timeToReturnS>remainingS;
-        row.stepsNeeded=round(stepsNeeded,1);row.timeToReturnS=round(timeToReturnS,2);row.remainingS=round(remainingS,2);
+        const estimate=recoveryTimeEstimate(target-decisionGS,rRescue,state.phase,t.bigAngleStreak||0,predictedRel,liveResponseInterval(t,frame,false).ms/1000);
+        const cannotReturn=estimate.fastestS>remainingS;
+        row.stepsNeeded=round(estimate.quanta,1);row.timeToReturnS=round(estimate.fastestS,2);
+        row.timeToReturnUpperS=round(estimate.slowestS,2);row.recoveryEstimateBasis=estimate.basis;
+        row.recoveryQuantaPerWrite=estimate.perWrite;row.remainingS=round(remainingS,2);
         const rescueHot=t.rescueAngleStreak>=2&&predictedRel>.25&&actualRel>=.12&&cannotReturn;
         if(rescueHot){t.rescueMode=true;t.rescueCalmStreak=0;}
         else if(t.rescueMode){
@@ -8637,8 +8673,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
           if(!rescueActive&&q.normal>=24&&!bigAngleRelease){row.reason="S3 normal quantum budget";return;}
           row.s3QuantaNormal=q.normal;row.s3QuantaRescue=q.rescue;row.bigAngleRelease=bigAngleRelease;
         }
-        // F3 (user 2026-11-01): rescue silence = max(800 ms, last measured driver
-        // ACK latency); 800 ms is the floor when no measurement exists.
+        // One writer gate; onset observations do not identify remaining pump response.
         const responseGate=liveResponseInterval(t,frame,rescueActive);
         const silenceMs=responseGate.ms;
         if(t.lastWriteAt!==null&&Date.now()-t.lastWriteAt<silenceMs){
@@ -8663,8 +8698,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         // remain the fast paths.
         // 2.2.29: 6/8 quanta only after a confirmed 90-deg streak AND a predicted
         // error >15%. A 14% error with a 6-quantum write was the 22:56 14.3 s case.
-        const bigAngleConfirmed=predictedRel>0.15;
-        const normalMax=state.phase==="stage3"?((t.bigAngleStreak||0)>=6&&bigAngleConfirmed?8:(t.bigAngleStreak||0)>=3&&bigAngleConfirmed?6:(predictedRel>0.15?4:2)):((t.bigAngleStreak||0)>=6&&bigAngleConfirmed?8:(t.bigAngleStreak||0)>=3&&bigAngleConfirmed?6:4);
+        const normalMax=normalTrimQuanta(state.phase,t.bigAngleStreak||0,predictedRel);
         steps=t.governorSteps!=null?t.governorSteps:(rescueActive?predictiveStepQuanta(errGS,r,rescueMin,24):predictiveStepQuanta(errGS,r,1,normalMax));
         row.controlCenterMlS=round(controlCenter.commandMlS,3);row.controlSource=controlCenter.source;row.controlR=controlCenter.r;row.controlBucket=controlCenter.bucketId||null;row.stepQuanta=steps;
       }else{

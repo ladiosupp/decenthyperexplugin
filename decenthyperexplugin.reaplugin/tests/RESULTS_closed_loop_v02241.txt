@@ -1,0 +1,5 @@
+PASS 2.2.29 high-pressure paper r=0.86 with the real pump kernel reaches a 5 g/s platform
+PASS 2.2.29 low paper r=1.29 with the real pump kernel keeps a bounded rise and plateau
+PASS 2.2.29 7 s predictive closed loop holds the paper platform
+
+3/3 checks passed

@@ -1,3 +1,7 @@
+# 2.2.41 experimental
+
+Command-scoped local gain, time-correct prediction, original trend-angle scale, rate-bounded S2 recovery, uncertainty-labelled recovery time and separate control-quality diagnostics. See [HANDOFF_v02241.md](HANDOFF_v02241.md). Hardware validation pending.
+
 # HyperEx Pulse Filter 2.2.40 — 实验版
 
 四批控制逻辑整理，待真机验证。详见 HANDOFF_v02240.md。保留原有 LUT、阶段控制和压力保护；新增逻辑不依赖皮肤或外部模型。

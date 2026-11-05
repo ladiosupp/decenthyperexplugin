@@ -19,6 +19,11 @@
 - tests/verify_v02239.cjs 751/751；新增标题/说明行删除测试。
 - node --check 通过。
 
-## 4. 状态
+## 4. 发布状态（2026-11-05）
 
-- 仅本地提交，未推送、未打 tag、未发版。
+- 代码提交：47aa675（2.2.39 标题行删除）。
+- tag v2.2.39 → 47aa675；分支 v1.79ds → 发布记录提交。
+- GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.39
+- 附件 HyperExPulseFilter_v2.2.39.zip：463,052 字节，SHA256 25FE832022F1D586D2F6B990829CCA362BA5A0D2DF13547B616A37962A03F3E4。
+- 夸克：夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.39.zip，fileId 07aa303f44e349abaf8f4fc81e24fc99。
+- 测试：发布包解压后 751/751；本地 751/751。

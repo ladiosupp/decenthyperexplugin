@@ -36,4 +36,11 @@
 
 安装 releases/v2.2.41/HyperExPulseFilter_v2.2.41_experimental.zip，根目录 decenthyperexplugin.reaplugin/。重载后确认 2.2.41。
 按用户约定，需要时安装 2.2.39 回滚包；2.2.40 也原样保留。代码回滚不会撤销测试杯写入的学习历史；对明显失败/异常杯使用现有手动排除，保留原导出便于分析。
-后续先读此文档和真实 history，再判断参数；不能以旧版测试字符串或未经校准模拟替代用户目标。发布只更新 v1.79ds 及版本目录，GitHub Release 页面是否创建须以实际工具结果为准。
+后续先读此文档和真实 history，再判断参数；不能以旧版测试字符串或未经校准模拟替代用户目标。发布更新 v1.79ds 及版本目录；GitHub Release 已于 2026-11-05 补建，见文末「发布记录」。
+
+## 发布记录（2026-11-05）
+
+- 代码提交 `133a3e1`，tag `v2.2.41`，分支 `v1.79ds` 已推送。
+- GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.41（附件 `HyperExPulseFilter_v2.2.41_experimental.zip`，473,501 字节）。
+- SHA256：`D9BA5E83CA84BD2BA3FA666EA87A757276AD996EFB9D64D1D5035A4A7D5D7D74`；包内 11 个文件与提交 `133a3e1` 逐字节一致。
+- 夸克：`夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.41.zip`，473,501 字节，fileId `de89300b2157406b86078c9f95af4d95`。

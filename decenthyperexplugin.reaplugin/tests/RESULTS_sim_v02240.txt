@@ -1,0 +1,5 @@
+ok historyRecordings fullRecord
+ok empty replay fails loudly
+ok paperCondition 0/0.5/1
+ok S3 shape override
+skip real-file warm handoff: file not found

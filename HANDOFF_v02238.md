@@ -49,3 +49,13 @@
 - decenthyperexplugin.reaplugin/tests/verify_v02238.cjs
 - review/mode-mock/index.html（示意图）
 - HANDOFF_v02238.md
+
+## 7. 发布状态（2026-11-05）
+
+- 代码提交：7ae5e89（2.2.38 实现）；abc07ee（发布包补齐测试结果与交接）。
+- tag v2.2.38 → abc07ee；分支 v1.79ds → 发布记录提交。
+- GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.38
+- 附件 HyperExPulseFilter_v2.2.38.zip：464,696 字节，SHA256 170F0CEEA3623D585CB4D391DF6D6EF0D024BCA9A9FEC88A86E5B88A5C69118A。
+- 夸克：夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.38.zip，fileId a6eac6f2bdfe4379807128531e774f72。
+- 测试：发布包解压后 750/750；本地 750/750。
+- 备注：MCP 上传 commit 返回 203，改用官方 quark-drive CLI 上传成功。

@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.38";
+  const PLUGIN_VERSION = "2.2.39";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -87,8 +87,6 @@ function createPlugin(host) {
     ["Continuous S1 → S2 → S3","连续 S1 → S2 → S3"],
     ["Full: normal + rescue · Off: detect only","全开：正常 + 救急 · 全关：只检测"],
     ["Detect only · no writes","只检测 · 不写入"],
-    ["Diagnostics / Flow calibration","诊断 / 流量校准"],
-    ["Step 1 calibration LUT; Step 2 completed-shot measurement and next-shot S1/S2/S3 only; Step 3 manual engineering; Step 4 CSV export.","步骤 1 校准实际杯流 LUT；步骤 2 测量完成的杯，并仅调整下一杯的 S1/S2/S3；步骤 3 为手动工程设置；步骤 4 导出 CSV。"],
     ["observation-only","仅观测"],
     ["Algorithm intervention off; observation only","算法介入已关闭：仅观测"],
     ["Change algorithm intervention only while idle","仅空闲时可改算法介入"],
@@ -4868,9 +4866,6 @@ body.diagview #brewingmode{display:none}
 #modecard .switch[data-on="true"] .switch-opt.on:hover{color:#241a10}
 #modecard .switch[data-on="false"] .switch-opt.off:hover{color:#fff}
 #modecard .switch-opt:focus-visible{outline:2px solid rgba(239,173,86,.65);outline-offset:2px}
-.diaghead{display:flex;align-items:baseline;gap:22px;margin:2px 0 14px;min-width:0}
-.diagtitle{flex:none;font-size:28px;line-height:1.25;font-weight:600;letter-spacing:-.01em;color:#f6f3ee;white-space:nowrap}
-.diagdesc{min-width:0;font-size:15px;line-height:1.4;color:#cfc8bd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 @media(max-width:820px){
   #modecard .mode-grid{grid-template-columns:1fr;gap:8px}
   #modecard .mode-sep{width:auto;height:1px;background:linear-gradient(90deg,rgba(255,255,255,.02),rgba(255,255,255,.09),rgba(255,255,255,.02))}
@@ -4919,10 +4914,6 @@ body.diagview #brewingmode{display:none}
         </div>
       </div>
     </div>
-  </div>
-  <div class="diaghead">
-    <div class="diagtitle">诊断 / 流量校准</div>
-    <div class="diagdesc">步骤 1 校准实际杯流 LUT；步骤 2 测量完成的杯，并仅调整下一杯的 S1/S2/S3；步骤 3 为手动工程设置；步骤 4 导出 CSV。</div>
   </div>
   <div class="d" style="margin:2px 0 14px;padding:12px 14px;border-radius:16px;background:rgba(255,255,255,.04)"><b>ENTRY</b> · Dashboard <b>DIAG / CAL</b> is enabled by default. If another plugin occupies the reserved header slot, open <b>Plugins → HyperEx Pulse Filter</b>.</div>
 

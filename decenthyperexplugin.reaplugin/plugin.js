@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.43";
+  const PLUGIN_VERSION = "2.2.45";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -152,6 +152,15 @@ function createPlugin(host) {
   // keep more of a short S2 available for learning.
   const S2_REFILL_SETTLE_MS=800;
   const S2_REFILL_CHAIN_SETTLE_MS=1500;
+  // AUTO release enters S2 from a real 0 bar frame whose own timer usually
+  // expires at the same instant as the plugin's soak countdown. Wait for the
+  // machine's S2 frame instead of racing it with a skipStep; the skip is only
+  // a fallback when the firmware does not advance on its own.
+  const AUTO_S2_FRAME_WAIT_MS=900;
+  // AUTO enters S2 from 0 bar with no preinfusion. Hold the first refill boost
+  // for one short confirmation window so the S2 frame is really active and the
+  // machine target has started to respond. ON/OFF keep their old timing.
+  const AUTO_S2_REFILL_CONFIRM_MS=100;
   const GAIN_MEMORY_SCHEMA=1;
   const GAIN_MEMORY_ALPHA=.35;
   const GAIN_MEMORY_DEVIATION_ALPHA=.55;
@@ -7748,26 +7757,60 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       .catch((error) => abortSequence(`Auto release frame failed: ${error.message || error}`, true));
   }
 
-  function finishAutoSoak() {
+  function waitForAutoS2Frame(expected, timeoutMs) {
+    const target = Math.floor(Number(expected));
+    const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+    return new Promise((resolve) => {
+      const check = () => {
+        const raw = finiteOrNull(state.lastPhysicalFrame);
+        const frame = raw === null ? null : Math.floor(raw);
+        // Stop early on an overshoot instead of waiting the full timeout; the
+        // caller must not run S2 control on top of S3.
+        if (frame === target || (frame !== null && frame > target) || Date.now() >= deadline) {
+          resolve(frame);
+          return;
+        }
+        setTimeout(check, 40);
+      };
+      check();
+    });
+  }
+
+  async function finishAutoSoak() {
     clearTimer("soakTimer");
     clearTimer("soakCountdownTimer");
     state.soakSecondsRemaining = 0;
     if (state.phase !== "soak") return;
     const token = state.sequenceStartedAtMs;
     const layout = runProfileLayout(state.diagnosticCurrent);
-    guardedSingleSkip(layout.release, layout.s2, "auto release -> S2", () => state.phase === "soak" && state.sequenceStartedAtMs === token)
-      .then(() => {
-        if (state.phase !== "soak" || state.sequenceStartedAtMs !== token) return;
-        state.phase = "stage2";
-        state.stage2StartedAtMs = Date.now();
-        diagnosticEvent("stage2_start", { autoRelease: true, cumulativeWeightG: round(state.cumulativeWeight, 3), targetFlowMlS: state.cfg.stage2Flow });
-        diagnosticSample("stage2-start", true);
-        emitSkinChanged();
-        startFlowStripTicker();
-        startLiveTrim();
-        log(`AUTO release -> S2: 0 bar soak finished (${state.cfg.soakSeconds.toFixed(1)} s); no GHC restart.`);
-      })
-      .catch((error) => abortSequence(`Auto release -> S2 failed: ${error.message || error}`, true));
+    try {
+      // The release frame's own `seconds` equals SoakSeconds, so the firmware
+      // usually advances to S2 at the same instant as this timer. Wait for that
+      // real frame instead of racing it: a skipStep issued just before the
+      // firmware transition lands on S2 and advances it to S3.
+      let frame = await waitForAutoS2Frame(layout.s2, AUTO_S2_FRAME_WAIT_MS);
+      if (frame !== null && frame > layout.s2) {
+        throw new Error(`machine already at profileFrame=${frame}`);
+      }
+      if (frame !== layout.s2) {
+        await guardedSingleSkip(layout.release, layout.s2, "auto release -> S2", () => state.phase === "soak" && state.sequenceStartedAtMs === token);
+        frame = await waitForAutoS2Frame(layout.s2, 400);
+      }
+      if (frame !== layout.s2) {
+        throw new Error(`expected profileFrame=${layout.s2}, got ${frame === null ? "unknown" : frame}`);
+      }
+      if (state.phase !== "soak" || state.sequenceStartedAtMs !== token) return;
+      state.phase = "stage2";
+      state.stage2StartedAtMs = Date.now();
+      diagnosticEvent("stage2_start", { autoRelease: true, cumulativeWeightG: round(state.cumulativeWeight, 3), targetFlowMlS: state.cfg.stage2Flow });
+      diagnosticSample("stage2-start", true);
+      emitSkinChanged();
+      startFlowStripTicker();
+      startLiveTrim();
+      log(`AUTO release -> S2: 0 bar soak finished (${state.cfg.soakSeconds.toFixed(1)} s); no GHC restart.`);
+    } catch (error) {
+      abortSequence(`Auto release -> S2 failed: ${error.message || error}`, true);
+    }
   }
 
   function beginDump() {
@@ -8644,6 +8687,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     return null;
   }
   async function liveTrimTick(t) {
+    if(t.startup)t.startup.autoConfirmDelay=null;
     const predictiveMode=state.cfg.liveTrimDecisionModel!==false;
     const intervention=algorithmInterventionForRun(t.run);
     const live=()=>state.liveTrim===t&&t.active&&state.diagnosticCurrent===t.run&&liveTrimPhaseAllowed(t);
@@ -8719,8 +8763,17 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         const startupAge=Date.now()-(refill&&Number.isFinite(t.startup.enteredAt)?t.startup.enteredAt:t.frameAt);
         const early=state.phase==="stage2"&&Number(state.lastFrame)===1&&startupAge<=(t.startup.plan.dispatchWindowMs||2000);
         if(early&&refill){
+          const autoConfirmMs=releaseMode(t.run.config)==="auto"?AUTO_S2_REFILL_CONFIRM_MS:0;
           if(!Number.isFinite(t.startup.frameConfirmedAt))t.startup.frameConfirmedAt=Date.now();
-          if(Date.now()-t.startup.frameConfirmedAt<(t.startup.plan.startDelayMs||0)){row.reason="S2 refill start delay";return;}
+          const confirmMs=Math.max(Number(t.startup.plan.startDelayMs)||0,autoConfirmMs);
+          const elapsed=Date.now()-t.startup.frameConfirmedAt;
+          if(elapsed<confirmMs){
+            // AUTO only: the first refill boost waits one short window after the
+            // real S2 frame is observed, then proceeds. ON/OFF startDelay keeps
+            // its existing path; no extra wait is added there.
+            if(autoConfirmMs>0){t.startup.autoConfirmScheduled=true;t.startup.autoConfirmDelay=Math.max(20,confirmMs-elapsed);}
+            row.reason="S2 refill start delay";return;
+          }
         }
         if(early&&await dispatchS2Startup(t,"boost")){row.reason="S2 startup boost";return;}
         if(state.phase==="stage3"||state.phase==="stage2"&&startupAge>(t.startup.plan.dispatchWindowMs||2000)){t.startup.status="skipped";t.report.startupExecution={status:"skipped",reason:t.startup.blockReason||"Startup dispatch guards not satisfied in time"};liveTrimRecord("startup-skipped",t.report.startupExecution);}
@@ -9021,7 +9074,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
           liveTrimRecord("check",row);
           if(row.freshEvaluation&&Number.isFinite(row.rawGS)){t.lastCheckGS=row.rawGS;t.lastCheckAtMs=Date.now();}
         }
-        if(live())scheduleLiveTrimTick(t);
+        if(live())scheduleLiveTrimTick(t,t.startup&&t.startup.autoConfirmDelay);
       }
     }
   }

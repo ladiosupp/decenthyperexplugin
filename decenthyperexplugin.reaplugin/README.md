@@ -1,3 +1,13 @@
+# 2.2.45 experimental
+
+Auto-only S2 handoff fix after the first real-machine auto run: the plugin now waits for the firmware's real S2 frame instead of racing it with a second `skipStep`, and the first auto refill boost waits 100 ms after that frame. See [HANDOFF_v02245.md](HANDOFF_v02245.md). Hardware validation pending.
+
+- **Auto release → S2**：0 bar 帧的 `seconds` 仍是用户 `SoakSeconds`；插件倒计时结束后先等机器物理帧真正到 S2（最多 900 ms），看到就直接进 S2，不再发第二次 skipStep。只有固件一直停在 release 帧才 fallback 发一次 skip；skip 后再确认帧号，若已到 S3 则中止，不在 S3 上跑 S2 控制。
+- **真实数据依据**：4 杯 auto 中 3 杯在 soak 结束瞬间插件读到 P=1 就发 skip，固件 20–40 ms 后自己进 P=2，skip ACK 回来时把 P=2 推成 P=3；唯一成功杯是固件先到 P=2，`guardedSingleSkip` no-op。0 bar 帧本身泄压正常（0.74–1.61 → 0.09–0.21 bar）。
+- **Auto refill**：S2 物理帧确认后，第一次补水 boost 再等 **100 ms**（不是 300 ms），避免把 3 s boost 的尾段过多推入 S2 正常段；ON/OFF 不加这个等待。
+- **ON/OFF 不变**：on 仍走 `beginDump → beginSoak → restartPourConfirmed → scheduleRestartSkip`，off 仍连续 S1→S2→S3；两边的 S2 交接和 refill 时序没有改。
+- **测试**：tests/verify_v02245.cjs **787/787**；`node --check` 通过。
+
 # 2.2.43 experimental
 
 Three-state release mode: **auto** (0 bar release/soak frame in the same shot), **on** (original Idle/soak/GHC restart) and **off** (continuous). Auto generates a separate `... auto` profile and uses logical stage frames so the existing S1/S2/S3 parameters and learning history stay valid. See [HANDOFF_v02243.md](HANDOFF_v02243.md). Hardware validation pending.

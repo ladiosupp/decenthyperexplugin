@@ -1,0 +1,17 @@
+HyperEx 2.2.45 experimental — local verification
+Date: 2026-11-08 (Asia/Shanghai)
+
+node --check decenthyperexplugin.reaplugin/plugin.js
+  OK
+
+node decenthyperexplugin.reaplugin/tests/verify_v02245.cjs
+  787/787 checks passed
+
+Scope:
+- auto release -> S2 waits for the firmware's real physical S2 frame (max 900 ms);
+  fallback skip only when the firmware stays in release; post-skip frame confirmed,
+  abort instead of running S2 control on S3.
+- auto refill first boost waits 100 ms after the S2 frame is confirmed.
+- ON/OFF S2 handoff and refill timing unchanged (covered by the retained tests).
+- Old tests/verify_v02242auto.cjs remains as the 2.2.43 history suite; it is not
+  expected to be green against 2.2.45 (version assertion).

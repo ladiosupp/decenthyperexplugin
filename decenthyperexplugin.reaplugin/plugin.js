@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.41";
+  const PLUGIN_VERSION = "2.2.42";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -2153,6 +2153,10 @@ function createPlugin(host) {
 
   function stage1StartupMetrics(run) {
     const admission=learningAdmission(run),gainMin=admission.seconds(2.5),transitMin=admission.seconds(.90),sampleMin=admission.samples(8),activeMin=admission.seconds(1.25),r2Min=admission.r2(.90);
+    // 2.2.42: the old 0.90 s / 8-sample gate admitted only slow S1 cups. Fast
+    // cups were rejected, so the command could rise but never come back down.
+    // Keep a reduced fast path with a high R² requirement instead of a wall.
+    const fastTransitMin=admission.seconds(.55),fastSampleMin=admission.samples(5),fastActiveMin=admission.seconds(1.05);
     const raw = phaseRawSamples(run, "stage1");
     if (raw.length < 6) return null;
     const pts = raw.map(s => ({ ...s, x: rawTimeSecondsForSample(s), y: Number(s.weightG) }))
@@ -2196,13 +2200,16 @@ function createPlugin(host) {
       ? (midFlow - target) / target * 100 : null;
     let confidence = "INSUFFICIENT";
     const rejectionReasons = [];
+    const fullGates=gain>=gainMin&&Number.isFinite(transit)&&transit>=transitMin&&midSamples.length>=sampleMin&&Number.isFinite(activeSeconds)&&activeSeconds>=activeMin;
+    const fastGates=!fullGates&&gain>=gainMin&&Number.isFinite(transit)&&transit>=fastTransitMin&&midSamples.length>=fastSampleMin&&Number.isFinite(activeSeconds)&&activeSeconds>=fastActiveMin;
     if (gain < gainMin) rejectionReasons.push(`collected gain < ${round(gainMin,2)} g`);
-    if (!Number.isFinite(transit) || transit < transitMin) rejectionReasons.push(`20–80% transit < ${round(transitMin,2)} s`);
-    if (midSamples.length < sampleMin) rejectionReasons.push(`20–80% samples < ${sampleMin}`);
-    if (!Number.isFinite(activeSeconds) || activeSeconds < activeMin) rejectionReasons.push(`active duration < ${round(activeMin,2)} s`);
+    if (!fullGates&&!fastGates&&(!Number.isFinite(transit) || transit < transitMin)) rejectionReasons.push(`20–80% transit < ${round(transitMin,2)} s`);
+    if (!fullGates&&!fastGates&&midSamples.length < sampleMin) rejectionReasons.push(`20–80% samples < ${sampleMin}`);
+    if (!fullGates&&!fastGates&&(!Number.isFinite(activeSeconds) || activeSeconds < activeMin)) rejectionReasons.push(`active duration < ${round(activeMin,2)} s`);
     if (!midReg || !Number.isFinite(Number(midReg.r2)) || Number(midReg.r2) < r2Min) rejectionReasons.push(`20–80% regression R² < ${r2Min}`);
-    if (gain >= gainMin && Number.isFinite(transit) && transit >= transitMin && midSamples.length >= sampleMin && Number.isFinite(activeSeconds) && activeSeconds >= activeMin) {
+    if (fullGates||fastGates) {
       confidence = midReg && Number(midReg.r2) >= r2Min ? "MEDIUM" : "LOW";
+      if(fastGates&&confidence==="MEDIUM")rejectionReasons.push("fast 20–80% transit accepted (reduced evidence)");
     }
     return {
       midStartScaleS:t20,midEndScaleS:t80,
@@ -2216,7 +2223,7 @@ function createPlugin(host) {
       activeSeconds: Number.isFinite(activeSeconds) ? round(activeSeconds, 2) : null,
       targetGS: round(target, 3),
       errorPct: Number.isFinite(errorPct) ? round(errorPct, 1) : null,
-      confidence,
+      confidence,fastTrajectory:!!(fastGates&&!fullGates&&confidence==="MEDIUM"),
       midSampleCount: midSamples.length, rejectionReasons,
       qualityReason: rejectionReasons.length ? rejectionReasons.join("; ") : "Startup quality gates passed"
     };
@@ -2318,7 +2325,10 @@ function createPlugin(host) {
         const f0 = allFrame[0].x;
         const duration = Number(allFrame[allFrame.length - 1].x) - f0;
         const settle = run.config.s3DriftModel === true && String(shapeCfg.model || "") === "drift" && spec.frame === 2
-          ? Math.max(0.75, duration * 0.50)
+          // 2.2.42: the second half of an 8 s EARLY frame still sits on the
+          // S2→S3 decay. Start no earlier than 5 s, but always leave at least
+          // 3 s of window so the frame regression stays admissible.
+          ? Math.max(0.75, Math.min(5.0, Math.max(0.75, duration - 3.0)))
           : 0.75;
         const useFrame = allFrame.filter(x => x.x - f0 >= settle);
         const use = useFrame.length >= 6 ? useFrame : allFrame;
@@ -2537,11 +2547,14 @@ function createPlugin(host) {
     if (!m || m.confidence !== "MEDIUM" || !Number.isFinite(target) || target <= 0 || !Number.isFinite(command)) return null;
     const admission=learningAdmission(run);
     const measured = Number(m.midFlowGS), r2 = Number(m.midR2), transit = Number(m.transit20to80S), activeSeconds = Number(m.activeSeconds);
-    if (!Number.isFinite(measured) || measured <= 0 || !Number.isFinite(r2) || r2 < admission.r2(.90) || !Number.isFinite(transit) || transit < admission.seconds(.90) || !Number.isFinite(activeSeconds) || activeSeconds < admission.seconds(1.25)) return null;
+    const transitFloor=m.fastTrajectory?admission.seconds(.55):admission.seconds(.90);
+    const activeFloor=m.fastTrajectory?admission.seconds(1.05):admission.seconds(1.25);
+    if (!Number.isFinite(measured) || measured <= 0 || !Number.isFinite(r2) || r2 < admission.r2(.90) || !Number.isFinite(transit) || transit < transitFloor || !Number.isFinite(activeSeconds) || activeSeconds < activeFloor) return null;
     return {
       runId: run.runId, targetGS: round(target,3), command: round(command,3), measured: round(measured,3),
       errorPct: round((measured-target)/target*100,1), confidence:"MEDIUM", r2:round(r2,5),
-      transitS:round(transit,2), activeSeconds:round(activeSeconds,2), firstRiseDelayS:m.firstRiseDelayS
+      transitS:round(transit,2), activeSeconds:round(activeSeconds,2), firstRiseDelayS:m.firstRiseDelayS,
+      fastTrajectory:!!m.fastTrajectory
     };
   }
 
@@ -3090,7 +3103,18 @@ function createPlugin(host) {
         t.startupAckTimer=null;
         if(state.liveTrim===t&&t.active&&state.phase==="stage2"&&(finiteOrNull(state.lastFrame)===null||Number(state.lastFrame)===1)&&["boosting","returning"].includes(p.status)&&t.pending&&!t.pending.ack)abortSequence("S2 refill driver ACK missing",true);
       },2000);
-      t.startupReturnTimer=setTimeout(()=>{t.startupReturnTimer=null;p.returnReason=p.returnReason||"S2 startup maximum duration reached";dispatchS2Startup(t,"return").catch(()=>abortSequence("S2 startup return write failed",true));},p.plan.holdMs);
+      t.startupReturnTimer=setTimeout(()=>{
+        t.startupReturnTimer=null;
+        // A bleed owns the handoff once it starts; the safety timer must not
+        // cut its 700 ms / predicted-release window short.
+        if(p.status!=="boosting")return;
+        p.returnReason=p.returnReason||"S2 startup maximum duration reached";
+        // 2.2.42: the safety timer must use the same two-step handoff as the
+        // predictive cutoff. Returning straight to the platform wrote water on
+        // top of the flood inertia and skipped the bleed on 4/8 field cups.
+        const bleed=p.plan.strategy==="refill-85"&&p.plan.boundedModel===true;
+        dispatchS2Startup(t,bleed?"bleed":"return").catch(()=>abortSequence(bleed?"S2 startup bleed write failed":"S2 startup return write failed",true));
+      },p.plan.holdMs);
       const refillWatchdog=()=>{
         t.startupWatchdog=null;
         if(state.liveTrim===t&&t.active&&state.phase==="stage2"&&(finiteOrNull(state.lastFrame)===null||Number(state.lastFrame)===1)&&p.status!=="complete"){
@@ -4004,14 +4028,14 @@ function createPlugin(host) {
       const bounded=snapCommandFlow(clampCommandFlow(Math.max(cmd-span,Math.min(cmd+span,ff))));
       if(!Number.isFinite(bounded))return;
       // Two agreeing shots are enough once their spread is <=5% (a <=10%
-      // relative difference); three or more shots may use the wider 10% band.
+      // relative difference); three or more shots may use the wider 12% band.
       // §19: two shots must agree within a 10% relative difference (spread
-      // <= 5%); three or more may use spread <= 10%. Beyond that the estimate
-      // is a reference only and must not touch the suggestion (cut 8 / L-7:
-      // the real 00:25 cup had spread 0.563 and still published a target
-      // command that could be mistaken for a usable one).
-      const ok=gain.samples>=3?gain.spread<=.10:gain.samples===2&&gain.spread<=.05;
-      const info={stage:stageKey,samples:gain.samples,k:round(gain.k,3),spread:round(gain.spread,3),targetGS:round(target,3),currentCommandMlS:round(cmd,3),targetCommandMlS:round(ff,3),boundedCommandMlS:round(bounded,3),sources:gain.sources,eligible:!!ok,reason:ok?null:"spread "+round(gain.spread*100,1)+"% exceeds the "+(gain.samples>=3?"10%":"5%")+" agreement gate",applied:false};
+      // <= 5%); three or more may use spread <= 12% (2.2.42: field data sat at
+      // 10.1–11.4%, just outside the old 10% wall, on seven of eight cups).
+      // Beyond that the estimate is a reference only and must not touch the
+      // suggestion (cut 8 / L-7).
+      const ok=gain.samples>=3?gain.spread<=.12:gain.samples===2&&gain.spread<=.05;
+      const info={stage:stageKey,samples:gain.samples,k:round(gain.k,3),spread:round(gain.spread,3),targetGS:round(target,3),currentCommandMlS:round(cmd,3),targetCommandMlS:round(ff,3),boundedCommandMlS:round(bounded,3),sources:gain.sources,eligible:!!ok,reason:ok?null:"spread "+round(gain.spread*100,1)+"% exceeds the "+(gain.samples>=3?"12%":"5%")+" agreement gate",applied:false};
       node.gainFeedForward=info;
       if(!ok)return;
       if(stageKey==="s2"){
@@ -8018,7 +8042,8 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     }
     return null;
   }
-  // Experimental 2.2.41: command-scoped current-cup gain from sustained evidence.
+  // Experimental 2.2.42: refill safety-timer handoff, earlier S2 ramp release,
+  // decay-safe S3 EARLY window, S1 fast-trajectory admission, 12% gain gate.
   // It changes the live prior, never the persistent LUT or cross-shot records.
   function normalTrimQuanta(phase,streak,relativeError) {
     if(relativeError>.15&&streak>=6)return 8;
@@ -8349,6 +8374,15 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       const fastError=fast===null?null:fast/target-1;
       if(Math.abs(actualError)<=.04&&(fastError===null||Math.abs(fastError)<=.04)){
         rec.active=false;rec.done=true;return {hold:true,reason:"S2 feedback ramp reached target"};
+      }
+      // 2.2.42: if the real gain is above the startup memory and the ramp is
+      // pulling down, hand back to ordinary feedback as soon as the cup leaves
+      // the S2 coast band. The fixed u0→u1 trajectory otherwise holds through
+      // a real +8..12% overshoot until the rescue gate (field: 3.45 s hold,
+      // peak 5.74 at target 5).
+      if(rec.dir<0&&actualError>=.08){
+        rec.active=false;rec.done=true;
+        return null;
       }
       const wanted=Math.sign(target-flowNow);
       if(rec.dir&&wanted!==rec.dir){

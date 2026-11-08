@@ -1,3 +1,15 @@
+# 2.2.42 experimental
+
+Refill safety-timer bleed, earlier S2 recovery-ramp release, decay-safe S3 EARLY window, S1 fast-trajectory admission and a 12% steady-gain gate. See [HANDOFF_v02242.md](HANDOFF_v02242.md). Hardware validation pending.
+
+- **S2 计时收口**：holdMs 安全定时器不再直接回平台；bounded refill 在 boosting 结束后先走断流笔，由断流的 700 ms / 预测收回条件决定何时回平台。断流已在进行时，定时器不会把它截短。
+- **S2 回收提前退出**：固定 u0→u1 轨迹在向下回收且实测超过目标 +8% 时立即交回普通反馈，不再一路 hold 到 +12% 救急门。真机 11-07 13:52 那杯峰后 3.45 s 无普通写入、峰值 5.74 的场景由这条覆盖。
+- **S3 EARLY 窗**：drift 模型的 EARLY 回归不再固定取帧后半段；至少等 5 s（且始终留 3 s 窗口）再开始，避开 S2→S3 的衰减尾巴，减少 earlyFactor 追过渡。
+- **S1 准入**：新增 0.55 s / 5 样本 / 1.05 s 的快速轨迹通道，R² 仍要求 ≥0.90；快杯不再一律 REPEAT，S1 指令不会只被慢杯单向往上推。
+- **稳态增益门**：三杯以上的 spread 上限 10% → 12%；2 杯共识仍是 5%。真机 8 杯里 7 杯的 spread 是 10.1–11.4%，旧门等于常关。
+- **不碰**：LUT、S2/S3 压力与限压、补水 5.75 / 3000 / 45 的现有设置、皮肤与宿主。
+- **测试**：tests/verify_v02242.cjs **772/772**；node --check 通过。
+
 # 2.2.41 experimental
 
 Command-scoped local gain, time-correct prediction, original trend-angle scale, rate-bounded S2 recovery, uncertainty-labelled recovery time and separate control-quality diagnostics. See [HANDOFF_v02241.md](HANDOFF_v02241.md). Hardware validation pending.

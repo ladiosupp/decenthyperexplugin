@@ -2756,6 +2756,15 @@ test('2.2.43-auto auto S2 writes physical frame 2 while the trace stays logical 
  const w=e.s.liveTrim.report.trace.find(x=>x.kind==='write');
  assert.equal(w.frame,1);assert.equal(w.commandMlS,2.5625);
 });
+test('2.2.43-auto three skips stay learnable and soak samples never enter stage windows',()=>{
+ const e=setup({releaseMode:'auto'}),r=controlledRun(e,'auto-learning');
+ r.config.releaseMode='auto';r.config.activeRelease=true;r.config.profileLayout=e.h.profileLayoutForMode('auto');
+ r.events=Array.from({length:3},()=>({name:'command_accepted',data:{machineState:'skipStep'}}));
+ r.learningSkipCount=3;
+ r.rawScaleSamples.push({phase:'soak',tMs:15000,profileFrame:null,weightG:0,scaleTimestampSeconds:120},{phase:'soak',tMs:15100,profileFrame:null,weightG:60,scaleTimestampSeconds:120.1});
+ assert.equal(e.h.assessRunLearningIntegrity(r).eligible,true);
+ assert(e.h.stage2AdaptiveEvidence(r));
+});
 test('2.2.43-auto auto mode builds a 4-frame profile with a real 0 bar soak frame',()=>{
  const e=setup({releaseMode:'auto'}),p=e.expected;
  assert.equal(p.steps.length,4);
@@ -2827,6 +2836,18 @@ test('2.2.43-auto switching on -> auto uploads a 4-frame profile while the learn
  assert.match(e.s.workflowTitle,/\bauto$/);
  assert.equal(e.mock.workflow.steps.length,4);
  assert(e.writes().some(c=>c.path==='/workflow'&&c.method==='PUT'));
+});
+test('2.2.43-auto auto restores and reuses on-mode persistent history',()=>{
+ const e=setup({releaseMode:'on'}),row=historyRow(e,'on-row');
+ e.s.persistentHistoryAvailable=true;e.s.persistentHistoryFile={shots:[row]};
+ e.h.restoreAdaptiveHistoryFromPersistentFile();
+ assert.deepEqual(copy(e.s.adaptiveHistory.map(x=>x.runId)),['on-row']);
+ e.s.cfg.releaseMode='auto';e.s.cfg.activeRelease=true;e.s.adaptiveHistory=[];
+ e.h.restoreAdaptiveHistoryFromPersistentFile();
+ assert.deepEqual(copy(e.s.adaptiveHistory.map(x=>x.runId)),['on-row']);
+ e.s.cfg.releaseMode='on';e.s.cfg.activeRelease=true;e.s.adaptiveHistory=[];
+ e.h.restoreAdaptiveHistoryFromPersistentFile();
+ assert.deepEqual(copy(e.s.adaptiveHistory.map(x=>x.runId)),['on-row']);
 });
 test('2.2.43-auto UI exposes three release choices and the auto profile title',()=>{
  const e=setup({releaseMode:'auto'}),html=e.h.buildGhcOverlayHtml();

@@ -10,6 +10,6 @@ auto 曲线标题为 `<ProfileTitle> auto`。采样/学习/图表/CSV 保持逻�
 
 安装包：`HyperExPulseFilter_v2.2.43-auto_experimental.zip`，解压后根目录为 `decenthyperexplugin.reaplugin/`。
 
-测试：`tests/verify_v02242auto.cjs` **781/781** 通过。真机尚未验证；重点看 0 bar 帧实际泄压、SoakSeconds 倒计时进 S2、S2 起步/补水是否与 on 模式有差异。
+测试：`tests/verify_v02242auto.cjs` **783/783** 通过。真机尚未验证；重点看 0 bar 帧实际泄压、SoakSeconds 倒计时进 S2、S2 起步/补水是否与 on 模式有差异。
 
 回滚：切回 2.2.42 包；或把泄压模式设为 `on` 回到原路径、`off` 回到连续模式。

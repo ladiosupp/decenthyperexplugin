@@ -633,6 +633,7 @@ PASS 2.2.37 grind advisory calls a low-resistance fast shot coarse
 PASS 2.2.37 grind advisory calls a high-resistance slow shot fine
 PASS 2.2.37 grind advisory holds when resistance and both stage flows are near target
 PASS 2.2.43-auto auto S2 writes physical frame 2 while the trace stays logical 1
+PASS 2.2.43-auto three skips stay learnable and soak samples never enter stage windows
 PASS 2.2.43-auto auto mode builds a 4-frame profile with a real 0 bar soak frame
 PASS 2.2.43-auto auto profile with S3 shape slices S3 from physical frame 3
 PASS 2.2.43-auto logical frames hide the release frame and keep S2/S3 at 1/2+
@@ -640,6 +641,7 @@ PASS 2.2.43-auto auto release starts the soak countdown without a pressure gate
 PASS 2.2.43-auto flow calibration keeps physical frames even when release mode is auto
 PASS 2.2.43-auto verifies and selects the auto profile without changing S1/S2/S3 commands
 PASS 2.2.43-auto switching on -> auto uploads a 4-frame profile while the learning key stays
+PASS 2.2.43-auto auto restores and reuses on-mode persistent history
 PASS 2.2.43-auto UI exposes three release choices and the auto profile title
 PASS 2.2.37 grind advisory block is amber and only rendered when available
 PASS write vector arrow sits on the check-to-write trend line while the head follows the command direction
@@ -792,4 +794,4 @@ PASS 2.2.42 S3 drift EARLY window leaves at least 3 s after the S2->S3 decay
 PASS 2.2.42 12% steady-gain gate admits an 11% spread
 PASS 2.2.41 prediction uses window-center seconds and is invariant to timestamp origin
 
-781/781 checks passed
+783/783 checks passed

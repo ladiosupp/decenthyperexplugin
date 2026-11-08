@@ -3546,7 +3546,8 @@ function createPlugin(host) {
     for(const event of events)if(event.name==="learning_fault")add("execution-fault",event.phase,event.data&&event.data.reason);
     for(const fault of run.learningExecutionFaults||[])add("execution-fault",fault.phase,fault.reason);
     const skips=events.filter(x=>x.name==="command_accepted"&&x.data&&x.data.machineState==="skipStep");
-    const skipCount=Math.max(skips.length,Number(run.learningSkipCount)||0);if(skipCount>2)add("extra-skip-commands",null,skipCount);
+    const allowedSkips=runProfileLayout(run).release!==null?3:2;
+    const skipCount=Math.max(skips.length,Number(run.learningSkipCount)||0);if(skipCount>allowedSkips)add("extra-skip-commands",null,skipCount);
     // Only inspect within an active phase, after its first 2s and meaningful cup gain.
     // Initial tare, the intentional dump and restart tare are NOT fault evidence.
     const raw=run.rawScaleSamples||[];

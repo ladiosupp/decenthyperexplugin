@@ -7,7 +7,7 @@ Three-state release mode: **auto** (0 bar release/soak frame in the same shot), 
 - **Calibration**：流量校准仍使用物理帧，不受自动档帧号映射影响。
 - **Mode switch**：原「主动泄压」布尔设置改为 `auto / on / off`，旧 `true` 迁移为 auto，旧 `false` 为 off；显式 `on` 才走原 GHC 重启路径。
 - **不碰**：LUT、S2/S3 压力与限压、S2 补水设置、皮肤与宿主。
-- **测试**：tests/verify_v02242auto.cjs **781/781**；node --check 通过。
+- **测试**：tests/verify_v02242auto.cjs **783/783**；node --check 通过。
 
 # 2.2.42 experimental
 

@@ -45,3 +45,10 @@ Could not advance to final low-flow stage: S2 -> S3: refusing skipStep because p
 ## 回滚
 
 切回 2.2.43 包（tag v2.2.43）即可；2.2.45 没有改 LUT、S2/S3 目标、限压、补水设置、皮肤或宿主。
+
+## 发布记录（2026-11-08）
+
+- 代码提交 78c883a，tag v2.2.45（annotated），分支 auto-hyperex 已推送。
+- GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.45（附件 HyperExPulseFilter_v2.2.45_experimental.zip，460,643 字节）。
+- SHA256：B9F289036A723D094AA1E5205D4B2EDFDB8F875C8C9ADE7D018A41AEAEF2D39B。
+- 夸克：夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.45.zip，460,643 字节，fileId 5cc0a1b6337a4b469e0ee239ffd0f41c。

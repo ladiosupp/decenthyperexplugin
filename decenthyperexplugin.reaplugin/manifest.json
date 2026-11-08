@@ -2,8 +2,8 @@
   "id": "decenthyperexplugin.reaplugin",
   "author": "ladiosupp",
   "name": "HyperEx Pulse Filter",
-  "description": "Experimental 2.2.42: safety-timer refill bleed, earlier S2 ramp release, decay-safe S3 EARLY window, S1 fast-trajectory admission and a 12% steady-gain gate. HyperEx three-stage controller with verified workflow-profile truth, persistent cross-version adaptive history with storage self-test, resistance-bucketed cross-shot gain memory, first-run RAW-scale flow calibration, automatic S1/S2/S3 next-shot adaptation, predictive live trim with physical write silence, S3 MID/earlyFactor/drift shaping, real-scale diagnostics, manual engineering tools, CSV export, full plugin settings, idempotent profile installation, and scoped DE1 flowMultiplier handling.",
-  "version": "2.2.42",
+  "description": "Experimental 2.2.43-auto: three-state release mode (auto 0-bar release/soak frame, on Idle/soak/GHC restart, off continuous), logical frame mapping that preserves S1/S2/S3 learning, plus 2.2.42 safety-timer refill bleed, earlier S2 ramp release, decay-safe S3 EARLY window, S1 fast-trajectory admission and a 12% steady-gain gate. HyperEx three-stage controller with verified workflow-profile truth, persistent cross-version adaptive history with storage self-test, resistance-bucketed cross-shot gain memory, first-run RAW-scale flow calibration, automatic S1/S2/S3 next-shot adaptation, predictive live trim with physical write silence, S3 MID/earlyFactor/drift shaping, real-scale diagnostics, manual engineering tools, CSV export, full plugin settings, idempotent profile installation, and scoped DE1 flowMultiplier handling.",
+  "version": "2.2.43-auto",
   "apiVersion": 1,
   "permissions": [
     "log",
@@ -22,10 +22,15 @@
       "default": true
     },
     "ActiveRelease": {
-      "type": "boolean",
-      "label": "主动泄压 · Active pressure release",
-      "description": "Default ON: original release/soak and GHC restart. OFF: a single continuous S1→S2→S3 extraction with no intermediate Idle/soak/restart. Both modes learn independently; continuous mode supports S1/S2/S3 live trim. Change only while idle; saving reloads the plugin. Safety pressure/final-weight stops remain active.",
-      "default": true
+      "type": "enum",
+      "label": "泄压模式 · Release mode",
+      "values": [
+        "auto",
+        "on",
+        "off"
+      ],
+      "description": "Default auto: a real 0 bar release/soak frame at S1 weight, then S2/S3 continue in the same shot; no second GHC press. on: original Idle / soak / GHC restart. off: one continuous S1→S2→S3 extraction. Auto and on share the active-release learning family; off keeps its own. Change only while idle; saving reloads the plugin. Safety pressure/final-weight stops remain active.",
+      "default": "auto"
     },
     "AdaptiveLearningLevel": {
       "type": "enum",
@@ -42,7 +47,7 @@
     "ProfileTitle": {
       "type": "string",
       "label": "Profile title",
-      "description": "Workflow profile title that arms the controller.",
+      "description": "Base workflow profile title. In auto release mode the generated/selected profile is '<title> auto'; on/off use the base title unchanged.",
       "default": "HyperEx Pulse Filter"
     },
     "Temperature": {
@@ -60,7 +65,7 @@
     "Stage1Weight": {
       "type": "number",
       "label": "S1 transition weight (g) · S1 转换重量",
-      "description": "At this cumulative beverage weight the plugin requests Idle to actively depressurize. Runtime limited to 1–20 g. With ActiveRelease OFF this weight triggers a single direct S1→S2 advance without Idle/soak/restart.",
+      "description": "At this cumulative beverage weight the plugin leaves S1. auto: skipStep into the 0 bar release/soak frame. on: request Idle, soak, then GHC restart. off: one direct S1→S2 advance. Runtime limited to 1–20 g.",
       "default": 4.0
     },
     "Stage1PressureLimit": {

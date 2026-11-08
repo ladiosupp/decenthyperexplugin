@@ -1,3 +1,14 @@
+# 2.2.43-auto experimental
+
+Three-state release mode: **auto** (0 bar release/soak frame in the same shot), **on** (original Idle/soak/GHC restart) and **off** (continuous). Auto generates a separate `... auto` profile and uses logical stage frames so the existing S1/S2/S3 parameters and learning history stay valid. See [HANDOFF_v02242auto.md](HANDOFF_v02242auto.md). Hardware validation pending.
+
+- **Auto profile**：S1 流量 → `pressure: 0` 泄压/浸泡帧 → S2 → S3，整杯只按一次实体萃取键；0 bar 帧时长就是用户 `SoakSeconds`，插件倒计时同值，不等待压力阈值。
+- **Logical frames**：自动档物理帧为 S1=0 / release=1 / S2=2 / S3=3+；采样、学习、图表和 CSV 仍用逻辑帧 S1=0 / S2=1 / S3=2+，因此 on 模式旧学习记录和 S1/S2/S3 控制参数继续可用。
+- **Calibration**：流量校准仍使用物理帧，不受自动档帧号映射影响。
+- **Mode switch**：原「主动泄压」布尔设置改为 `auto / on / off`，旧 `true` 迁移为 auto，旧 `false` 为 off；显式 `on` 才走原 GHC 重启路径。
+- **不碰**：LUT、S2/S3 压力与限压、S2 补水设置、皮肤与宿主。
+- **测试**：tests/verify_v02242auto.cjs **781/781**；node --check 通过。
+
 # 2.2.42 experimental
 
 Refill safety-timer bleed, earlier S2 recovery-ramp release, decay-safe S3 EARLY window, S1 fast-trajectory admission and a 12% steady-gain gate. See [HANDOFF_v02242.md](HANDOFF_v02242.md). Hardware validation pending.

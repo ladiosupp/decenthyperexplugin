@@ -60,3 +60,12 @@ hyperex-history (9).json 新增 8 杯（本地 11-05 07:48 ～ 11-08 07:52），
 - GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.42（附件 HyperExPulseFilter_v2.2.42_experimental.zip，480,502 字节）。
 - SHA256：57C5F0E3EDE11A0D24ED7745DEB53AA108169497EBFA99C55501AE062EDE4199；包内 10 个文件与提交 2b79249 逐字节一致。
 - 夸克：夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.42.zip，480,502 字节，fileId 23a2567526464566892d2cd9008e3940。
+
+## 数据与取证（2026-11-08 复核）
+
+- 全量归档：`D:/vscode/.tools/hx-data/hyperex-history-all.json`，80 杯 / 11 份导出 / 25.2 MB。73 杯有 fullRecord（都有 liveFlowTrim.trace），42 杯有逐点 samples 与 rawScaleSamples；`.tools` 不入库。
+- 本次合并：hyperex-history (9).json 新增 8 杯（本地 11-05 07:48 ～ 11-08 07:52）、8 杯补全点、37 杯重复，归档从 72 杯到 80 杯。
+- 四杯杯流对照图：`D:/vscode/.impeccable/review/hx-new8.png`。
+- 一次性分析脚本（未入库）：`.tools/__hx-new8-analysis2.js`、`__hx-writes.js`、`__hx-chart.js`；复核归档条数用 `.tools/__hx-archive-count.js`。
+- 同日 09:22 又发布了 2.2.43（三档泄压 + 自动 0 bar 帧，783/783，见 `HANDOFF_v02243.md`）。**2.2.42 与 2.2.43 都还没有真机数据**，回读新导出时先看 `pluginVersion` 再分口径。
+- 工作区：插件仓库根是 `D:/vscode/decenthyperexplugin`；外层 `D:/vscode` 是咖啡小程序仓库，它的 `docs/plans` 不是本项目的交接区。

@@ -1,4 +1,4 @@
-# HyperEx 2.2.43-auto 交接：三档泄压 + 自动 0 bar 帧
+# HyperEx 2.2.43 交接：三档泄压 + 自动 0 bar 帧
 
 日期：2026-11-08（北京时间）。实验版本，尚未真机验证。
 
@@ -23,7 +23,7 @@
 5. **学习边界**：auto 允许 3 个 skipStep（S1→release、release→S2、S2→S3），不再被旧 `skipCount>2` 判成 extra-skip。0 bar 段的采样 phase 是 `dumping`/`soak`、逻辑帧为 null；所有 S1/S2/S3 学习函数都按 phase 过滤，0 bar 段不进入任何学习窗口。auto 与 on 的 persistent history 共用 active-release 指纹，可互相恢复使用。
 6. **校准例外**：流量校准仍是物理帧阶梯，`liveFrameForLayout()` 在 calibrationActive 或校准标题时直接保留机器帧号，避免 auto 布局把校准帧 1/2/3 映射错。
 7. **UI**：诊断页「泄压模式」改为三档分段控件；`control-mode`/`uiStatusPayload` 带 `releaseMode`；auto 的 soak 状态显示 0 bar soak + S2 自动开始，不再提示粉灯/按 GHC。
-8. **版本与标题**：`PLUGIN_VERSION`/manifest 为 `2.2.43-auto`；auto 曲线标题后缀 ` auto`。
+8. **版本与标题**：`PLUGIN_VERSION`/manifest 为 `2.2.43`；auto 曲线标题后缀 ` auto`。
 
 ## 测试
 

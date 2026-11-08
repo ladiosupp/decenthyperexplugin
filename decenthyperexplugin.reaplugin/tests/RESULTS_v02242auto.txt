@@ -531,7 +531,7 @@ PASS S3 low stable flow can still receive bounded upward correction
 PASS save refill endpoint is registered in host manifest and persists after readback
 PASS refill save refuses success when the storage readback differs
 PASS manifest http endpoints match handlers and UI calls in both directions
-PASS 2.2.43-auto version is consistent across manifest runtime and generated page
+PASS 2.2.43 version is consistent across manifest runtime and generated page
 PASS abort reset timer is tracked and cleared by a new sequence
 PASS generated UI escaping covers attribute quotes
 PASS gain memory creates a bucket from S2 late resistance and maps the next-shot base
@@ -632,17 +632,17 @@ PASS 2.2.36 short S2 (<4 s left) starts the ramp at 0.5 s with a 2-quantum cap
 PASS 2.2.37 grind advisory calls a low-resistance fast shot coarse
 PASS 2.2.37 grind advisory calls a high-resistance slow shot fine
 PASS 2.2.37 grind advisory holds when resistance and both stage flows are near target
-PASS 2.2.43-auto auto S2 writes physical frame 2 while the trace stays logical 1
-PASS 2.2.43-auto three skips stay learnable and soak samples never enter stage windows
-PASS 2.2.43-auto auto mode builds a 4-frame profile with a real 0 bar soak frame
-PASS 2.2.43-auto auto profile with S3 shape slices S3 from physical frame 3
-PASS 2.2.43-auto logical frames hide the release frame and keep S2/S3 at 1/2+
-PASS 2.2.43-auto auto release starts the soak countdown without a pressure gate
-PASS 2.2.43-auto flow calibration keeps physical frames even when release mode is auto
-PASS 2.2.43-auto verifies and selects the auto profile without changing S1/S2/S3 commands
-PASS 2.2.43-auto switching on -> auto uploads a 4-frame profile while the learning key stays
-PASS 2.2.43-auto auto restores and reuses on-mode persistent history
-PASS 2.2.43-auto UI exposes three release choices and the auto profile title
+PASS 2.2.43 auto S2 writes physical frame 2 while the trace stays logical 1
+PASS 2.2.43 three skips stay learnable and soak samples never enter stage windows
+PASS 2.2.43 auto mode builds a 4-frame profile with a real 0 bar soak frame
+PASS 2.2.43 auto profile with S3 shape slices S3 from physical frame 3
+PASS 2.2.43 logical frames hide the release frame and keep S2/S3 at 1/2+
+PASS 2.2.43 auto release starts the soak countdown without a pressure gate
+PASS 2.2.43 flow calibration keeps physical frames even when release mode is auto
+PASS 2.2.43 verifies and selects the auto profile without changing S1/S2/S3 commands
+PASS 2.2.43 switching on -> auto uploads a 4-frame profile while the learning key stays
+PASS 2.2.43 auto restores and reuses on-mode persistent history
+PASS 2.2.43 UI exposes three release choices and the auto profile title
 PASS 2.2.37 grind advisory block is amber and only rendered when available
 PASS write vector arrow sits on the check-to-write trend line while the head follows the command direction
 PASS write vector arrow without a RAW regression keeps the command position

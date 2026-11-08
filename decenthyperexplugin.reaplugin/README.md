@@ -1,6 +1,6 @@
-# 2.2.43-auto experimental
+# 2.2.43 experimental
 
-Three-state release mode: **auto** (0 bar release/soak frame in the same shot), **on** (original Idle/soak/GHC restart) and **off** (continuous). Auto generates a separate `... auto` profile and uses logical stage frames so the existing S1/S2/S3 parameters and learning history stay valid. See [HANDOFF_v02242auto.md](HANDOFF_v02242auto.md). Hardware validation pending.
+Three-state release mode: **auto** (0 bar release/soak frame in the same shot), **on** (original Idle/soak/GHC restart) and **off** (continuous). Auto generates a separate `... auto` profile and uses logical stage frames so the existing S1/S2/S3 parameters and learning history stay valid. See [HANDOFF_v02243.md](HANDOFF_v02243.md). Hardware validation pending.
 
 - **Auto profile**：S1 流量 → `pressure: 0` 泄压/浸泡帧 → S2 → S3，整杯只按一次实体萃取键；0 bar 帧时长就是用户 `SoakSeconds`，插件倒计时同值，不等待压力阈值。
 - **Logical frames**：自动档物理帧为 S1=0 / release=1 / S2=2 / S3=3+；采样、学习、图表和 CSV 仍用逻辑帧 S1=0 / S2=1 / S3=2+，因此 on 模式旧学习记录和 S1/S2/S3 控制参数继续可用。

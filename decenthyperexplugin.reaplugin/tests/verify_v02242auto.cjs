@@ -1686,11 +1686,11 @@ test('manifest http endpoints match handlers and UI calls in both directions',()
  assert.deepEqual([...http].filter(x=>!handlers.has(x)),[]);
  assert.deepEqual([...ws].filter(x=>handlers.has(x)),[]);
 });
-test('2.2.43-auto version is consistent across manifest runtime and generated page',()=>{
+test('2.2.43 version is consistent across manifest runtime and generated page',()=>{
  const e=setup(),m=JSON.parse(fs.readFileSync(require('path').join(__dirname,'..','manifest.json')));
-  assert.equal(m.version,'2.2.43-auto');assert.equal(e.plugin.version,'2.2.43-auto');
-  assert.equal(e.h.calibrationStatusPayload().pluginVersion,'2.2.43-auto');
-    assert.match(e.h.buildGhcOverlayHtml(),/HYPEREX v2\.2\.43-auto/);
+  assert.equal(m.version,'2.2.43');assert.equal(e.plugin.version,'2.2.43');
+  assert.equal(e.h.calibrationStatusPayload().pluginVersion,'2.2.43');
+    assert.match(e.h.buildGhcOverlayHtml(),/HYPEREX v2\.2\.43/);
 });
 test('abort reset timer is tracked and cleared by a new sequence',()=>{
  const e=normalEnv();e.s.runtimeProfileVerified=true;e.s.armed=true;
@@ -2744,7 +2744,7 @@ async function autoPulseFixture(){
  const t=e.s.liveTrim;t.startup={status:'armed',plan:{enabled:true,holdMs:500,baseCommandMlS:2.5,referenceRiseS:2}};t.run.config.s2StartupPlan=t.startup.plan;
  return e;
 }
-test('2.2.43-auto auto S2 writes physical frame 2 while the trace stays logical 1',async()=>{
+test('2.2.43 auto S2 writes physical frame 2 while the trace stays logical 1',async()=>{
  const e=await autoPulseFixture();
  assert.equal(e.s.liveTrim.profile.steps.length,4);
  assert.equal(Number(e.s.liveTrim.profile.steps[2].flow),2.5);
@@ -2756,7 +2756,7 @@ test('2.2.43-auto auto S2 writes physical frame 2 while the trace stays logical 
  const w=e.s.liveTrim.report.trace.find(x=>x.kind==='write');
  assert.equal(w.frame,1);assert.equal(w.commandMlS,2.5625);
 });
-test('2.2.43-auto three skips stay learnable and soak samples never enter stage windows',()=>{
+test('2.2.43 three skips stay learnable and soak samples never enter stage windows',()=>{
  const e=setup({releaseMode:'auto'}),r=controlledRun(e,'auto-learning');
  r.config.releaseMode='auto';r.config.activeRelease=true;r.config.profileLayout=e.h.profileLayoutForMode('auto');
  r.events=Array.from({length:3},()=>({name:'command_accepted',data:{machineState:'skipStep'}}));
@@ -2765,7 +2765,7 @@ test('2.2.43-auto three skips stay learnable and soak samples never enter stage 
  assert.equal(e.h.assessRunLearningIntegrity(r).eligible,true);
  assert(e.h.stage2AdaptiveEvidence(r));
 });
-test('2.2.43-auto auto mode builds a 4-frame profile with a real 0 bar soak frame',()=>{
+test('2.2.43 auto mode builds a 4-frame profile with a real 0 bar soak frame',()=>{
  const e=setup({releaseMode:'auto'}),p=e.expected;
  assert.equal(p.steps.length,4);
  assert.match(p.title,/\bauto$/);
@@ -2777,7 +2777,7 @@ test('2.2.43-auto auto mode builds a 4-frame profile with a real 0 bar soak fram
  assert.equal(summary.stage1CommandMlS,.75);
  assert.equal(summary.stage2CommandMlS,2.5);
 });
-test('2.2.43-auto auto profile with S3 shape slices S3 from physical frame 3',()=>{
+test('2.2.43 auto profile with S3 shape slices S3 from physical frame 3',()=>{
  const e=setup({releaseMode:'auto'}),p=copy(e.expected),s3=p.steps[3];
  p.steps=[p.steps[0],p.steps[1],p.steps[2],{...s3,name:'S3 EARLY',flow:'0.6875'},{...s3,name:'S3 MID',flow:'0.75'},{...s3,name:'S3 LATE',flow:'0.8125'}];
  const summary=e.h.profileCommandSummaryFromProfile(p);
@@ -2785,7 +2785,7 @@ test('2.2.43-auto auto profile with S3 shape slices S3 from physical frame 3',()
  assert.equal(summary.stage3Mode,'shape');
  assert.equal(summary.s3Shape.earlyCommand,.688);assert.equal(summary.s3Shape.midCommand,.75);assert.equal(summary.s3Shape.lateCommand,.813);
 });
-test('2.2.43-auto logical frames hide the release frame and keep S2/S3 at 1/2+',()=>{
+test('2.2.43 logical frames hide the release frame and keep S2/S3 at 1/2+',()=>{
  const e=setup({releaseMode:'auto'}),l=e.h.profileLayoutForMode('auto');
  assert.deepEqual(copy(l),{s1:0,release:1,s2:2,s3:3});
  assert.equal(e.h.logicalFrameForPhysical(0,l),0);
@@ -2797,7 +2797,7 @@ test('2.2.43-auto logical frames hide the release frame and keep S2/S3 at 1/2+',
  assert.equal(e.h.physicalFrameForLogical(2,l),3);
  assert.equal(e.h.logicalFrameForPhysical(1,e.h.profileLayoutForMode('on')),1);
 });
-test('2.2.43-auto auto release starts the soak countdown without a pressure gate',async()=>{
+test('2.2.43 auto release starts the soak countdown without a pressure gate',async()=>{
  const e=setup({releaseMode:'auto'});e.s.phase='stage1';e.s.stage1DumpSent=false;e.s.lastPressure=9;
  e.h.beginAutoRelease();
  for(let i=0;i<20;i++)await Promise.resolve();
@@ -2813,12 +2813,12 @@ test('2.2.43-auto auto release starts the soak countdown without a pressure gate
  assert.equal(e.s.armRequestCount,0);
  assert.equal(e.s.ghcCountdownTimer,null);
 });
-test('2.2.43-auto flow calibration keeps physical frames even when release mode is auto',()=>{
+test('2.2.43 flow calibration keeps physical frames even when release mode is auto',()=>{
  const e=setup({releaseMode:'auto'});e.s.calibrationArmed=true;e.s.workflowTitle='HyperEx Flow Calibration - Low Water';
  e.h.handleStateUpdate({state:{state:'espresso',substate:'pouring'},profileFrame:3});
  assert.equal(e.s.lastFrame,3);
 });
-test('2.2.43-auto verifies and selects the auto profile without changing S1/S2/S3 commands',async()=>{
+test('2.2.43 verifies and selects the auto profile without changing S1/S2/S3 commands',async()=>{
  const e=setup({releaseMode:'auto',roundtrip:true});
  await e.h.syncHyperExProfile(true);
  assert.equal(e.s.armed,true);
@@ -2827,7 +2827,7 @@ test('2.2.43-auto verifies and selects the auto profile without changing S1/S2/S
  const t=e.h.runtimeProfileTruthPayload();
  assert.equal(t.actual.stage1CommandMlS,.75);assert.equal(t.actual.stage2CommandMlS,2.5);assert.equal(t.actual.stage3CommandMlS,.563);
 });
-test('2.2.43-auto switching on -> auto uploads a 4-frame profile while the learning key stays',async()=>{
+test('2.2.43 switching on -> auto uploads a 4-frame profile while the learning key stays',async()=>{
  const e=setup({releaseMode:'on'});
  const onKey=e.h.adaptiveHistoryFingerprintKey(e.h.adaptiveHistoryFingerprint());
  e.s.cfg.releaseMode='auto';e.s.cfg.activeRelease=true;
@@ -2837,7 +2837,7 @@ test('2.2.43-auto switching on -> auto uploads a 4-frame profile while the learn
  assert.equal(e.mock.workflow.steps.length,4);
  assert(e.writes().some(c=>c.path==='/workflow'&&c.method==='PUT'));
 });
-test('2.2.43-auto auto restores and reuses on-mode persistent history',()=>{
+test('2.2.43 auto restores and reuses on-mode persistent history',()=>{
  const e=setup({releaseMode:'on'}),row=historyRow(e,'on-row');
  e.s.persistentHistoryAvailable=true;e.s.persistentHistoryFile={shots:[row]};
  e.h.restoreAdaptiveHistoryFromPersistentFile();
@@ -2849,7 +2849,7 @@ test('2.2.43-auto auto restores and reuses on-mode persistent history',()=>{
  e.h.restoreAdaptiveHistoryFromPersistentFile();
  assert.deepEqual(copy(e.s.adaptiveHistory.map(x=>x.runId)),['on-row']);
 });
-test('2.2.43-auto UI exposes three release choices and the auto profile title',()=>{
+test('2.2.43 UI exposes three release choices and the auto profile title',()=>{
  const e=setup({releaseMode:'auto'}),html=e.h.buildGhcOverlayHtml();
  assert.match(html,/data-release="auto"/);assert.match(html,/data-release="on"/);assert.match(html,/data-release="off"/);
  assert.match(html,/data-mode="auto"/);assert.match(html,/Release: AUTO/);

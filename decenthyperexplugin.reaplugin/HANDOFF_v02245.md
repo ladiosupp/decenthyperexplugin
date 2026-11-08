@@ -52,3 +52,10 @@ Could not advance to final low-flow stage: S2 -> S3: refusing skipStep because p
 - GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.45（附件 HyperExPulseFilter_v2.2.45_experimental.zip，460,643 字节）。
 - SHA256：B9F289036A723D094AA1E5205D4B2EDFDB8F875C8C9ADE7D018A41AEAEF2D39B。
 - 夸克：夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.45.zip，460,643 字节，fileId 5cc0a1b6337a4b469e0ee239ffd0f41c。
+
+## 回归检查脚本
+
+- `tests/history-regression.cjs`：只读历史 JSON，按 auto / on 分开检查，输出 PASS / FAIL / SKIP 并以退出码区分失败。
+- auto 检查：`auto_release_enter` + `auto_release_soak_start`、`stage2_start.autoRelease`、release 物理帧 1、S2 物理帧 2、stage2 段不得出现物理帧 >=3（二次跳到 S3）、soak 时长、skip 次数；2.2.45 起还要求第一次 boost 在 S2 后 >=100 ms。
+- on 检查：`soak_start` + `soak_complete_arm1`、不得出现 auto release 事件、`stage2_start` 不得带 `autoRelease`、S2 物理帧 1（旧记录无 physical 时退回逻辑帧 1）、skip 次数；不套用 auto 的 100 ms boost 等待。
+- 缺 events/samples 的旧记录标 SKIP，不误判 FAIL；有完整证据的失败杯才影响退出码。

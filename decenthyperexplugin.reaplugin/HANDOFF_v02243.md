@@ -56,4 +56,10 @@
 - 代码回滚：切回 `v1.79ds` 的 2.2.42 提交 `2b79249`，重新安装 2.2.42 包。
 - 模式回滚：把 `ActiveRelease` 设为 `on` 即回到旧 Idle/soak/GHC 路径；设为 `off` 回到连续模式。
 - 学习历史：auto 与 on 共用 active-release 学习 key，切换模式不会丢掉旧 S1/S2/S3 记录；off 仍独立。
-- 本轮未上传、未打 Release、未传夸克。
+
+## 发布记录（2026-11-08）
+
+- 代码提交 `98e38ba`，tag `v2.2.43`，分支 `auto-hyperex` 已推送。
+- GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.43（附件 `HyperExPulseFilter_v2.2.43_experimental.zip`，479,976 字节）。
+- SHA256：`4CDBFF8BEB45A4EDE93C3775B8102C20B85AE4929B94EB1D49D7D887BBB879FA`。
+- 夸克：`夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.43.zip`，479,976 字节，fileId `2d811c4dd02e4580a4b4b0ff89a98839`。

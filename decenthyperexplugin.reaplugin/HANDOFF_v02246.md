@@ -66,6 +66,12 @@ LUT、S2/S3 目标与限压、补水幅度设置（floodMaxMlS/holdMs/cutoff）�
 
 切回 2.2.45 包（tag v2.2.45）即可。2.2.46 没有改 LUT、目标、限压、补水设置、皮肤或宿主。代码回滚不撤销已写进杯间学习的 reduced 观测（它们带 reduced 标记，置信度本就低）。
 
-## 6. 发布状态
+## 6. 发布记录（2026-11-14）
 
-代码、测试、README、manifest 已改；**尚未打包、未上传、未打 tag、未发 Release**。按用户规矩（AGENTS.md 第 20 条），上传发版需另行确认。
+- 代码提交 63e788e，tag v2.2.46（annotated），分支 auto-hyperex 已推送（走 VPN 代理 127.0.0.1:57890）。
+- GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.46 （Latest，非 draft、非 prerelease）。
+- 附件：HyperExPulseFilter_v2.2.46.zip，487,623 字节。
+- SHA256：5F1F469C022C4BB67E42CFFC9B704AD38986B41E0BDFF60A7F793425D65C655C。
+- 夸克：夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.46.zip，487,623 字节，fileId 8d95b183bd1b46798da9d647e72f9fd4。
+- 包内复核：解压后 node --check 通过、tests/verify_v02246.cjs 796/796。
+- 版本号说明：auto 分支已稳定，本版起按正常 semver 递增发布（2.2.46）；历史无「auto 尾数单数」成文规则，单双交替出现。

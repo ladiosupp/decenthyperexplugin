@@ -30,6 +30,16 @@ public class HxBridge {
         this.ctx = ctx;
     }
 
+    // App 版本号（build.gradle 的 versionName），顶栏标题后显示。
+    @JavascriptInterface
+    public String appVersion() {
+        try {
+            return ctx.getPackageManager().getPackageInfo(ctx.getPackageName(), 0).versionName;
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
     // 插件安装检测：WebView 直接 fetch Decaid 会被 CORS 拦（接口无 CORS 头），
     // 走原生 HTTP 子线程读 /api/v1/plugins，完成后 evaluateJavascript 回调网页。
     // 只取 id/version/loaded 三项，不把整份插件列表塞进网页。

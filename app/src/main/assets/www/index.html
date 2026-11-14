@@ -12,6 +12,7 @@ html,body{margin:0;height:100%}
 body{background:#121418;color:#e8eaee;font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif;display:flex;flex-direction:column;overflow:hidden}
 header{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid #262a31;background:#171a1f;flex:none;min-width:0}
 h1{font-size:17px;margin:0;letter-spacing:.02em}
+.appver{font-size:12px;font-weight:400;color:#8b93a1;margin-left:6px;letter-spacing:0}
 header .status{margin-left:auto;font-size:12px;color:#9fd4a8;text-align:right;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 header .status.busy{color:#e9c276}
 .fetchbtn{flex:none;display:inline-flex;align-items:center;gap:7px;background:#e8833a;color:#1a1208;border:0;border-radius:9px;padding:7px 13px;font-size:13px;line-height:1.5;font-weight:700;cursor:pointer;transition:filter .12s,transform .08s;white-space:nowrap}
@@ -78,6 +79,7 @@ button.ghost{width:100%;margin-top:8px}
 .card .k{font-size:16px;font-size:clamp(9px,1.6cqw,16px);color:#8b93a1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .card .v{font-size:16px;font-size:clamp(9px,1.6cqw,16px);font-weight:700;margin-top:3px;font-variant-numeric:tabular-nums;white-space:nowrap}
 .card .v .vs{font-size:11px;font-size:clamp(7px,1.1cqw,11px);font-weight:400;color:#8b93a1;margin-left:5px}
+.card .v.vflow{display:flex;align-items:baseline;justify-content:space-between;gap:6px}
 .card .v .phasepill{font-size:16px;font-size:clamp(9px,1.6cqw,16px)}
 .card .s{font-size:10px;font-size:clamp(7px,1.1cqw,10px);color:#8b93a1;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .phasepill{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
@@ -158,7 +160,7 @@ input[type=range]:disabled{opacity:.4;cursor:default}
 </head>
 <body>
 <header>
-  <h1 data-i18n="ProfileReplayer">ProfileReplayer</h1>
+  <h1><span data-i18n="ProfileReplayer">ProfileReplayer</span><span class="appver" id="appVer"></span></h1>
   <span class="de1pill off" id="de1Pill"><span data-i18n="咖啡机状态">咖啡机状态</span><span class="dot"></span><span id="de1PillTxt">—</span></span>
   <button type="button" class="fetchbtn" id="manualFetch"><span class="fetch-ico">⟳</span><span class="fetch-txt" data-i18n="抓取">抓取</span><span class="fetch-count" id="fetchCount">—</span></button>
   <select id="lang" style="width:auto;padding:6px 8px"><option value="zh">中文</option><option value="en">EN</option></select>

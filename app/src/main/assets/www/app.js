@@ -59,6 +59,7 @@ const EN = {
   '抓取': 'Fetch', '手动': 'manual',
   '睡眠': 'Sleep', '待机': 'Idle', '萃取中': 'Brewing', '未连接': 'Offline',
   '咖啡机状态': 'DE1', '无': 'None', 'RAW dW/dt': 'RAW dW/dt', '机器流量/目标流量': 'Machine / target flow',
+  '杯流': 'Cup flow', 'RAW流速': 'RAW flow',
 };
 function t(s) { return lang === 'en' && EN[s] != null ? EN[s] : s; }
 function applyLang() {
@@ -68,6 +69,7 @@ function applyLang() {
   updatePlayButtons();
   if (cup) { renderCupInfo(); buildLog(); buildCharts(); paint(); }
   renderArchiveInfo();
+  layoutCards();
   rebuildCupListLabels();
   refreshAutoNote();
   renderStatus();
@@ -658,7 +660,6 @@ function renderCards(f, tMs) {
   const card = (k, v, s, cls) => '<div class="card"><div class="k">' + k + '</div><div class="v ' + (cls || '') + '">' + v + '</div><div class="s">' + (s || '') + '</div></div>';
   const sm = isRaw ? nearestSample(tMs) : f;
   const weight = isRaw ? num(f.weightG) : num(sm && sm.scaleWeightG);
-  const cum = sm ? num(sm.cumulativeWeightG) : null;
   const decaid = num(f.decaidWeightFlowGS);
   const rawDw = num(isRaw ? f.rawDwDtGS : f.rawScaleDwDtGS);
   const press = num(f.pressureBar);
@@ -670,16 +671,52 @@ function renderCards(f, tMs) {
   const phaseTxt = (!phase || (isPr && phase === 'recording')) ? t('无') : t(PHASE_LABEL[phase] || phase);
   const phasePill = (!phase || (isPr && phase === 'recording')) ? ['#2a2f37', '#8b93a1'] : pill;
   let html = '';
-  // 行内帧计数用短标签（英文 f），避免窄卡裁切；状态栏的「N frames」不受影响
-  html += card(t('时刻'), fmtT(tMs) + '<span class="vs">' + (lang === 'en' ? 'f' : '帧') + ' ' + (idx + 1) + '/' + frames.length + (isRaw && f.tareReset ? ' · tare' : '') + '</span>', '');
+  // 时刻卡不带帧计数（用户口径）；RAW 去皮标记保留
+  html += card(t('时刻'), fmtT(tMs) + (isRaw && f.tareReset ? '<span class="vs">tare</span>' : ''), '');
   // 相位副信息只留数字（逻辑帧 · 物理帧），卡片收窄
   html += card(t('相位'), '<span class="phasepill" style="background:' + phasePill[0] + ';color:' + phasePill[1] + '">' + phaseTxt + '</span><span class="vs">' + (f.profileFrame == null ? '—' : f.profileFrame) + ' · ' + (f.physicalProfileFrame == null ? '—' : f.physicalProfileFrame) + '</span>', '');
-  html += card(t('秤重'), f2(weight) + ' g', cum != null && Number.isFinite(cum) ? t('插件累计') + ' ' + f2(cum) + ' g' : '');
-  html += card(t('decaid 杯流'), f2(decaid), '');
-  html += card(t('压力'), f2(press), '', press > 8 ? 'bad' : press > 6 ? 'warn' : '');
-  html += card(t('RAW dW/dt'), f2(rawDw), '');
-  html += card(t('机器流量/目标流量'), f2(mflow) + ' / ' + f3(target), '');
+  html += card(t('秤重'), f2(weight) + ' g', '');
+  // 单位与秤重的 g 同格式：跟主数值同字号同字重，直接拼在数字后
+  html += card(t('杯流'), f2(decaid) + ' g/s', '');
+  html += card(t('压力'), f2(press) + ' bar', '', press > 8 ? 'bad' : press > 6 ? 'warn' : '');
+  html += card(t('RAW流速'), f2(rawDw) + ' g/s', '');
+  // ml/s 靠右、基线与数字对齐（不上标）
+  html += card(t('机器流量/目标流量'), '<span>' + f2(mflow) + ' / ' + f3(target) + '</span><span>ml/s</span>', '', 'vflow');
   $('cards').innerHTML = html;
+  layoutCards();
+}
+// 卡宽规则（用户口径）：机器流量/目标流量卡 = 标题宽 + 5px（含内边距与边框），
+// 相位卡保持原 1fr 份额（v1.5 的 6.55fr 总份里占 1），其余 5 卡平分剩余；窄屏三列不套用。
+function layoutCards() {
+  const box = $('cards');
+  const cards = box.querySelectorAll('.card');
+  if (cards.length !== 7 || document.documentElement.clientWidth <= 560) { box.style.gridTemplateColumns = ''; return; }
+  const cs = getComputedStyle(box);
+  const gaps = parseFloat(cs.columnGap) || 0;
+  const avail = box.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0) - gaps * 6;
+  const k7 = cards[6].querySelector('.k');
+  const range = document.createRange();
+  range.selectNodeContents(k7);
+  const titleW = range.getBoundingClientRect().width;
+  range.detach && range.detach();
+  const c7 = getComputedStyle(cards[6]);
+  const flowW = titleW + (parseFloat(c7.paddingLeft) || 0) + (parseFloat(c7.paddingRight) || 0) + (parseFloat(c7.borderLeftWidth) || 0) + (parseFloat(c7.borderRightWidth) || 0) + 5;
+  const c1 = getComputedStyle(cards[0]);
+  const padX = (parseFloat(c1.paddingLeft) || 0) + (parseFloat(c1.paddingRight) || 0) + (parseFloat(c1.borderLeftWidth) || 0) + (parseFloat(c1.borderRightWidth) || 0);
+  // 相位卡原份额 = 可用宽 / 6.55（v1.5 的 1fr / 6.55fr），再扣自身内边距与边框
+  const phaseW = Math.max(30, avail / 6.55 - padX);
+  // 均分下限 = 五卡最宽内容（数字+单位）+ 内边距，防中字号裁切；放不下时整行横滑兜底
+  let needW = 0;
+  for (const i of [0, 2, 3, 4, 5]) {
+    const v = cards[i].querySelector('.v');
+    const rg = document.createRange();
+    rg.selectNodeContents(v);
+    needW = Math.max(needW, rg.getBoundingClientRect().width);
+    rg.detach && rg.detach();
+  }
+  const restW = Math.max(30, (avail - flowW - phaseW - padX) / 5 - padX, needW);
+  const px = (n) => Math.max(1, Math.round(n)) + 'px';
+  box.style.gridTemplateColumns = px(restW + padX) + ' ' + px(phaseW + padX) + ' ' + px(restW + padX) + ' ' + px(restW + padX) + ' ' + px(restW + padX) + ' ' + px(restW + padX) + ' ' + px(flowW);
 }
 function nearestSample(tMs) {
   const sm = cup && cup.fullRecord && cup.fullRecord.samples;
@@ -988,7 +1025,7 @@ document.addEventListener('keydown', (ev) => {
   else if (ev.key === 'PageDown') { ev.preventDefault(); jumpEvent(1); }
 });
 let resizeTimer = 0;
-window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (cup) { buildCharts(); chartBase = []; paint(); } }, 150); });
+window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { layoutCards(); if (cup) { buildCharts(); chartBase = []; paint(); } }, 150); });
 
 // ---- 图表卡长按拖动排序（⠿ 把手；顺序持久化）----
 const CHART_IDS = ['cFlow', 'cWeight', 'cPress'];
@@ -1150,6 +1187,7 @@ function renderWhitelistWarning() {
   initChartDrag();
   initCupDrop();
   if (window.HxBridge) {
+    try { const ver = window.HxBridge.appVersion(); if (ver) $('appVer').textContent = 'v' + ver; } catch (_) {}
     await mergePending();
     window.HxBridge.setAutoFetch($('srcUrl').value.trim(), $('autoOn').checked ? Number($('autoSec').value) : 0);
     // 回前台自动合并：MainActivity.onResume 发 hxresume，visibilitychange 双保险。

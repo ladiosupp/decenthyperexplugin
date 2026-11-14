@@ -281,6 +281,7 @@ function rebuildCupList() {
     sel.value = String((newestPlayable || cups[0]).index);
   }
   if (cups.length) loadCup(Number(sel.value));
+  syncCupDrop();
 }
 
 function loadCup(index) {
@@ -317,6 +318,61 @@ function rebuildCupListLabels() {
   const cur = sel.value;
   sel.innerHTML = cups.map((c) => '<option value="' + c.index + '">' + cupOptionLabel(c) + '</option>').join('');
   if (cur && [...sel.options].some((o) => o.value === cur)) sel.value = cur;
+  syncCupDrop();
+}
+
+// ---- 自定义选杯下拉：点外部 / 再点触发都可关闭；带清晰滚动条并定位当前杯 ----
+// 底层保留隐藏原生 select（现有 change 逻辑与回归脚本兼容），这里只做展示与交互。
+function syncCupDrop() {
+  const sel = $('cup');
+  const label = $('cupDropLabel');
+  const panel = $('cupDropPanel');
+  if (!label || !panel) return;
+  const cur = sel.value;
+  const curOpt = [...sel.options].find((o) => o.value === cur);
+  label.textContent = curOpt ? curOpt.textContent : '—';
+  panel.innerHTML = cups.map((c) => '<div class="cupdrop-item' + (String(c.index) === cur ? ' sel' : '') + '" role="option" data-index="' + c.index + '" aria-selected="' + (String(c.index) === cur) + '">' + cupOptionLabel(c) + '</div>').join('');
+  panel.querySelectorAll('.cupdrop-item').forEach((el) => {
+    el.addEventListener('click', () => {
+      sel.value = el.dataset.index;
+      sel.dispatchEvent(new Event('change'));
+      closeCupDrop();
+      syncCupDrop();
+    });
+  });
+  if (!$('cupDrop').classList.contains('open')) return;
+  const selEl = panel.querySelector('.cupdrop-item.sel');
+  if (selEl) selEl.scrollIntoView({ block: 'nearest' });
+}
+function openCupDrop() {
+  const drop = $('cupDrop'), panel = $('cupDropPanel'), btn = $('cupDropBtn');
+  syncCupDrop();
+  drop.classList.add('open');
+  panel.hidden = false;
+  btn.setAttribute('aria-expanded', 'true');
+  const selEl = panel.querySelector('.cupdrop-item.sel');
+  if (selEl) selEl.scrollIntoView({ block: 'center' });
+}
+function closeCupDrop() {
+  const drop = $('cupDrop'), panel = $('cupDropPanel'), btn = $('cupDropBtn');
+  if (!drop) return;
+  drop.classList.remove('open');
+  panel.hidden = true;
+  btn.setAttribute('aria-expanded', 'false');
+}
+function initCupDrop() {
+  const btn = $('cupDropBtn'), drop = $('cupDrop');
+  if (!btn || !drop) return;
+  btn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    if (drop.classList.contains('open')) closeCupDrop(); else openCupDrop();
+  });
+  document.addEventListener('click', (ev) => {
+    if (drop.classList.contains('open') && !drop.contains(ev.target)) closeCupDrop();
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && drop.classList.contains('open')) closeCupDrop();
+  });
 }
 
 function renderCupInfo() {
@@ -609,7 +665,32 @@ function buildCharts() {
       stop(); seek(nearestFrame(t * 1000));
     };
     g.canvas.onclick = (ev) => locate(ev.clientX);
-    g.canvas.ontouchstart = (ev) => { if (ev.touches.length === 1) { locate(ev.touches[0].clientX); ev.preventDefault(); } };
+    // 触屏：竖向滑动交给页面原生滚动（canvas touch-action:pan-y），
+    // 只有点按（位移<10px）或横向拖动才移动时间轴；横拖时阻止默认避免误滚。
+    let ts = null;
+    g.canvas.addEventListener('touchstart', (ev) => {
+      if (ev.touches.length !== 1) { ts = null; return; }
+      const t0 = ev.touches[0];
+      ts = { x: t0.clientX, y: t0.clientY, mode: null };
+    }, { passive: true });
+    g.canvas.addEventListener('touchmove', (ev) => {
+      if (!ts || ev.touches.length !== 1) return;
+      const t0 = ev.touches[0];
+      const dx = t0.clientX - ts.x, dy = t0.clientY - ts.y;
+      if (!ts.mode) {
+        if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+        ts.mode = Math.abs(dx) > Math.abs(dy) ? 'h' : 'v';
+      }
+      if (ts.mode === 'h') { ev.preventDefault(); locate(t0.clientX); }
+    }, { passive: false });
+    g.canvas.addEventListener('touchend', (ev) => {
+      if (ts && !ts.mode) {
+        const t0 = ev.changedTouches[0];
+        if (t0 && Math.abs(t0.clientX - ts.x) < 10 && Math.abs(t0.clientY - ts.y) < 10) locate(t0.clientX);
+      }
+      ts = null;
+    }, { passive: true });
+    g.canvas.addEventListener('touchcancel', () => { ts = null; }, { passive: true });
   }
 }
 function drawCursor() {
@@ -861,6 +942,7 @@ function renderWhitelistWarning() {
   if (savedLang === 'en' || savedLang === 'zh') { lang = savedLang; $('lang').value = lang; }
   applyChartOrder(await dbGet('chartOrder'));
   initChartDrag();
+  initCupDrop();
   if (window.HxBridge) {
     await mergePending();
     window.HxBridge.setAutoFetch($('srcUrl').value.trim(), $('autoOn').checked ? Number($('autoSec').value) : 0);

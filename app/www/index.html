@@ -28,6 +28,21 @@ button:not(:disabled):active{transform:scale(.97)}
 button:disabled{opacity:.5;cursor:default}
 button.primary{background:#e8833a;color:#1a1208;width:100%;margin-top:6px}
 button.ghost{width:100%;margin-top:8px}
+.cupdrop{position:relative}
+.cupdrop-btn{display:flex;align-items:center;gap:8px;width:100%;background:#0e1116;color:#e8eaee;border:1px solid #333a44;border-radius:8px;padding:9px 10px;font:13px ui-monospace,monospace;text-align:left;cursor:pointer}
+.cupdrop-btn .cupdrop-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cupdrop-btn .cupdrop-arrow{flex:none;color:#8b93a1;font-size:11px;transition:transform .15s}
+.cupdrop.open .cupdrop-btn{border-color:#e8833a}
+.cupdrop.open .cupdrop-arrow{transform:rotate(180deg)}
+.cupdrop-panel{position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:30;background:#14171c;border:1px solid #333a44;border-radius:10px;box-shadow:0 12px 32px rgba(0,0,0,.55);max-height:300px;overflow-y:auto;overscroll-behavior:contain;padding:4px}
+.cupdrop-panel::-webkit-scrollbar{width:10px}
+.cupdrop-panel::-webkit-scrollbar-track{background:#0e1116;border-radius:5px}
+.cupdrop-panel::-webkit-scrollbar-thumb{background:#3a4150;border-radius:5px;border:2px solid #0e1116}
+.cupdrop-panel::-webkit-scrollbar-thumb:hover{background:#4a5264}
+.cupdrop-panel{scrollbar-width:thin;scrollbar-color:#3a4150 #0e1116}
+.cupdrop-item{padding:8px 10px;border-radius:7px;font:12px ui-monospace,monospace;color:#c6ccd6;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cupdrop-item:hover{background:#222732}
+.cupdrop-item.sel{background:#2c3442;color:#e8eaee;box-shadow:inset 3px 0 0 #e8833a}
 .note{font-size:12px;color:#8b93a1;margin:8px 0 0}
 .cards{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin-bottom:12px;flex:none}
 .card{background:#191d23;border:1px solid #2a2f38;border-radius:10px;padding:8px 10px;min-width:0;container-type:inline-size}
@@ -44,7 +59,7 @@ button.ghost{width:100%;margin-top:8px}
 .chartbox.drop-target{border-color:#e8833a;box-shadow:0 0 0 1px rgba(232,131,58,.4)}
 .chartghost{position:fixed;left:0;top:0;z-index:99;margin:0;pointer-events:none;opacity:.92;border-color:#e8833a;box-shadow:0 10px 30px rgba(0,0,0,.55);will-change:transform}
 body.chart-dragging{cursor:grabbing;user-select:none;-webkit-user-select:none}
-canvas{width:100%;height:150px;display:block;touch-action:none}
+canvas{width:100%;height:150px;display:block;touch-action:pan-y}
 .events{background:#171a1f;border:1px solid #262a31;border-radius:10px;padding:8px 10px;font:12px ui-monospace,monospace;color:#aeb6c2;max-height:220px;overflow:auto;flex:none}
 .events .row{display:flex;gap:8px;padding:4px 6px;border-radius:6px;cursor:pointer;white-space:nowrap}
 .events .row:hover{background:#222732}
@@ -108,7 +123,11 @@ input[type=range]:disabled{opacity:.4;cursor:default}
 <main>
 <aside>
   <fieldset><legend data-i18n="选择杯">选择杯</legend>
-    <select id="cup"><option>—</option></select>
+    <select id="cup" style="display:none"><option>—</option></select>
+    <div class="cupdrop" id="cupDrop">
+      <button type="button" class="cupdrop-btn" id="cupDropBtn" aria-haspopup="listbox" aria-expanded="false"><span class="cupdrop-label" id="cupDropLabel">—</span><span class="cupdrop-arrow">▾</span></button>
+      <div class="cupdrop-panel" id="cupDropPanel" role="listbox" hidden></div>
+    </div>
     <div class="note" id="cupInfo"></div>
   </fieldset>
   <fieldset><legend data-i18n="数据源 · Decaid 地址">数据源 · Decaid 地址</legend>

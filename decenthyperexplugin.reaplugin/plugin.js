@@ -5,7 +5,10 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.46";
+  const PLUGIN_VERSION = "2.2.47";
+  // Generated profiles and profile binding share one fixed title prefix,
+  // matching ProfileRecorder's ownership gate. Settings no longer rename them.
+  const HYPEREX_TITLE_PREFIX = "HyperEx";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -285,9 +288,7 @@ function createPlugin(host) {
   }
 
   function calibrationProfileTitle(mode) {
-    const base = state.cfg && state.cfg.calibrationProfileTitle
-      ? String(state.cfg.calibrationProfileTitle) : "HyperEx Flow Calibration";
-    return `${base} - ${calibrationModeConfig(mode).label}`;
+    return `${HYPEREX_TITLE_PREFIX} Flow Calibration - ${calibrationModeConfig(mode).label}`;
   }
 
   function calibrationModeFromTitle(title) {
@@ -616,7 +617,7 @@ function createPlugin(host) {
     if (state.calibrationActive || isCalibrationProfileTitle(state.workflowTitle)) return finiteOrNull(frame);
     return currentLogicalFrame(frame);
   }
-  function baseProfileTitle() { return String(state.cfg && state.cfg.profileTitle || "HyperEx Pulse Filter"); }
+  function baseProfileTitle() { return HYPEREX_TITLE_PREFIX + " Pulse Filter"; }
   function autoProfileTitle(title) {
     const t = String(title == null ? "" : title).trim();
     return /\bauto$/i.test(t) ? t : t + " auto";
@@ -625,7 +626,7 @@ function createPlugin(host) {
   function isHyperExProfileTitle(title) {
     if (!state.cfg || !title) return false;
     const t = String(title);
-    return t === baseProfileTitle() || t === autoProfileTitle(baseProfileTitle());
+    return t.startsWith(HYPEREX_TITLE_PREFIX) && !isCalibrationProfileTitle(t);
   }
   // External algorithm intervention is intentionally two-state. "full" keeps
   // every shipped write path; "off" is observation only. The mode is latched
@@ -700,7 +701,6 @@ function createPlugin(host) {
       releaseMode: releaseModeValue,
       adaptiveLearningLevel:normalizeLearningLevel(settings.AdaptiveLearningLevel),
       basketContext: "empty", // Startup qualification chooses empty engineering or normal coffee automatically.
-      profileTitle: String(settings.ProfileTitle || "HyperEx Pulse Filter"),
       temperature: clampNumber(settings.Temperature, LIMITS.temperatureMin, LIMITS.temperatureMax, 92.0),
       stage1Flow: clampNumber(settings.Stage1Flow, LIMITS.desiredRealFlowMin, LIMITS.desiredRealFlowMax, 2.0),
       stage1Weight,
@@ -736,7 +736,6 @@ function createPlugin(host) {
       maxRunSeconds: clampNumber(settings.MaxRunSeconds, 30, 600, 180.0),
       useCalibrationLut: b(settings.UseCalibrationLut, true),
       flowMultiplierScope: String(settings.FlowMultiplierScope || "HyperEx only"),
-      calibrationProfileTitle: String(settings.CalibrationProfileTitle || "HyperEx Flow Calibration"),
       calibrationMode: normalizeCalibrationMode(settings.CalibrationMode || "Low Water"),
       calibrationStepSeconds: clampNumber(settings.CalibrationStepSeconds, 7, 20, 10.0),
       calibrationSettleSeconds: clampNumber(settings.CalibrationSettleSeconds, 1.5, 10, 4.0),
@@ -6236,7 +6235,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
   }
 
   async function hideLegacyCalibrationProfile(recordsArg) {
-    const legacyTitle = state.cfg ? String(state.cfg.calibrationProfileTitle || "") : "";
+    const legacyTitle = HYPEREX_TITLE_PREFIX + " Flow Calibration";
     if (!legacyTitle || isCalibrationProfileTitle(legacyTitle)) return;
     if (state.legacyProfileHiddenTitle === legacyTitle) return;
     try {

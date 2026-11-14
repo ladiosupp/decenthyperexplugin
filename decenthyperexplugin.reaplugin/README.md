@@ -1,3 +1,12 @@
+# 2.2.47 experimental
+
+曲线标题前缀固定为 `HyperEx`：生成的曲线名与绑定判定都改用固定前缀，不再读设置里的自定义标题。与 ProfileRecorder 的归属判定（标题以 HyperEx 开头才算 HyperEx 的杯）对齐。见 [HANDOFF_v02247.md](HANDOFF_v02247.md)。
+
+- **绑定按前缀**：`isHyperExProfileTitle` 由「精确等于设置曲线名（含 auto 变体）」改为「标题以 `HyperEx` 开头（区分大小写）」；校准曲线（`HyperEx Flow Calibration - Low Water/Full`）仍走自己的校准激活路径，不会被当成萃取曲线。任何以 HyperEx 开头的选中曲线（含用户改名）都会被校验、修复并控制；不带前缀的曲线不绑定。
+- **生成标题固定**：萃取曲线固定 `HyperEx Pulse Filter`（auto 档 `HyperEx Pulse Filter auto`），校准曲线固定 `HyperEx Flow Calibration - Low Water/Full`。设置项 `ProfileTitle` / `CalibrationProfileTitle` 退役（manifest 移除，旧设置值被忽略）。旧单校准曲线的隐藏迁移仍按固定基础名生效。
+- **不碰**：LUT、目标与限压、补水、学习、arming 与校准触发时机、皮肤与宿主。
+- **测试**：tests/verify_v02247.cjs **801/801**（796 基线 + 5 新增：前缀绑定正负例、生成标题固定、改名曲线校验回写、非前缀曲线不介入、退役设置项断言）；node --check 通过；manifest JSON 校验通过。
+
 # 2.2.46 experimental
 
 Five control refinements driven by the 2026-11-11/12 fine-grind field cups (three completed low-pressure-paper cups plus two nylon-filter cups aborted at 8 bar). See [HANDOFF_v02246.md](HANDOFF_v02246.md). Hardware validation pending.

@@ -2,8 +2,8 @@
   "id": "decenthyperexplugin.reaplugin",
   "author": "ladiosupp",
   "name": "HyperEx Pulse Filter",
-  "description": "Experimental 2.2.46: blind-flood pressure guard bleeds early when a blocked puck / low-permeability filter builds pressure with no cup outflow; fast-S2 reduced learning window (0.8 s, capped MEDIUM); post-refill upward-write hold; S3 entry reverse-write guard; aborted cups get no grind advice. Retains 2.2.45 auto release waiting for the firmware's real S2 frame instead of racing it with a second skipStep, and the first auto refill boost waits 100 ms after that frame; on/off S2 handoff is unchanged. Retains three-state release mode (auto 0-bar release/soak frame, on Idle/soak/GHC restart, off continuous), logical frame mapping that preserves S1/S2/S3 learning, plus 2.2.42 safety-timer refill bleed, earlier S2 ramp release, decay-safe S3 EARLY window, S1 fast-trajectory admission and a 12% steady-gain gate. HyperEx three-stage controller with verified workflow-profile truth, persistent cross-version adaptive history with storage self-test, resistance-bucketed cross-shot gain memory, first-run RAW-scale flow calibration, automatic S1/S2/S3 next-shot adaptation, predictive live trim with physical write silence, S3 MID/earlyFactor/drift shaping, real-scale diagnostics, manual engineering tools, CSV export, full plugin settings, idempotent profile installation, and scoped DE1 flowMultiplier handling.",
-  "version": "2.2.46",
+  "description": "Experimental 2.2.47: generated profile titles and workflow binding use the fixed HyperEx title prefix (ProfileTitle / CalibrationProfileTitle settings retired); any selected profile whose title starts with HyperEx is verified and controlled. Retains 2.2.46 blind-flood pressure guard bleeds early when a blocked puck / low-permeability filter builds pressure with no cup outflow; fast-S2 reduced learning window (0.8 s, capped MEDIUM); post-refill upward-write hold; S3 entry reverse-write guard; aborted cups get no grind advice. Retains 2.2.45 auto release waiting for the firmware's real S2 frame instead of racing it with a second skipStep, and the first auto refill boost waits 100 ms after that frame; on/off S2 handoff is unchanged. Retains three-state release mode (auto 0-bar release/soak frame, on Idle/soak/GHC restart, off continuous), logical frame mapping that preserves S1/S2/S3 learning, plus 2.2.42 safety-timer refill bleed, earlier S2 ramp release, decay-safe S3 EARLY window, S1 fast-trajectory admission and a 12% steady-gain gate. HyperEx three-stage controller with verified workflow-profile truth, persistent cross-version adaptive history with storage self-test, resistance-bucketed cross-shot gain memory, first-run RAW-scale flow calibration, automatic S1/S2/S3 next-shot adaptation, predictive live trim with physical write silence, S3 MID/earlyFactor/drift shaping, real-scale diagnostics, manual engineering tools, CSV export, full plugin settings, idempotent profile installation, and scoped DE1 flowMultiplier handling.",
+  "version": "2.2.47",
   "apiVersion": 1,
   "permissions": [
     "log",
@@ -43,12 +43,6 @@
       ],
       "default": "正常",
       "description": "Default 正常: one clean completed shot can adjust the next. 保守 requires two comparable cups; 温和 permits a single clean large error; 正常 uses bounded single-cup correction; 激进 uses higher gains and bounds. History is a command-normalized reference across small parameter changes, never mixed across active-release modes or physical LUT/basket contexts. Pressure, execution, scale quality and shape limits remain active. Independent of live trim level. 激进的统计学习准入范围为正常档1.3倍：S2稳态及起步CV上限12%→15.6%，拟合残差容差0.10→0.13即R²0.90→0.87；最少统计窗口/样本按1.3折算（样本向上取整）。出液目标与压力、反馈新鲜度、驱动ACK、错杯排除和写入预算保护不随之放宽。"
-    },
-    "ProfileTitle": {
-      "type": "string",
-      "label": "Profile title",
-      "description": "Base workflow profile title. In auto release mode the generated/selected profile is '<title> auto'; on/off use the base title unchanged.",
-      "default": "HyperEx Pulse Filter"
     },
     "Temperature": {
       "type": "number",
@@ -208,12 +202,6 @@
       ],
       "default": "Low Water",
       "description": "Selects one of two persistent calibration profiles. Low Water (default) runs a target-focused 3×3 search around the current HyperEx real-flow targets and auto-generates a validated LUT. Full retains the wider 12-point engineering staircase."
-    },
-    "CalibrationProfileTitle": {
-      "type": "string",
-      "label": "Calibration profile base title",
-      "description": "Base title used to generate two persistent profiles: “<base> - Low Water” and “<base> - Full”. The old single profile using only the base title is hidden during dual-profile migration.",
-      "default": "HyperEx Flow Calibration"
     },
     "CalibrationStepSeconds": {
       "type": "number",

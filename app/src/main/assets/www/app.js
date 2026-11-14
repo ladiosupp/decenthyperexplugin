@@ -70,6 +70,7 @@ function applyLang() {
   refreshAutoNote();
   renderStatus();
   renderFetchCount();
+  renderWhitelistWarning();
 }
 
 // ---- IndexedDB ----
@@ -107,6 +108,7 @@ let idx = 0, playing = 0, speed = 1, lastTick = 0, rafId = 0, acc = 0;
 let chartsReady = false, chartGeo = [], chartBase = [], sampleTimes = [], logRows = [], lastLogHi = -1;
 let autoTimer = 0;
 let nextAutoAt = 0, countdownTimer = 0, fetching = false;
+let cupPending = null;
 
 const fmtT = (ms) => (ms / 1000).toFixed(2) + 's';
 const num = (v, d) => (v == null || !Number.isFinite(Number(v))) ? (d == null ? '—' : d) : Number(v);
@@ -133,7 +135,28 @@ function cupStatusLabel(result) {
 function cupOptionLabel(c) {
   const d = new Date(c.startedAt);
   const when = Number.isFinite(d.getTime()) ? (d.getMonth() + 1) + '-' + String(d.getDate()).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') : '';
-  const parts = [when, c.title, cupStatusLabel(c.result)].filter(Boolean);
+  const title = cupDisplayTitle(c);
+  const parts = [when, title, cupStatusLabel(c.result)].filter(Boolean);
+  return escapeHtml(parts.join(' · '));
+}
+// 曲线名超 18 字符截断加省略号；HyperEx 杯的 (auto/on/off) 模式后缀保留，不被截掉。
+function truncName(s) { return s && s.length > 18 ? s.slice(0, 18) + '…' : s; }
+function cupDisplayTitle(c) {
+  const m = String(c.title || '').match(/^(.*) \((auto|on|off)\)$/);
+  if (m) return truncName(m[1]) + ' (' + m[2] + ')';
+  return truncName(c.title);
+}
+// 状态异常：只认明确失败语义（错误/失败/拒绝/超时/中断等），整条暗红标注；
+// recorder 正常结束是 ended (idle) 这类，不算异常。
+function cupIsBad(c) {
+  const r = String(c.result || '');
+  return /error|fail|refus|timeout|timed out|interrupted|missing|could not|pressure >|returned to idle|driver test/i.test(r);
+}
+// 下拉行标签：选中行显示完整曲线名与完整状态，其余行截断
+function cupItemLabel(c, full) {
+  const d = new Date(c.startedAt);
+  const when = Number.isFinite(d.getTime()) ? (d.getMonth() + 1) + '-' + String(d.getDate()).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') : '';
+  const parts = [when, full ? c.title : cupDisplayTitle(c), full ? (c.result || '') : cupStatusLabel(c.result)].filter(Boolean);
   return escapeHtml(parts.join(' · '));
 }
 
@@ -366,13 +389,23 @@ function syncCupDrop() {
   const cur = sel.value;
   const curOpt = [...sel.options].find((o) => o.value === cur);
   label.textContent = curOpt ? curOpt.textContent : '—';
-  panel.innerHTML = cups.map((c) => '<div class="cupdrop-item' + (String(c.index) === cur ? ' sel' : '') + '" role="option" data-index="' + c.index + '" aria-selected="' + (String(c.index) === cur) + '">' + cupOptionLabel(c) + '</div>').join('');
+  const active = cupPending != null ? String(cupPending) : cur;
+  panel.innerHTML = cups.map((c) => '<div class="cupdrop-item' + (String(c.index) === active ? ' sel' : '') + (cupIsBad(c) ? ' bad' : '') + '" role="option" data-index="' + c.index + '" aria-selected="' + (String(c.index) === cur) + '">' + cupItemLabel(c, String(c.index) === active) + '</div>').join('');
   panel.querySelectorAll('.cupdrop-item').forEach((el) => {
-    el.addEventListener('click', () => {
-      sel.value = el.dataset.index;
-      sel.dispatchEvent(new Event('change'));
-      closeCupDrop();
-      syncCupDrop();
+    el.addEventListener('click', (ev) => {
+      // 行点击会重建面板（节点脱离文档），不阻断冒泡会被「点外关闭」误判
+      ev.stopPropagation();
+      // 两段式：第一次点击高亮并显示完整信息，再次点击同一行才确定加载
+      if (cupPending === Number(el.dataset.index)) {
+        cupPending = null;
+        sel.value = el.dataset.index;
+        sel.dispatchEvent(new Event('change'));
+        closeCupDrop();
+        syncCupDrop();
+      } else {
+        cupPending = Number(el.dataset.index);
+        syncCupDrop();
+      }
     });
   });
   if (!$('cupDrop').classList.contains('open')) return;
@@ -381,6 +414,7 @@ function syncCupDrop() {
 }
 function openCupDrop() {
   const drop = $('cupDrop'), panel = $('cupDropPanel'), btn = $('cupDropBtn');
+  cupPending = null;
   syncCupDrop();
   drop.classList.add('open');
   panel.hidden = false;
@@ -391,6 +425,7 @@ function openCupDrop() {
 function closeCupDrop() {
   const drop = $('cupDrop'), panel = $('cupDropPanel'), btn = $('cupDropBtn');
   if (!drop) return;
+  cupPending = null;
   drop.classList.remove('open');
   panel.hidden = true;
   btn.setAttribute('aria-expanded', 'false');
@@ -413,14 +448,16 @@ function initCupDrop() {
 function renderCupInfo() {
   const c = cup;
   const stageLine = (name, s) => (!s || s.rawRegressionGS == null) ? name + ' —' : name + ' ' + f2(s.rawRegressionGS) + ' g/s (' + t('目标') + ' ' + s.targetGS + ' · ' + (s.status || '') + ')';
+  // 非 HyperEx 杯（recorder，runId pr- 前缀）没有 S1/S2/S3 控制段，不显示
+  const isPr = String(c.runId || '').startsWith('pr-');
   $('cupInfo').innerHTML =
     '<div>runId ' + (c.runId || '—') + '</div>' +
     '<div>' + t('插件') + ' ' + (c.pluginVersion || '—') + ' · ' + (c.startedAt || '') + '</div>' +
     '<div>' + t('结果') + ' ' + (c.result || '—') + '</div>' +
-    '<div style="margin-top:6px">' + stageLine('S1', c.s1) + '</div><div>' + stageLine('S2', c.s2) + '</div><div>' + stageLine('S3', c.s3) + '</div>';
+    (isPr ? '' : '<div style="margin-top:6px">' + stageLine('S1', c.s1) + '</div><div>' + stageLine('S2', c.s2) + '</div><div>' + stageLine('S3', c.s3) + '</div>');
 }
 function setTransportEnabled(on) {
-  for (const id of ['btnStart', 'btnPrevEv', 'btnBack10', 'btnBack1', 'btnRev', 'btnPlay', 'btnFwd1', 'btnFwd10', 'btnNextEv', 'btnEnd']) $(id).disabled = !on;
+  for (const id of ['btnStart', 'btnPrevEv', 'btnRev', 'btnPlay', 'btnNextEv', 'btnEnd']) $(id).disabled = !on;
 }
 
 // ---- 播放引擎 ----
@@ -799,10 +836,6 @@ $('lang').addEventListener('change', () => { lang = $('lang').value; dbSet('lang
 $('cup').addEventListener('change', () => loadCup(Number($('cup').value)));
 $('btnPlay').addEventListener('click', () => play(1));
 $('btnRev').addEventListener('click', () => play(-1));
-$('btnBack1').addEventListener('click', () => step(-1));
-$('btnFwd1').addEventListener('click', () => step(1));
-$('btnBack10').addEventListener('click', () => step(-10));
-$('btnFwd10').addEventListener('click', () => step(10));
 $('btnStart').addEventListener('click', () => { stop(); seek(0); });
 $('btnEnd').addEventListener('click', () => { stop(); seek(frames.length - 1); });
 $('btnPrevEv').addEventListener('click', () => jumpEvent(-1));
@@ -963,6 +996,10 @@ function renderWhitelistWarning() {
     bar.appendChild(msg); bar.appendChild(btn);
     const main = document.querySelector('main');
     document.body.insertBefore(bar, main);
+  } else {
+    // 切语言时刷新已存在的警示条文案
+    bar.querySelector('span').textContent = t('后台抓取未在白名单') + '，' + t('可能被系统杀掉，后台抓取会停。');
+    bar.querySelector('button').textContent = t('去设置白名单');
   }
 }
 

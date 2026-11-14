@@ -38,11 +38,12 @@ v1.5 从未对外发版，其内容随 v1.6 首次发布（版本号跳 1.6 避�
 - 本地提交：见 git log（v1.6 一笔，只 add 自己这批：build.gradle / www×2 / assets×2 / HxBridge / release APK / 本交接）。
 - staging .tools/gh-profilereplayer 同步 6 文件 + APK → push main（VPN 127.0.0.1:57890，token 走 git credential fill）。
 - GitHub Release v1.6：APK 2,033,495 字节，SHA256 83EAA0BC454B4008090B5D7EC6F272F6B5E58398238AB65BFBBC89E4E9EDAFA0。
-- 夸克：「夸克网盘/来自：Codex」上传 v1.6 APK。
+- 夸克：「夸克网盘/来自：Codex」上传 v1.6 APK，fileId 4863be531cb349098dedff0bd9f6c0a4。
+  （MCP upload_file 两次 commit 203 失败，改走官方 CLI 成功；--parent-fid 要目录 FID 不是路径。）
 
 ## 4. 工作区 / 进程
 
-- 平板 stayon 本轮设 true，收尾恢复 false。
+- 平板 stayon 本轮设 true，收尾已恢复 false。
 - 模拟器 hxpad / 预览服务 4790 提权侧活着；本对话结束后会死，新对话先重起。
 - recorder 对话的 HANDOFF_2026-10-31.md 仍未提交，别碰别代提交。
 

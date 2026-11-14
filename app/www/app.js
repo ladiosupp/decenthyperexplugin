@@ -109,6 +109,7 @@ let chartsReady = false, chartGeo = [], chartBase = [], sampleTimes = [], logRow
 let autoTimer = 0;
 let nextAutoAt = 0, countdownTimer = 0, fetching = false;
 let cupPending = null;
+let speedPending = null;
 
 const fmtT = (ms) => (ms / 1000).toFixed(2) + 's';
 const num = (v, d) => (v == null || !Number.isFinite(Number(v))) ? (d == null ? '—' : d) : Number(v);
@@ -415,6 +416,7 @@ function syncCupDrop() {
 function openCupDrop() {
   const drop = $('cupDrop'), panel = $('cupDropPanel'), btn = $('cupDropBtn');
   cupPending = null;
+  closeSpeedDrop();
   syncCupDrop();
   drop.classList.add('open');
   panel.hidden = false;
@@ -437,12 +439,70 @@ function initCupDrop() {
     ev.stopPropagation();
     if (drop.classList.contains('open')) closeCupDrop(); else openCupDrop();
   });
+  initSpeedDrop();
   document.addEventListener('click', (ev) => {
     if (drop.classList.contains('open') && !drop.contains(ev.target)) closeCupDrop();
+    const sd = $('speedDrop');
+    if (sd && sd.classList.contains('open') && !sd.contains(ev.target)) closeSpeedDrop();
   });
   document.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape' && drop.classList.contains('open')) closeCupDrop();
+    if (ev.key === 'Escape') { if (drop.classList.contains('open')) closeCupDrop(); closeSpeedDrop(); }
   });
+}
+
+// ---- 倍速下拉：与选杯同口径（隐藏原生 select + 两段式 + 点外/再点/ESC 关闭）----
+function syncSpeedDrop() {
+  const sel = $('speed'), label = $('speedDropLabel'), panel = $('speedDropPanel');
+  if (!label || !panel) return;
+  const cur = sel.value;
+  const curOpt = [...sel.options].find((o) => o.value === cur);
+  label.textContent = curOpt ? curOpt.textContent : '1×';
+  const active = speedPending != null ? String(speedPending) : cur;
+  panel.innerHTML = [...sel.options].map((o) => '<div class="cupdrop-item' + (o.value === active ? ' sel' : '') + '" role="option" data-value="' + o.value + '" aria-selected="' + (o.value === cur) + '">' + escapeHtml(o.textContent) + '</div>').join('');
+  panel.querySelectorAll('.cupdrop-item').forEach((el) => {
+    el.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      if (speedPending === el.dataset.value) {
+        speedPending = null;
+        sel.value = el.dataset.value;
+        sel.dispatchEvent(new Event('change'));
+        closeSpeedDrop();
+        syncSpeedDrop();
+      } else {
+        speedPending = el.dataset.value;
+        syncSpeedDrop();
+      }
+    });
+  });
+}
+function openSpeedDrop() {
+  const drop = $('speedDrop'), panel = $('speedDropPanel'), btn = $('speedDropBtn');
+  if (!drop) return;
+  speedPending = null;
+  closeCupDrop();
+  syncSpeedDrop();
+  drop.classList.add('open');
+  panel.hidden = false;
+  btn.setAttribute('aria-expanded', 'true');
+  const selEl = panel.querySelector('.cupdrop-item.sel');
+  if (selEl) selEl.scrollIntoView({ block: 'nearest' });
+}
+function closeSpeedDrop() {
+  const drop = $('speedDrop'), panel = $('speedDropPanel'), btn = $('speedDropBtn');
+  if (!drop) return;
+  speedPending = null;
+  drop.classList.remove('open');
+  panel.hidden = true;
+  btn.setAttribute('aria-expanded', 'false');
+}
+function initSpeedDrop() {
+  const btn = $('speedDropBtn'), drop = $('speedDrop');
+  if (!btn || !drop) return;
+  btn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    if (drop.classList.contains('open')) closeSpeedDrop(); else openSpeedDrop();
+  });
+  syncSpeedDrop();
 }
 
 function renderCupInfo() {

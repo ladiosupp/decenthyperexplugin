@@ -56,6 +56,11 @@ button.ghost{width:100%;margin-top:8px}
 .cupdrop-item.bad{background:#2a1518;color:#e09aa2}
 .cupdrop-item.bad:hover{background:#33191d}
 .cupdrop-item.bad.sel{background:#33191d;color:#f2b8be;box-shadow:inset 3px 0 0 #c96470}
+.cupdrop.compact{flex:none}
+.cupdrop.compact .cupdrop-btn{width:auto;padding:8px 10px;font-size:13px}
+.cupdrop.compact .cupdrop-panel{left:auto;right:0;min-width:110px;max-height:260px}
+.cupdrop.compact .cupdrop-item{text-align:right}
+.cupdrop.compact .cupdrop-item.sel{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .note{font-size:12px;color:#8b93a1;margin:8px 0 0}
 .cards{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin-bottom:12px;flex:none}
 .card{background:#191d23;border:1px solid #2a2f38;border-radius:10px;padding:8px 10px;min-width:0;container-type:inline-size}
@@ -171,7 +176,11 @@ input[type=range]:disabled{opacity:.4;cursor:default}
       <button id="btnPlay" class="play">顺放 ▶</button>
       <button id="btnNextEv" title="下一个事件">⏩︎</button>
       <button id="btnEnd" title="结尾">⏭︎</button>
-      <select id="speed"><option value="0.1">0.1×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option><option value="10">10×</option></select>
+      <select id="speed" style="display:none"><option value="0.1">0.1×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option><option value="10">10×</option></select>
+      <div class="cupdrop compact" id="speedDrop">
+        <button type="button" class="cupdrop-btn" id="speedDropBtn" aria-haspopup="listbox" aria-expanded="false"><span class="cupdrop-label" id="speedDropLabel">1×</span><span class="cupdrop-arrow">▾</span></button>
+        <div class="cupdrop-panel" id="speedDropPanel" role="listbox" hidden></div>
+      </div>
       <label><input type="checkbox" id="loop"> <span data-i18n="循环">循环</span></label>
       <span class="pos" id="pos">— / —</span>
     </div>

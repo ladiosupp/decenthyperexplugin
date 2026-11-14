@@ -43,5 +43,10 @@ public class MainActivity extends Activity {
         if (web.canGoBack()) web.goBack();
         else super.onBackPressed();
     }
+
+    // 桥接层子线程回调网页用：切回主线程执行 evaluateJavascript。
+    public void runOnWeb(final String js) {
+        runOnUiThread(() -> { if (web != null) web.evaluateJavascript(js, null); });
+    }
 }
 

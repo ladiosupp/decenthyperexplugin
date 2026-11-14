@@ -13,14 +13,80 @@ import androidx.core.content.FileProvider;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class HxBridge {
     private final Context ctx;
+    private final ExecutorService net = Executors.newSingleThreadExecutor();
 
     public HxBridge(Context ctx) {
         this.ctx = ctx;
+    }
+
+    // 插件安装检测：WebView 直接 fetch Decaid 会被 CORS 拦（接口无 CORS 头），
+    // 走原生 HTTP 子线程读 /api/v1/plugins，完成后 evaluateJavascript 回调网页。
+    // 只取 id/version/loaded 三项，不把整份插件列表塞进网页。
+    @JavascriptInterface
+    public void checkPlugins(final String baseUrl, final String callback) {
+        net.execute(() -> {
+            String json;
+            try {
+                URL u = new URL(baseUrl);
+                URL api = new URL(u.getProtocol(), u.getHost(), u.getPort(), "/api/v1/plugins");
+                HttpURLConnection c = (HttpURLConnection) api.openConnection();
+                c.setConnectTimeout(5000);
+                c.setReadTimeout(10000);
+                int code = c.getResponseCode();
+                if (code != 200) {
+                    json = "{\"ok\":false,\"error\":\"HTTP " + code + "\"}";
+                } else {
+                    BufferedReader r = new BufferedReader(new InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8));
+                    StringBuilder sb = new StringBuilder();
+                    String line;
+                    while ((line = r.readLine()) != null) sb.append(line);
+                    r.close();
+                    org.json.JSONArray arr = new org.json.JSONArray(sb.toString());
+                    org.json.JSONArray out = new org.json.JSONArray();
+                    for (int i = 0; i < arr.length(); i++) {
+                        org.json.JSONObject p = arr.getJSONObject(i);
+                        org.json.JSONObject q = new org.json.JSONObject();
+                        q.put("id", p.optString("id"));
+                        q.put("version", p.optString("version"));
+                        q.put("loaded", p.optBoolean("loaded"));
+                        out.put(q);
+                    }
+                    json = new org.json.JSONObject().put("ok", true).put("plugins", out).toString();
+                }
+            } catch (Exception e) {
+                json = "{\"ok\":false,\"error\":" + org.json.JSONObject.quote(String.valueOf(e.getMessage() == null ? e : e.getMessage())) + "}";
+            }
+            final String payload = json;
+            if (ctx instanceof MainActivity) {
+                ((MainActivity) ctx).runOnWeb(jsCall(callback, payload));
+            }
+        });
+    }
+
+    // 打开 GitHub Release 页（系统浏览器），引导安装插件。
+    @JavascriptInterface
+    public void openUrl(String url) {
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            ctx.startActivity(i);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static String jsCall(String fn, String jsonArg) {
+        return fn + "(" + org.json.JSONObject.quote(jsonArg) + ")";
     }
 
     @JavascriptInterface

@@ -79,6 +79,8 @@ const server = http.createServer((req, res) => {
         return {
           index, runId: s.runId || '', startedAt: s.startedAt || '', pluginVersion: s.pluginVersion || '',
           result: s.result ? String(s.result) : '',
+          profileTitle: s.profileTitle || '', releaseMode: s.releaseMode || '',
+          workflowTitle: (s.workflowProfileCommands && s.workflowProfileCommands.title) || '',
           raw: raw.length, samples: samples.length, events: events.length, trace: trace.length,
           durationMs: frames.length ? Number(frames[frames.length - 1].tMs) || 0 : 0,
           playable: frames.length > 0,

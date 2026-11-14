@@ -23,6 +23,20 @@ const num = (v, d) => (v == null || !Number.isFinite(Number(v))) ? (d == null ? 
 const f2 = (v) => Number.isFinite(v) ? v.toFixed(2) : '—';
 const f3 = (v) => Number.isFinite(v) ? v.toFixed(3) : '—';
 
+// 选杯标签：时间 · 曲线标题 · 状态（与 App 同口径）。HyperEx 杯统一
+// "HyperEx Pulse Filter (mode)"，recorder 杯（pr- 前缀）显示记录的真实曲线名。
+function cupTitle(c) {
+  if (String(c.runId || '').startsWith('pr-')) return c.profileTitle || 'Profile Recorder';
+  const mode = c.releaseMode || (/ auto$/i.test(String(c.workflowTitle || '')) ? 'auto' : 'on');
+  return 'HyperEx Pulse Filter (' + mode + ')';
+}
+function cupStatusLabel(result) {
+  const r = String(result || '');
+  if (/aborted|abort/i.test(r)) return '中止';
+  if (/completed/i.test(r)) return '完成';
+  return r;
+}
+
 function setStatus(msg, busy) {
   $('status').textContent = msg;
   $('status').classList.toggle('busy', !!busy);
@@ -44,8 +58,8 @@ async function loadArchive() {
     sel.innerHTML = cups.map((c) => {
       const d = new Date(c.startedAt);
       const when = Number.isFinite(d.getTime()) ? (d.getMonth() + 1) + '-' + String(d.getDate()).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') : '';
-      const tag = c.playable ? (c.raw ? c.raw + ' 帧' : c.samples + ' 采样') : '仅事件';
-      return '<option value="' + c.index + '">' + when + ' · ' + tag + ' · ' + (c.result || '') + '</option>';
+      const parts = [when, cupTitle(c), cupStatusLabel(c.result)].filter(Boolean);
+      return '<option value="' + c.index + '">' + escapeHtml(parts.join(' · ')) + '</option>';
     }).join('');
     // 默认选最后一杯有逐帧数据的
     const lastPlayable = cups.map((c, i) => c.playable ? i : -1).filter((i) => i >= 0).pop();

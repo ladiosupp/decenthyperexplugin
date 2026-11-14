@@ -28,7 +28,7 @@ const EN = {
   'decaid 杯流': 'decaid flow', 'RAW dW/dt': 'RAW dW/dt', '插件累计': 'plugin cum.', '机器流量': 'machine flow', '目标指令': 'target cmd', '▲ 写入': '▲ write',
   '无帧数据（仅事件/轨迹）': 'No frames (events/trace only)', '调流·': 'trim·', '调流轨迹': 'trim trace', '事件': 'event', '名称': 'Name',
   '载入中…': 'Loading…', '空': 'empty', '杯': 'shots', '杯有全点': 'with full data', '更新': 'updated',
-  '仅事件': 'events only', '帧': 'frames', '采样': 'samples', '结果': 'Result', '插件': 'plugin',
+  '帧': 'frames', '采样': 'samples', '结果': 'Result', '插件': 'plugin',
   '失败：请填 Decaid 导出地址': 'Failed: enter the Decaid export URL', '抓取中…': 'Fetching…',
   '自动抓取失败：': 'Auto fetch failed: ', '失败：': 'Failed: ', '新增': 'new', '补全': 'backfilled',
   '就绪': 'Ready', '归档为空，先抓取或导入': 'archive empty; fetch or import first',
@@ -47,6 +47,15 @@ const EN = {
   '后台已攒': 'Background buffered',
   '杯 · 上次抓取': 'shots · last fetch',
   '从未': 'never',
+  '完成': 'completed', '中止': 'aborted',
+  '检测到': 'Detected', '支插件未安装': 'plugin(s) not installed',
+  '两支都装上，才能记全每一杯曲线。': 'Install both plugins to capture every shot curve.',
+  '已安装': 'Installed', '未安装': 'Not installed', '未检测到': 'Not detected',
+  '记录 HyperEx 控制的萃取杯': 'Records HyperEx-controlled shots',
+  '记录其余曲线（非 HyperEx 杯）': 'Records all other curves (non-HyperEx shots)',
+  '去 GitHub 安装': 'Install from GitHub',
+  '稍后': 'Later', '重新检测': 'Re-check', '检测中…': 'Checking…',
+  '插件检测失败：无法连接 Decaid': 'Plugin check failed: cannot reach Decaid',
 };
 function t(s) { return lang === 'en' && EN[s] != null ? EN[s] : s; }
 function applyLang() {
@@ -104,6 +113,26 @@ let lastStatus = null;
 function setStatus(msg, busy) { lastStatus = { fn: typeof msg === 'function' ? msg : () => msg, busy: !!busy }; renderStatus(); }
 function renderStatus() { if (!lastStatus) return; $('status').textContent = lastStatus.fn(); $('status').classList.toggle('busy', lastStatus.busy); }
 function escapeHtml(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+// 选杯列表标签：时间 · 曲线标题 · 状态。HyperEx 杯统一 "HyperEx Pulse Filter (mode)"，
+// mode 取 releaseMode（auto/on/off），老数据没有该字段就按标题的 auto 后缀认，再老默认 on；
+// recorder 杯（runId pr- 前缀）显示它记录的真实曲线名 profileTitle。
+function cupTitle(s) {
+  if (String(s.runId || '').startsWith('pr-')) return s.profileTitle || 'Profile Recorder';
+  const mode = s.releaseMode || (/ auto$/i.test(String((s.workflowProfileCommands || {}).title || '')) ? 'auto' : 'on');
+  return 'HyperEx Pulse Filter (' + mode + ')';
+}
+function cupStatusLabel(result) {
+  const r = String(result || '');
+  if (/aborted|abort/i.test(r)) return t('中止');
+  if (/completed/i.test(r)) return t('完成');
+  return r;
+}
+function cupOptionLabel(c) {
+  const d = new Date(c.startedAt);
+  const when = Number.isFinite(d.getTime()) ? (d.getMonth() + 1) + '-' + String(d.getDate()).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') : '';
+  const parts = [when, c.title, cupStatusLabel(c.result)].filter(Boolean);
+  return escapeHtml(parts.join(' · '));
+}
 
 // ---- 归档与取数 ----
 async function saveArchive() { await dbSet('archive', archive); renderArchiveInfo(); }
@@ -240,17 +269,12 @@ function rebuildCupList() {
     const sm = (fr.samples || []).length;
     const ev = (fr.events || []).length;
     const tr = fr.liveFlowTrim && (fr.liveFlowTrim.trace || []).length || 0;
-    return { index: i, runId: s.runId, startedAt: s.startedAt, result: s.result, raw, samples: sm, events: ev, trace: tr, playable: raw + sm > 0 };
+    return { index: i, runId: s.runId, startedAt: s.startedAt, result: s.result, title: cupTitle(s), raw, samples: sm, events: ev, trace: tr, playable: raw + sm > 0 };
   }).filter((c) => c.playable || c.events + c.trace > 0)
     .sort((a, b) => (Date.parse(b.startedAt) || 0) - (Date.parse(a.startedAt) || 0));
   const sel = $('cup');
   const prev = sel.value;
-  sel.innerHTML = cups.map((c) => {
-    const d = new Date(c.startedAt);
-    const when = Number.isFinite(d.getTime()) ? (d.getMonth() + 1) + '-' + String(d.getDate()).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') : '';
-    const tag = c.playable ? (c.raw ? c.raw + ' ' + t('帧') : c.samples + ' ' + t('采样')) : t('仅事件');
-    return '<option value="' + c.index + '">' + when + ' · ' + tag + ' · ' + (c.result || '') + '</option>';
-  }).join('');
+  sel.innerHTML = cups.map((c) => '<option value="' + c.index + '">' + cupOptionLabel(c) + '</option>').join('');
   if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
   else if (cups.length) {
     const newestPlayable = cups.find((c) => c.playable);
@@ -291,12 +315,7 @@ function loadCup(index) {
 function rebuildCupListLabels() {
   const sel = $('cup');
   const cur = sel.value;
-  sel.innerHTML = cups.map((c) => {
-    const d = new Date(c.startedAt);
-    const when = Number.isFinite(d.getTime()) ? (d.getMonth() + 1) + '-' + String(d.getDate()).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') : '';
-    const tag = c.playable ? (c.raw ? c.raw + ' ' + t('帧') : c.samples + ' ' + t('采样')) : t('仅事件');
-    return '<option value="' + c.index + '">' + when + ' · ' + tag + ' · ' + (c.result || '') + '</option>';
-  }).join('');
+  sel.innerHTML = cups.map((c) => '<option value="' + c.index + '">' + cupOptionLabel(c) + '</option>').join('');
   if (cur && [...sel.options].some((o) => o.value === cur)) sel.value = cur;
 }
 
@@ -854,6 +873,73 @@ function renderWhitelistWarning() {
   if (await dbGet('autoOn')) { $('autoOn').checked = true; startAuto(); }
   applyLang();
   renderWhitelistWarning();
-  setStatus(() => archive.count ? t('就绪') + ' · ' + t('归档') + ' ' + archive.count + ' ' + t('杯') : t('就绪') + ' · ' + t('归档为空，先抓取或导入'));
+  renderReadyStatus();
+  checkPluginsOnStartup();
 })().catch((e) => setStatus(() => t('初始化失败：') + (e.message || e)));
+
+// ---- 插件安装检测：启动静默查一次，缺任一支弹窗引导去 GitHub 安装 ----
+const PLUGIN_DEFS = [
+  { id: 'decenthyperexplugin.reaplugin', name: 'HyperEx Pulse Filter', cls: 'hx', ico: 'H', repo: 'ladiosupp/decenthyperexplugin', desc: '记录 HyperEx 控制的萃取杯' },
+  { id: 'profilerecorder.reaplugin', name: 'Profile Recorder', cls: 'rc', ico: 'R', repo: 'ladiosupp/profilerecorder', desc: '记录其余曲线（非 HyperEx 杯）' },
+];
+let pluginCheckBusy = false;
+window.__hxPluginCheck = function (payload) {
+  pluginCheckBusy = false;
+  let res;
+  try { res = JSON.parse(payload); } catch (_) { res = { ok: false, error: 'bad payload' }; }
+  if (!res.ok) {
+    closePluginModal();
+    setStatus(() => t('插件检测失败：无法连接 Decaid'), true);
+    return;
+  }
+  const found = {};
+  for (const p of res.plugins || []) found[p.id] = p;
+  const missing = PLUGIN_DEFS.filter((d) => !found[d.id] || found[d.id].loaded === false);
+  if (!missing.length) { closePluginModal(); renderReadyStatus(); return; }
+  showPluginModal(found, missing);
+};
+function renderReadyStatus() {
+  setStatus(() => archive && archive.count ? t('就绪') + ' · ' + t('归档') + ' ' + archive.count + ' ' + t('杯') : t('就绪') + ' · ' + t('归档为空，先抓取或导入'));
+}
+function checkPluginsOnStartup() {
+  const url = $('srcUrl').value.trim();
+  if (!url || pluginCheckBusy) return;
+  pluginCheckBusy = true;
+  setStatus(() => t('检测中…'), true);
+  if (window.HxBridge && window.HxBridge.checkPlugins) {
+    window.HxBridge.checkPlugins(url, '__hxPluginCheck');
+  } else {
+    // 浏览器环境没有 Java 桥：直接 fetch（Decaid 无 CORS 头，跨域会失败，按不可达处理）。
+    fetch(new URL('/api/v1/plugins', url).href, { cache: 'no-store' })
+      .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then((plugins) => window.__hxPluginCheck(JSON.stringify({ ok: true, plugins })))
+      .catch((e) => window.__hxPluginCheck(JSON.stringify({ ok: false, error: String(e && e.message || e) })));
+  }
+}
+function closePluginModal() {
+  const m = $('pluginModal');
+  if (m) m.remove();
+}
+function showPluginModal(found, missing) {
+  closePluginModal();
+  const dim = document.createElement('div');
+  dim.id = 'pluginModal';
+  dim.className = 'modal-dim';
+  const rows = PLUGIN_DEFS.map((d) => {
+    const p = found[d.id];
+    const ok = p && p.loaded !== false;
+    const ver = ok ? 'v' + (p.version || '?') + ' · ' + t('已安装') : t('未检测到');
+    return '<div class="plug ' + d.cls + '"><span class="ico">' + d.ico + '</span><span><span class="nm">' + d.name + '</span><div class="ver">' + ver + '</div><div class="desc">' + t(d.desc) + '</div></span><span class="badge ' + (ok ? 'ok' : 'no') + '">' + t(ok ? '已安装' : '未安装') + '</span></div>';
+  }).join('');
+  const ghBtns = missing.map((d) => '<button class="ghbtn" data-repo="' + d.repo + '">' + t('去 GitHub 安装') + ' ' + d.name + '<small>' + d.repo + '</small></button>').join('');
+  dim.innerHTML = '<div class="modal"><h3>' + t('检测到') + ' ' + missing.length + ' ' + t('支插件未安装') + '</h3><p class="why">' + t('两支都装上，才能记全每一杯曲线。') + '</p>' + rows + ghBtns +
+    '<div class="modal-actions"><button class="ghost" id="pluginLater">' + t('稍后') + '</button><button class="primary" id="pluginRecheck">' + t('重新检测') + '</button></div>' +
+    '<div class="modal-foot">Decaid → Plugins → Install plugin → GitHub Release</div></div>';
+  document.body.appendChild(dim);
+  dim.querySelectorAll('.ghbtn').forEach((b) => b.addEventListener('click', () => {
+    if (window.HxBridge && window.HxBridge.openUrl) window.HxBridge.openUrl('https://github.com/' + b.dataset.repo + '/releases');
+  }));
+  $('pluginLater').addEventListener('click', closePluginModal);
+  $('pluginRecheck').addEventListener('click', () => { closePluginModal(); checkPluginsOnStartup(); });
+}
 

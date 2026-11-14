@@ -56,6 +56,7 @@ const EN = {
   '去 GitHub 安装': 'Install from GitHub',
   '稍后': 'Later', '重新检测': 'Re-check', '检测中…': 'Checking…',
   '插件检测失败：无法连接 Decaid': 'Plugin check failed: cannot reach Decaid',
+  '抓取': 'Fetch', '手动': 'manual',
 };
 function t(s) { return lang === 'en' && EN[s] != null ? EN[s] : s; }
 function applyLang() {
@@ -68,6 +69,7 @@ function applyLang() {
   rebuildCupListLabels();
   refreshAutoNote();
   renderStatus();
+  renderFetchCount();
 }
 
 // ---- IndexedDB ----
@@ -104,6 +106,7 @@ let frames = [], frameTimes = [], logTimes = [], isRaw = true;
 let idx = 0, playing = 0, speed = 1, lastTick = 0, rafId = 0, acc = 0;
 let chartsReady = false, chartGeo = [], chartBase = [], sampleTimes = [], logRows = [], lastLogHi = -1;
 let autoTimer = 0;
+let nextAutoAt = 0, countdownTimer = 0, fetching = false;
 
 const fmtT = (ms) => (ms / 1000).toFixed(2) + 's';
 const num = (v, d) => (v == null || !Number.isFinite(Number(v))) ? (d == null ? '—' : d) : Number(v);
@@ -163,16 +166,23 @@ async function fetchUrl(url) {
 async function doFetch(silent) {
   const url = $('srcUrl').value.trim();
   if (!url) { if (!silent) setStatus(() => t('失败：请填 Decaid 导出地址')); return; }
-  if (!silent) setStatus(() => t('抓取中…'), true);
+  if (fetching) return;
+  fetching = true;
+  resetAutoCountdown();
+  setFetchBusy(true);
+  if (!silent) setStatus(() => t('手动') + ' · ' + t('抓取中…'), true);
   try {
     const json = await fetchUrl(url);
     const st = await mergeIncoming(json, url);
     await dbSet('srcUrl', url);
     const rec = await fetchRecorder(url, silent);
-    setStatus(() => (silent ? t('自动抓取') + ' · ' : '') + t('新增') + ' ' + (st.newShots + rec.newShots) + ' ' + t('杯') + ' · ' + t('补全') + ' ' + (st.fullUpdated + rec.fullUpdated) + ' ' + t('杯') + (rec.note ? ' · ' + rec.note : ''));
+    setStatus(() => (silent ? t('自动抓取') + ' · ' : t('手动') + ' · ') + t('新增') + ' ' + (st.newShots + rec.newShots) + ' ' + t('杯') + ' · ' + t('补全') + ' ' + (st.fullUpdated + rec.fullUpdated) + ' ' + t('杯') + (rec.note ? ' · ' + rec.note : ''));
     await checkArchiveSize();
   } catch (e) {
     setStatus(() => (silent ? t('自动抓取失败：') : t('失败：')) + (e.message || e));
+  } finally {
+    fetching = false;
+    setFetchBusy(false);
   }
 }
 // recorder 导出地址由 HyperEx 导出地址推导（同机同端口）；404 = 未装，静默跳过。
@@ -252,10 +262,35 @@ function startAuto() {
   stopAuto();
   const sec = Math.max(5, Number($('autoSec').value) || 30);
   autoTimer = setInterval(() => doFetch(true), sec * 1000);
+  resetAutoCountdown();
   refreshAutoNote();
   if (window.HxBridge) window.HxBridge.setAutoFetch($('srcUrl').value.trim(), sec);
 }
-function stopAuto() { if (autoTimer) clearInterval(autoTimer); autoTimer = 0; if (window.HxBridge) window.HxBridge.setAutoFetch('', 0); }
+function stopAuto() { if (autoTimer) clearInterval(autoTimer); autoTimer = 0; nextAutoAt = 0; renderFetchCount(); if (window.HxBridge) window.HxBridge.setAutoFetch('', 0); }
+// 手动 / 自动抓取都把下次自动抓取计时归零重计；后台服务也同步重置。
+function resetAutoCountdown() {
+  const sec = Math.max(5, Number($('autoSec').value) || 120);
+  nextAutoAt = $('autoOn').checked ? Date.now() + sec * 1000 : 0;
+  renderFetchCount();
+  if (window.HxBridge && $('autoOn').checked) window.HxBridge.setAutoFetch($('srcUrl').value.trim(), sec);
+}
+function setFetchBusy(on) {
+  const b = $('manualFetch');
+  if (!b) return;
+  b.classList.toggle('busy', on);
+  b.disabled = on;
+}
+function renderFetchCount() {
+  const el = $('fetchCount');
+  if (!el) return;
+  if (!$('autoOn').checked || !nextAutoAt) { el.textContent = '—'; return; }
+  const remain = Math.max(0, Math.ceil((nextAutoAt - Date.now()) / 1000));
+  el.textContent = remain >= 60 ? Math.floor(remain / 60) + ':' + String(remain % 60).padStart(2, '0') : remain + 's';
+}
+function startCountdownTick() {
+  if (countdownTimer) clearInterval(countdownTimer);
+  countdownTimer = setInterval(renderFetchCount, 1000);
+}
 function refreshAutoNote() {
   const sec = Math.max(5, Number($('autoSec').value) || 120);
   const label = $('autoSec').selectedOptions[0] ? $('autoSec').selectedOptions[0].textContent : sec + 's';
@@ -727,6 +762,7 @@ function drawCursor() {
 
 // ---- 事件绑定 ----
 $('fetchNow').addEventListener('click', () => doFetch(false));
+$('manualFetch').addEventListener('click', () => doFetch(false));
 $('autoOn').addEventListener('change', () => { if ($('autoOn').checked) { startAuto(); doFetch(true); } else stopAuto(); dbSet('autoOn', $('autoOn').checked); });
 $('autoSec').addEventListener('change', () => { dbSet('autoSec', $('autoSec').value); if ($('autoOn').checked) startAuto(); else if (window.HxBridge) window.HxBridge.setAutoFetch($('srcUrl').value.trim(), Number($('autoSec').value)); });
 $('pickFile').addEventListener('click', () => $('fileInput').click());
@@ -953,6 +989,7 @@ function renderWhitelistWarning() {
   renderArchiveInfo();
   rebuildCupList();
   if (await dbGet('autoOn')) { $('autoOn').checked = true; startAuto(); }
+  startCountdownTick();
   applyLang();
   renderWhitelistWarning();
   renderReadyStatus();

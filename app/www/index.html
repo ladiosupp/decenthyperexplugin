@@ -10,10 +10,19 @@
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;height:100%}
 body{background:#121418;color:#e8eaee;font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif;display:flex;flex-direction:column;overflow:hidden}
-header{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid #262a31;background:#171a1f;flex:none}
+header{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid #262a31;background:#171a1f;flex:none;min-width:0}
 h1{font-size:17px;margin:0;letter-spacing:.02em}
-header .status{margin-left:auto;font-size:12px;color:#9fd4a8;text-align:right}
+header .status{margin-left:auto;font-size:12px;color:#9fd4a8;text-align:right;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 header .status.busy{color:#e9c276}
+.fetchbtn{flex:none;display:inline-flex;align-items:center;gap:7px;background:#e8833a;color:#1a1208;border:0;border-radius:9px;padding:7px 13px;font-size:13px;font-weight:700;cursor:pointer;transition:filter .12s,transform .08s;white-space:nowrap}
+.fetchbtn:hover{filter:brightness(1.08)}
+.fetchbtn:active{transform:scale(.96)}
+.fetchbtn .fetch-count{font:11px ui-monospace,monospace;font-weight:600;background:rgba(26,18,8,.18);border-radius:6px;padding:1px 6px;min-width:34px;text-align:center}
+.fetchbtn.busy{filter:saturate(.7) brightness(.92);cursor:default}
+.fetchbtn.busy .fetch-ico{display:inline-block;animation:fetchspin 1s linear infinite}
+@keyframes fetchspin{to{transform:rotate(360deg)}}
+@media (max-width:600px){header{gap:8px;padding:10px 12px}h1{font-size:15px}.fetchbtn{padding:6px 10px;font-size:12px}.fetchbtn .fetch-count{min-width:30px}}
+@media (max-width:480px){header h1{display:none}header .status{font-size:11px}.fetchbtn{padding:6px 9px;font-size:12px;gap:5px}}
 main{flex:1;display:flex;min-height:0}
 aside{width:340px;flex:none;border-right:1px solid #262a31;padding:14px;overflow-y:auto}
 section.view{flex:1;min-width:0;padding:14px 16px;overflow-y:auto;display:flex;flex-direction:column}
@@ -117,6 +126,7 @@ input[type=range]:disabled{opacity:.4;cursor:default}
 <body>
 <header>
   <h1 data-i18n="ProfileReplayer">ProfileReplayer</h1>
+  <button type="button" class="fetchbtn" id="manualFetch"><span class="fetch-ico">⟳</span><span class="fetch-txt" data-i18n="抓取">抓取</span><span class="fetch-count" id="fetchCount">—</span></button>
   <select id="lang" style="width:auto;padding:6px 8px"><option value="zh">中文</option><option value="en">EN</option></select>
   <span class="status" id="status">载入中…</span>
 </header>

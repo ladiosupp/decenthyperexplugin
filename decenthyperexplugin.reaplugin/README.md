@@ -1,3 +1,15 @@
+# 2.2.46 experimental
+
+Five control refinements driven by the 2026-11-11/12 fine-grind field cups (three completed low-pressure-paper cups plus two nylon-filter cups aborted at 8 bar). See [HANDOFF_v02246.md](HANDOFF_v02246.md). Hardware validation pending.
+
+- **盲灌压力保护（#1）**：补水在没有有效杯流（估计为 null 或斜率 ≤0）时属于「盲灌」。若压力持续爬升（≥2.5 bar 且 500 ms 内再升 ≥0.5 bar），提前走两段断流收口，不再骑到 holdMs 到期或 8 bar 硬中止。只收紧安全包线，灌水幅度仍由包线定；有杯流估计的正常上升不受影响。真机依据：两杯 1μm 尼龙滤纸 S2 压力 4 s 内 0.1→2.2 bar、8 s 到 8.4 bar 中止，杯流始终为零。
+- **快杯 S2 学习窗（#2）**：S2 平台窗不足 1.2 s 时（真机 1.176 s，六个滚动窗全灭、整杯 no-observation），新增 0.8 s / R²≥0.95 的降证据回退窗，标记 reduced，置信度封顶 MEDIUM（永不到 HIGH）。是降权不是墙（§22.8）。
+- **收口后上行门（#3）**：补水收回后 1.5 s 沉降窗内，预测把过冲衰减外推过头导致的上行写入被保持（救急除外）；下行纠正与救急照常。治真机 4.94→5.19→5.44→5.69 的追涨（杯流实际 5.2–5.7）。接管期（handover）内不拦，保留既有接管控制。
+- **S3 入段反向门（#4）**：入段 3.5 s coast 窗内，实测仍 >1.2×目标而预测低于目标时，禁止上行写入。治真机 S3 起点 raw 2.31 vs 目标 1.5 却 +4 档的反向写。
+- **中止杯研磨建议（#5）**：执行故障（execution-fault）中止杯不再出研磨建议，改为提示「先查滤纸/粉层是否堵塞」。p/q 高是故障造成的，不是研磨。仅对真正故障杯生效，未结束/普通杯不受影响。
+- **不碰**：LUT、S2/S3 目标与限压、补水幅度设置、皮肤与宿主。
+- **测试**：tests/verify_v02246.cjs **796/796**（787 基线 + 9 新增）；node --check 通过；生成诊断页 3/3 脚本语法通过。
+
 # 2.2.45 experimental
 
 Auto-only S2 handoff fix after the first real-machine auto run: the plugin now waits for the firmware's real S2 frame instead of racing it with a second `skipStep`, and the first auto refill boost waits 100 ms after that frame. See [HANDOFF_v02245.md](HANDOFF_v02245.md). Hardware validation pending.

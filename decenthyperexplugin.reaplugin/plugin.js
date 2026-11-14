@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.45";
+  const PLUGIN_VERSION = "2.2.46";
   // Hard bounds are enforced twice: once while loading user settings and again
   // when generating the DE1 profile/calibration commands. This keeps malformed
   // settings, stale LUT values, or advisory calculations from ever becoming an
@@ -152,6 +152,19 @@ function createPlugin(host) {
   // keep more of a short S2 available for learning.
   const S2_REFILL_SETTLE_MS=800;
   const S2_REFILL_CHAIN_SETTLE_MS=1500;
+  // 2.2.46 (user 2026-11-14): a blind flood (no usable cup-flow estimate) into a
+  // blocked puck / 1 um nylon filter keeps building pressure with zero outflow.
+  // The holdMs timer alone let two field cups ride 6.8 ml/s into an 8 bar abort.
+  // While blind, a sustained pressure climb above the floor earns an early bleed.
+  // This only tightens the safety envelope; the flood amplitude stays envelope-bound.
+  const S2_REFILL_BLIND_PRESSURE_BAR=2.5;
+  const S2_REFILL_BLIND_RISE_BAR=0.5;
+  // 2.2.46 (user 2026-11-14): after a refill return the cup flow overshoots and
+  // then decays; the 1.5 s prediction extrapolates that decay too far and the
+  // ordinary feedback chases it upward (field: 4.94->5.19->5.44->5.69 while the
+  // cup sat at 5.2-5.7). Hold upward writes through the settling window; downward
+  // correction and rescue stay live. This is the up-side twin of the down-hold.
+  const S2_POST_REFILL_UP_HOLD_MS=1500;
   // AUTO release enters S2 from a real 0 bar frame whose own timer usually
   // expires at the same instant as the plugin's soak countdown. Wait for the
   // machine's S2 frame instead of racing it with a skipStep; the skip is only
@@ -1166,6 +1179,9 @@ function createPlugin(host) {
   function gainConfidence(stageState) {
     if(!stageState||!(Number(stageState.r)>0))return "LOW";
     const n=Number(stageState.n)||1,deviation=Number(stageState.lastDeviation);
+    // 2.2.46: a short-window fallback observation is real but noisier; it may reach
+    // MEDIUM, never HIGH, so a fast cup cannot masquerade as a clean plateau.
+    if(stageState.reduced)return n>=2?"MEDIUM":"LOW";
     if(n>=3&&(!Number.isFinite(deviation)||deviation<=GAIN_MEMORY_DEVIATION))return "HIGH";
     if(n>=2)return "MEDIUM";
     return "LOW";
@@ -1375,7 +1391,7 @@ function createPlugin(host) {
       const r=measured/command;
       if(!(r>=GAIN_R_MIN&&r<=GAIN_R_MAX))return null;
       const saturated=!!(evidence&&evidence.liveTrimChain&&evidence.liveTrimChain.usable===false);
-      return {r,command,measured,source:saturated?"S2 tail local (actuator saturated)":"S2 steady tail",
+      return {r,command,measured,reduced:!!quality.reducedWindow,source:saturated?"S2 tail local (actuator saturated)":"S2 steady tail",
         local:saturated,damped:ripple>=12,alphaOverride:saturated?.55:null,
         commandBand:commandBandOf(command),window:{startPct:40,endPct:100}};
     }
@@ -1451,7 +1467,7 @@ function createPlugin(host) {
       if(!observation){out.stages[stage]={status:"no-observation"};continue;}
       let current=bucket.stages[stage],deviation=null,alpha=null;
       if(!current||!(Number(current.r)>0)){
-        current=bucket.stages[stage]={r:round(observation.r,4),n:1,lastDeviation:null,lastObservedR:round(observation.r,4),drift:observation.drift==null?null:round(observation.drift,4),commandMlS:round(observation.command,4),commandBand:observation.commandBand||commandBandOf(observation.command),lastRunId:run.runId,updatedAt:now};
+        current=bucket.stages[stage]={r:round(observation.r,4),n:1,lastDeviation:null,lastObservedR:round(observation.r,4),drift:observation.drift==null?null:round(observation.drift,4),commandMlS:round(observation.command,4),commandBand:observation.commandBand||commandBandOf(observation.command),reduced:!!observation.reduced,lastRunId:run.runId,updatedAt:now};
       }else{
         deviation=Math.abs(observation.r-current.r)/current.r;
         alpha=gainBackfillAlpha(run,deviation,stage);
@@ -1464,7 +1480,7 @@ function createPlugin(host) {
         current.lastDeviation=round(deviation,4);
         current.lastObservedR=round(observation.r,4);
         if(Number(observation.drift)>0)current.drift=round(Number(current.drift)>0?current.drift+alpha*(observation.drift-current.drift):observation.drift,4);
-        current.commandMlS=round(observation.command,4);current.commandBand=observation.commandBand||commandBandOf(observation.command);
+        current.commandMlS=round(observation.command,4);current.commandBand=observation.commandBand||commandBandOf(observation.command);current.reduced=!!observation.reduced;
         current.lastRunId=run.runId;current.updatedAt=now;
       }
       // cut 8 / L-7: r is a function of the command. Keep one estimate per
@@ -1484,7 +1500,7 @@ function createPlugin(host) {
       }
       out.stages[stage]={status:"updated",r:current.r,n:current.n,observedR:current.lastObservedR,
         deviationPct:current.lastDeviation==null?null:round(current.lastDeviation*100,1),alpha,
-        confidence:gainConfidence(current),source:observation.source,drift:current.drift==null?null:round(current.drift,4),
+        confidence:gainConfidence(current),reduced:!!current.reduced,source:observation.source,drift:current.drift==null?null:round(current.drift,4),
         commandBand:current.commandBand||null,window:observation.window||null};
     }
     memory.lastBucketId=bucket.id;memory.updatedAt=now;bucket.updatedAt=now;run.gainMemoryBucketId=bucket.id;
@@ -3074,6 +3090,19 @@ function createPlugin(host) {
     if(Date.now()-p.startedAt>=plan.holdMs)return "S2 refill maximum duration reached";
     if(Date.now()-state.latestScaleAtMs>600)return "S2 refill scale became stale";
     const flow=s2RefillFlowEstimate(t),target=t.run.config.stage2Flow,threshold=target*plan.cutoffFraction;
+    // 2.2.46 blind-flood pressure guard: with no meaningful cup outflow (no
+    // estimate, or a flat/zero slope) the flood is unobserved; a monotone pressure climb above the floor means water
+    // is being held back (fine puck / low-permeability filter). Bleed early instead
+    // of riding the flood to the hard pressure abort. Fires only while blind, so a
+    // normal rising cup that already produces an estimate is untouched.
+    const blindFlood=!flow||!(Number(flow.slope)>0);
+    if(blindFlood&&state.lastMachineTelemetryValid&&Date.now()-state.lastMachineAtMs<=600){
+      const now=Date.now(),pr=Number(state.lastPressure);
+      if(Number.isFinite(pr)&&pr>=0){
+        if(!p.blindPressure)p.blindPressure={firstAt:now,firstBar:pr};
+        if(pr>=S2_REFILL_BLIND_PRESSURE_BAR&&now-p.blindPressure.firstAt>=500&&pr-p.blindPressure.firstBar>=S2_REFILL_BLIND_RISE_BAR)return "S2 refill blind-flood pressure climb (no cup outflow)";
+      }
+    }
     const observed=flow?Number(flow.slope):null,predicted=flow?Number(flow.predicted):null;
     const decisionFlow=Number.isFinite(predicted)?predicted:observed;
     // §22.11: the cutoff fires on the LEAD-COMPENSATED prediction against the
@@ -4494,6 +4523,14 @@ function createPlugin(host) {
   // active gain-memory bucket centre and the stage flow errors. Advisory only:
   // it never rewrites the curve, the grind or the machine.
   function grindAdvisory(run) {
+    // 2.2.46: an aborted cup (e.g. a blocked 1 um filter riding to the 8 bar abort)
+    // has a high p/q that reflects the fault, not the grind. Do not issue a grind
+    // recommendation from a cup that never completed; point at the fault instead.
+    const integrity=assessRunLearningIntegrity(run);
+    const fault=integrity&&(integrity.reasons||[]).find(x=>x&&x.code==="execution-fault");
+    if(fault){
+      return {available:false,status:"aborted",direction:"hold",reason:"shot-aborted",label:"本杯压力异常中止：先查滤纸/粉层是否堵塞，再谈研磨",detail:fault.detail?String(fault.detail):"本杯未完成，研磨建议不适用",confidence:"LOW"};
+    }
     const q2=controlOutputQuality(run,"stage2"),q3=controlOutputQuality(run,"stage3");
     const samples=(run.samples||[]).filter(x=>x.phase==="stage2"&&x.machineTelemetryValid!==false&&Number(x.machineFlowMlS)>0);
     const tail=samples.slice(Math.floor(samples.length*.6));
@@ -7974,6 +8011,11 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     // from a genuinely sparse phase, otherwise the diagnostics cannot tell them.
     if(raw.length<6)return {available:false,reason:cutoffMs===null||all.length<6?"raw-samples-insufficient":"learning-window-too-short",rawSamples:all.length,windowSamples:raw.length};
     const stamps=new Set(),data=raw.filter(x=>{const t=finiteOrNull(x.scaleTimestampSeconds);if(t===null||stamps.has(t))return false;stamps.add(t);return true;});
+    // 2.2.46: a fast S2 can leave the plateau window shorter than the 1.2 s
+    // regression floor (field: 1.176 s, six rolling windows all rejected, the cup
+    // learned nothing). Admit a reduced 0.8 s window with a stricter R2 and mark it
+    // reduced so confidence caps at MEDIUM. This is a weight, not a wall (S22.8).
+    let reducedWindow=false;
     if(data.length<6)return {available:false};
     const lo=Number(data[0].scaleTimestampSeconds),hi=Number(data[data.length-1].scaleTimestampSeconds),tail=phase==="stage2"&&plateauStart!==null?lo:lo+(hi-lo)*.4;
     const flows=[];
@@ -7983,6 +8025,16 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       if(rows.length<6||rows.some((x,j)=>j>0&&(Number(x.scaleTimestampSeconds)<=Number(rows[j-1].scaleTimestampSeconds)||Number(x.scaleTimestampSeconds)-Number(rows[j-1].scaleTimestampSeconds)>.6)))continue;
       const r=regressionForRawSamples(rows);if(r&&r.seconds>=1.2&&r.r2>=.90&&r.slope>0)flows.push(r.slope);
     }
+    if(!flows.length&&phase==="stage2"&&data.length>=6){
+      // Reduced-evidence fallback: 0.8 s windows at R2>=0.95, only when the full
+      // 1.2 s windows produced nothing. Keeps a fast cup learnable at lower trust.
+      for(let i=0;i<data.length;i++){
+        const end=Number(data[i].scaleTimestampSeconds);if(end<tail+0.8)continue;
+        const rows=data.slice(0,i+1).filter(x=>Number(x.scaleTimestampSeconds)>=Math.max(tail,end-2));
+        if(rows.length<6||rows.some((x,j)=>j>0&&(Number(x.scaleTimestampSeconds)<=Number(rows[j-1].scaleTimestampSeconds)||Number(x.scaleTimestampSeconds)-Number(rows[j-1].scaleTimestampSeconds)>.6)))continue;
+        const r=regressionForRawSamples(rows);if(r&&r.seconds>=0.8&&r.r2>=.95&&r.slope>0){flows.push(r.slope);reducedWindow=true;}if(r&&r.seconds>=0.8&&r.r2>=.95&&r.slope>0){flows.push(r.slope);reducedWindow=true;}
+      }
+    }
     const mean=average(flows),variance=mean===null?null:average(flows.map(x=>(x-mean)*(x-mean)));
     const errors=flows.map(x=>Math.abs(x/target-1)*100).sort((a,b)=>a-b);
     return {available:!!flows.length,targetGS:target,wholePhaseErrorPct:whole?round((whole.slope/target-1)*100,2):null,
@@ -7990,7 +8042,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       tailP95ErrorPct:errors.length?round(errors[Math.max(0,Math.ceil(errors.length*.95)-1)],2):null,
       tailRMSEGS:flows.length?round(Math.sqrt(average(flows.map(x=>(x-target)*(x-target)))),3):null,
       tailOvershootPct:flows.length?round(Math.max(0,Math.max(...flows)/target-1)*100,2):null,windows:flows.length,
-      windowSettleMs:win?win.settleMs:null,chainSettleMs:win?win.chainSettleMs:null,tailFraction:phase==="stage2"&&plateauStart!==null?1:.6,plateauFallback,basisDetail:phase==="stage2"?(plateauFallback?"late peak; last 1.2 s regression (settle "+((win&&win.settleMs)||0)+" ms)":(plateauStart!==null?"after refill peak + 1.5 s (settle "+((win&&win.settleMs)||0)+" ms); plateau regression":(win?"refill settle "+win.settleMs+" ms; final 60% regression":"final 60% regression"))):"final 60% of phase regression",basis:"actual RAW g/s; rolling regressions over the plateau (S2) or final60% (S1/S3), separate from normalized learning model"};
+      windowSettleMs:win?win.settleMs:null,chainSettleMs:win?win.chainSettleMs:null,tailFraction:phase==="stage2"&&plateauStart!==null?1:.6,plateauFallback,reducedWindow,basisDetail:phase==="stage2"?(plateauFallback?"late peak; last 1.2 s regression (settle "+((win&&win.settleMs)||0)+" ms)":(plateauStart!==null?"after refill peak + 1.5 s (settle "+((win&&win.settleMs)||0)+" ms); plateau regression":(win?"refill settle "+win.settleMs+" ms; final 60% regression":"final 60% regression"))):"final 60% of phase regression",basis:"actual RAW g/s; rolling regressions over the plateau (S2) or final60% (S1/S3), separate from normalized learning model"};
   }
 
   // Steady-tail machine gain: cup flow (RAW) divided by the machine's own flow
@@ -8923,6 +8975,17 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         const fast=s2RefillFlowEstimate(t);
         if(fast&&fast.predicted>=target){row.reason="S2 approach rising response; hold for inertia";return;}
       }
+      // 2.2.46 post-refill upward hold: during the settling window after a refill
+      // return, an upward candidate driven by the decaying-overshoot prediction is
+      // held (rescue excepted). Real undershoot is still corrected once the window
+      // closes; the down-hold already guards the symmetric case.
+      if(state.phase==="stage2"&&!rescueActive&&!handover&&t.startup&&t.startup.status==="complete"&&t.startup.plan&&t.startup.plan.strategy==="refill-85"&&Number.isFinite(t.startup.completedAt)&&Date.now()-t.startup.completedAt<S2_POST_REFILL_UP_HOLD_MS&&decisionGS<target&&reg.slope<=target*1.04){row.reason="s2-post-refill-up-hold";return;}
+      // 2.2.46 S3 entry reverse-write guard: in the entry coast window the S2->S3
+      // decay can make the prediction dip below target while the measured cup is
+      // still far above it; the ordinary law then writes UP into an overshoot
+      // (field: +4 quanta at raw 2.31 vs target 1.5). Hold any upward write while
+      // the measured cup is still >1.2x target inside the entry window.
+      if(state.phase==="stage3"&&Number(state.stage3StartedAtMs)>0&&Date.now()-Number(state.stage3StartedAtMs)<3500&&reg.slope>target*1.2&&decisionGS<target){row.reason="S3 entry overshoot; hold upward correction";return;}
       if(state.phase==="stage3"&&reg.slope<target&&t.refCommand==null){
         // No fixed anti-ripple interval: the trend statistics gate writes. The predicted
         // rise keeps the direction angle from overshooting while the trend is still climbing.

@@ -54,3 +54,25 @@
 - `release/ProfileReplayer-v1.1-debug.apk`（已装机）、`release/ProfileRecorder_v1.0.0.zip`、`release/__build_pr100.ps1`（已提交）。
 - `.tools/__pr-install.cjs` / `.tools/__cdp-eval.cjs`：安装与 CDP 探针（.tools 不入库）。
 
+## 6. GitHub 仓库与发版（2026-11-14 已推，用户授权）
+
+本轮新建了两个**公开**仓库（recorder 要能被平板 Decaid 从 GitHub Release 装，必须公开），各自独立、不带工作区里别人未提交的改动：
+
+| 仓库 | 内容 | Release |
+|------|------|---------|
+| `ladiosupp/profilerecorder` | recorder 插件（plugin.js / manifest / README / LICENSE / tests，archive-core 附在 tests/ 下） | v1.0.0，带 `ProfileRecorder_v1.0.0.zip`（根目录 profilerecorder.reaplugin/） |
+| `ladiosupp/profilereplayer` | App 全套（app/www + app/src + gradle + sim/archive-core + tools + APK） | v1.1，带 `ProfileReplayer-v1.1-debug.apk` |
+
+- 平板装/更新 recorder：Decaid → Plugins → Install plugin → GitHub Release → `ladiosupp/profilerecorder`。
+- 推送走本机 VPN 代理 `127.0.0.1:57890`（`HTTPS_PROXY`/`HTTP_PROXY`），gh 登录 ladiosupp。
+- 独立仓库的两处自洽调整：recorder 测试 require 改成 `tests/archive-core.js`（26/26 仍过）；`tablet-sync.ps1` 的 hx-archive 路径改成可配置（`-Adb` 覆盖 adb 路径，合并仍用 hx-archive.mjs）。
+- 本地 `decenthyperexplugin` 仓库的三个提交（5cbb0b0 / c297f8b / d9d689d）仍在原处，**没动它的远端 origin**。
+- 干净仓库的 staging 目录在 `.tools/gh-profilerecorder` / `.tools/gh-profilereplayer`（.tools 不入库，可删）。
+
+## 7. profilelibrary 已拉回本地（2026-11-14）
+
+- `ladiosupp/profilelibrary`（公开，Profiles Library v2.0.0 插件）已克隆到 **`D:\vscode\profilelibrary`**。
+- 内容：plugin.js / manifest.json / README / LICENSE / SOURCES.md / WORK_HANDOFF.md + snapshot/（离线快照）+ release/（ZIP）。3 个提交，HEAD `0bce7dd`。
+- 与本轮 recorder/replayer 无代码耦合，独立项目。
+
+

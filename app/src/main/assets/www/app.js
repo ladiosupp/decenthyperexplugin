@@ -41,6 +41,12 @@ const EN = {
   '归档已达': 'Archive reached', '，建议压缩备份后清理。': '; compress a backup, then trim.',
   '压缩中…': 'Compressing…', '已导出': 'Exported', '已清理最旧': 'Trimmed oldest', '杯': 'shots',
   '分享不可用（浏览器环境请用导出）': 'Share unavailable (use export in browser)',
+  '后台抓取未在白名单': 'Background fetch not whitelisted',
+  '可能被系统杀掉，后台抓取会停。': 'may be killed by the system; background fetch will stop.',
+  '去设置白名单': 'Open whitelist settings',
+  '后台已攒': 'Background buffered',
+  '杯 · 上次抓取': 'shots · last fetch',
+  '从未': 'never',
 };
 function t(s) { return lang === 'en' && EN[s] != null ? EN[s] : s; }
 function applyLang() {
@@ -103,7 +109,15 @@ function escapeHtml(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '
 async function saveArchive() { await dbSet('archive', archive); renderArchiveInfo(); }
 function renderArchiveInfo() {
   if (!archive) { $('archiveInfo').textContent = t('空'); return; }
-  $('archiveInfo').textContent = archive.count + ' ' + t('杯') + ' · ' + archive.fullRecordCount + ' ' + t('杯有全点') + ' · ' + t('更新') + ' ' + (archive.updatedAt || '').replace('T', ' ').slice(0, 19);
+  let line = archive.count + ' ' + t('杯') + ' · ' + archive.fullRecordCount + ' ' + t('杯有全点') + ' · ' + t('更新') + ' ' + (archive.updatedAt || '').replace('T', ' ').slice(0, 19);
+  if (window.HxBridge && window.HxBridge.fetchStatus) {
+    try {
+      const fs = JSON.parse(window.HxBridge.fetchStatus());
+      const when = fs.lastFetchAt ? new Date(fs.lastFetchAt).toLocaleString() : t('从未');
+      line += '\n' + t('后台已攒') + ' ' + fs.bufferCups + ' ' + t('杯 · 上次抓取') + ' ' + when;
+    } catch (e) {}
+  }
+  $('archiveInfo').textContent = line;
 }
 async function mergeIncoming(json, label) {
   const res = HxArchive.merge(archive || HxArchive.emptyArchive(), json, MAX_SHOTS);
@@ -766,6 +780,56 @@ function initChartDrag() {
   });
 }
 
+// ---- 后台 buffer 合并（冷启动 / 回前台都走这里）----
+let mergingPending = false;
+async function mergePending() {
+  if (!window.HxBridge || mergingPending) return;
+  mergingPending = true;
+  try {
+    const pending = window.HxBridge.takePending();
+    if (pending) {
+      // buffer 是归档形状 {kind:HyperExHistoryArchive,shots}；兼容旧 {hyperex,recorder} 与单份导出。
+      let st = { newShots: 0, fullUpdated: 0 };
+      const parsed = JSON.parse(pending);
+      if (parsed && (parsed.hyperex || parsed.recorder)) {
+        if (parsed.hyperex) { const r = await mergeIncoming(parsed.hyperex, 'background'); st.newShots += r.newShots; st.fullUpdated += r.fullUpdated; }
+        if (parsed.recorder) { const r = await mergeIncoming(parsed.recorder, 'background-recorder'); st.newShots += r.newShots; st.fullUpdated += r.fullUpdated; }
+      } else {
+        st = await mergeIncoming(parsed, 'background');
+      }
+      if (st.newShots || st.fullUpdated) {
+        setStatus(() => t('后台抓取已合并 · 新增') + ' ' + st.newShots + ' ' + t('杯') + ' · ' + t('补全') + ' ' + st.fullUpdated + ' ' + t('杯'));
+      }
+      await checkArchiveSize();
+    }
+  } catch (e) { /* 后台数据坏了就跳过，不影响手动抓取 */ }
+  mergingPending = false;
+  renderWhitelistWarning();
+}
+
+// ---- 白名单警示：不在电池优化白名单就提示，一键跳设置 ----
+function renderWhitelistWarning() {
+  let bar = $('whitelistBar');
+  if (!window.HxBridge || !window.HxBridge.isIgnoringBatteryOptimizations) { if (bar) bar.remove(); return; }
+  const ok = window.HxBridge.isIgnoringBatteryOptimizations();
+  if (ok) { if (bar) bar.remove(); return; }
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'whitelistBar';
+    bar.style.cssText = 'flex:none;background:#3d2c17;color:#f5c078;padding:8px 16px;font-size:13px;display:flex;align-items:center;gap:10px;border-bottom:1px solid #5a4326';
+    const msg = document.createElement('span');
+    msg.style.flex = '1';
+    msg.textContent = t('后台抓取未在白名单') + '，' + t('可能被系统杀掉，后台抓取会停。');
+    const btn = document.createElement('button');
+    btn.textContent = t('去设置白名单');
+    btn.style.cssText = 'background:#e8833a;color:#1a1208;padding:6px 12px;font-size:13px;width:auto;margin:0';
+    btn.addEventListener('click', () => window.HxBridge.openBatterySettings());
+    bar.appendChild(msg); bar.appendChild(btn);
+    const main = document.querySelector('main');
+    document.body.insertBefore(bar, main);
+  }
+}
+
 // ---- 启动 ----
 (async () => {
   await openDb();
@@ -778,30 +842,18 @@ function initChartDrag() {
   if (savedLang === 'en' || savedLang === 'zh') { lang = savedLang; $('lang').value = lang; }
   applyChartOrder(await dbGet('chartOrder'));
   initChartDrag();
-  // APK 后台服务抓回的原始导出：打开 App 时合并进归档
   if (window.HxBridge) {
-    try {
-      const pending = window.HxBridge.takePending();
-      if (pending) {
-        // 新格式 {hyperex, recorder}；旧格式是单份导出 JSON，兼容。
-        let st = { newShots: 0, fullUpdated: 0 };
-        const parsed = JSON.parse(pending);
-        if (parsed && (parsed.hyperex || parsed.recorder)) {
-          if (parsed.hyperex) { const r = await mergeIncoming(parsed.hyperex, 'background'); st.newShots += r.newShots; st.fullUpdated += r.fullUpdated; }
-          if (parsed.recorder) { const r = await mergeIncoming(parsed.recorder, 'background-recorder'); st.newShots += r.newShots; st.fullUpdated += r.fullUpdated; }
-        } else {
-          st = await mergeIncoming(parsed, 'background');
-        }
-        setStatus(() => t('后台抓取已合并 · 新增') + ' ' + st.newShots + ' ' + t('杯') + ' · ' + t('补全') + ' ' + st.fullUpdated + ' ' + t('杯'));
-        await checkArchiveSize();
-      }
-    } catch (e) { /* 后台数据坏了就跳过，不影响手动抓取 */ }
+    await mergePending();
     window.HxBridge.setAutoFetch($('srcUrl').value.trim(), $('autoOn').checked ? Number($('autoSec').value) : 0);
+    // 回前台自动合并：MainActivity.onResume 发 hxresume，visibilitychange 双保险。
+    window.addEventListener('hxresume', () => { mergePending(); });
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) mergePending(); });
   }
   renderArchiveInfo();
   rebuildCupList();
   if (await dbGet('autoOn')) { $('autoOn').checked = true; startAuto(); }
   applyLang();
+  renderWhitelistWarning();
   setStatus(() => archive.count ? t('就绪') + ' · ' + t('归档') + ' ' + archive.count + ' ' + t('杯') : t('就绪') + ' · ' + t('归档为空，先抓取或导入'));
 })().catch((e) => setStatus(() => t('初始化失败：') + (e.message || e)));
 

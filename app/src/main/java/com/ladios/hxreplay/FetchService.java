@@ -14,16 +14,21 @@ import android.os.Looper;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 
-// 后台定时抓取 Decaid 导出（HyperEx + recorder 两路），原始 JSON 落盘；
-// App 打开时经 HxBridge.takePending 合并。recorder 404（未装）静默跳过。
+// 后台定时抓取 Decaid 导出（HyperEx + recorder 两路），每轮累积合并进持久 buffer
+// （最近 60 杯，runId 去重、分量取最长）。App 只是展示层：用户几天不开 App，
+// 数据也在服务里攒着不丢；回前台经 HxBridge.takePending 一次性合并进归档。
 public class FetchService extends Service {
     private static final String CHANNEL = "hxreplay-fetch";
     private static final String RECORDER_PATH = "/api/v1/plugins/profilerecorder.reaplugin/history-export";
+    private static final int BUFFER_MAX_SHOTS = 60;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private Runnable tick;
 
@@ -61,6 +66,7 @@ public class FetchService extends Service {
     }
 
     private String httpGet(String url) {
+        if (url == null) return null;
         try {
             HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
             c.setConnectTimeout(5000);
@@ -86,15 +92,50 @@ public class FetchService extends Service {
         }
     }
 
+    private File bufferFile() {
+        return new File(getFilesDir(), "pending-buffer.json");
+    }
+
+    private JSONObject readBuffer() {
+        try {
+            File f = bufferFile();
+            if (!f.exists()) return MergeCore.emptyArchive();
+            String s = new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
+            JSONObject j = new JSONObject(s);
+            if (j.optJSONArray("shots") == null) return MergeCore.emptyArchive();
+            return j;
+        } catch (Exception e) {
+            try { return MergeCore.emptyArchive(); } catch (Exception ignored) { return new JSONObject(); }
+        }
+    }
+
+    private void writeBuffer(JSONObject archive) {
+        try {
+            File f = bufferFile();
+            File tmp = new File(getFilesDir(), "pending-buffer.tmp");
+            FileOutputStream fos = new FileOutputStream(tmp);
+            fos.write(archive.toString().getBytes(StandardCharsets.UTF_8));
+            fos.close();
+            if (f.exists()) f.delete();
+            tmp.renameTo(f);
+        } catch (Exception ignored) {
+        }
+    }
+
     private void fetch(String url) {
         String hyperex = httpGet(url);
-        if (hyperex == null) return;
         String recorder = httpGet(recorderUrl(url));
+        if (hyperex == null && recorder == null) return;
         try {
-            JSONObject pending = new JSONObject();
-            pending.put("hyperex", new JSONObject(hyperex));
-            if (recorder != null) pending.put("recorder", new JSONObject(recorder));
-            getSharedPreferences("hx", MODE_PRIVATE).edit().putString("pending", pending.toString()).apply();
+            JSONObject buffer = readBuffer();
+            if (hyperex != null) buffer = MergeCore.merge(buffer, new JSONObject(hyperex), BUFFER_MAX_SHOTS);
+            if (recorder != null) buffer = MergeCore.merge(buffer, new JSONObject(recorder), BUFFER_MAX_SHOTS);
+            writeBuffer(buffer);
+            SharedPreferences sp = getSharedPreferences("hx", MODE_PRIVATE);
+            sp.edit()
+                .putLong("lastFetchAt", System.currentTimeMillis())
+                .putInt("bufferCups", buffer.optInt("count", 0))
+                .apply();
         } catch (Exception ignored) {
         }
     }

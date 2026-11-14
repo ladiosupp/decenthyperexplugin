@@ -8,6 +8,16 @@
 node sim/server.js
 ```
 
+## 桌面入口（2026-11-14）
+
+- `sim/make-desktop-shortcut.vbs`：双击一次，在桌面生成「HyperEx sim」快捷方式
+  （已生成过就刷新）。
+- 快捷方式 → `sim/launch-sim.vbs`：无黑窗。先探 4780 是否就绪；没起就隐藏启动
+  `node server.js`（依赖只有 Node 本身，仿真核心全用内置模块，无需 npm install），
+  轮询就绪后打开默认浏览器；Node 缺失或起不来会弹窗说明。服务已在跑时直接开页面，
+  不重复起进程。
+- 服务进程脱离启动器存活，关浏览器/关启动窗口不影响；要停服务就结束对应 node 进程。
+
 浏览器打开 http://127.0.0.1:4780 （只监听 127.0.0.1）。页面加载后会自动跑一次默认场景；改左侧参数再点「运行仿真」。
 
 命令行跑一次（默认 active 主动泄压；回放出杯用 `replay`）：
@@ -96,6 +106,24 @@ node sim/harness.js '{"mode":"continuous","plant":{"paperCondition":0.65,"pump":
 - 摘要卡显示各阶段实测与差值、写入/检查次数、结束重量与用时、S2 补水计划。
 - 「保存为对照」后，流量和重量图会叠加灰色虚线，方便比较两组参数。
 - 「导出本次 JSON」拿到完整序列（series / writes / trace / summary），可以离线画图或做回归。
+
+## 帧重放（/replay，2026-11-14）
+
+独立的逐帧查看器，**不跑插件**：直接读历史归档（默认
+`D:/vscode/.tools/hx-data/hyperex-history-all.json`，页面可改路径）里任意一杯的
+全点数据，按原始帧回放。主页头部「帧重放 →」进入。
+
+- 选杯：列出归档里有全点/事件的杯（逐帧杯用 `fullRecord.rawScaleSamples`，
+  没有 raw 时退到 `samples`；只剩事件的杯显示事件时间线，点行看完整 data）。
+- 播放：顺放 / 倒放 / 暂停、±1 / ±10 帧、首帧 / 末帧、上一个 / 下一个事件、
+  0.1×–10× 变速、循环；进度条拖动、点曲线定位；快捷键 空格 / ←→（Shift ×10）/
+  Home / End / PageUp / PageDown。
+- 视图：三张曲线（杯流 decaid + 可选 RAW dW/dt 叠加、秤重 + 插件累计、
+  压力 + 机器流量 + 目标指令）带当前帧游标与时刻标签；数值卡随帧刷新
+  （相位 / 逻辑帧 / 物理帧 / tare 标记）；事件 + 调流 trace 合并时间线随帧高亮。
+- 接口：`GET /api/frame/shots?file=`（杯列表）、`GET /api/frame/cup?file=&index=`
+  （单杯全点 + 合并日志），只读、按文件 mtime 缓存。
+- 回归：`node sim/tests/frame-replay-check.cjs`（需 server 在跑，18 项）。
 
 ## 回放真实录制出杯
 

@@ -38,6 +38,12 @@ button.ghost{width:100%;margin-top:8px}
 .good{color:#7ed492}.warn{color:#e9c276}.bad{color:#f2909a}
 .chartbox{background:#171a1f;border:1px solid #262a31;border-radius:10px;padding:8px 10px 4px;margin-bottom:10px;flex:none}
 .chartbox h3{margin:2px 0 4px;font-size:12px;color:#aab2bf;font-weight:600;display:flex;justify-content:space-between;align-items:center}
+.charthandle{flex:none;cursor:grab;color:#5b6472;padding:2px 8px;margin:-2px 0 -2px -6px;border-radius:6px;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;font-size:13px;letter-spacing:1px}
+.charthandle:hover{color:#9aa3b2;background:#222732}
+.chartbox.dragging{opacity:.35}
+.chartbox.drop-target{border-color:#e8833a;box-shadow:0 0 0 1px rgba(232,131,58,.4)}
+.chartghost{position:fixed;left:0;top:0;z-index:99;margin:0;pointer-events:none;opacity:.92;border-color:#e8833a;box-shadow:0 10px 30px rgba(0,0,0,.55);will-change:transform}
+body.chart-dragging{cursor:grabbing;user-select:none;-webkit-user-select:none}
 canvas{width:100%;height:150px;display:block;touch-action:none}
 .events{background:#171a1f;border:1px solid #262a31;border-radius:10px;padding:8px 10px;font:12px ui-monospace,monospace;color:#aeb6c2;max-height:220px;overflow:auto;flex:none}
 .events .row{display:flex;gap:8px;padding:4px 6px;border-radius:6px;cursor:pointer;white-space:nowrap}
@@ -80,6 +86,10 @@ input[type=range]:disabled{opacity:.4;cursor:default}
 </header>
 <main>
 <aside>
+  <fieldset><legend data-i18n="选择杯">选择杯</legend>
+    <select id="cup"><option>—</option></select>
+    <div class="note" id="cupInfo"></div>
+  </fieldset>
   <fieldset><legend data-i18n="数据源 · Decaid 地址">数据源 · Decaid 地址</legend>
     <input type="url" id="srcUrl" data-i18n-ph="http://平板IP:端口/api/v1/plugins/decenthyperexplugin.reaplugin/history-export" placeholder="http://平板IP:端口/api/v1/plugins/decenthyperexplugin.reaplugin/history-export">
     <button class="primary" id="fetchNow" data-i18n="抓取并合并">抓取并合并</button>
@@ -96,10 +106,6 @@ input[type=range]:disabled{opacity:.4;cursor:default}
     <div class="note" id="archiveInfo">—</div>
     <button class="ghost" id="exportArchive" data-i18n="导出归档 JSON">导出归档 JSON</button>
     <button class="ghost" id="clearArchive" style="color:#f2909a" data-i18n="清空归档">清空归档</button>
-  </fieldset>
-  <fieldset><legend data-i18n="选择杯">选择杯</legend>
-    <select id="cup"><option>—</option></select>
-    <div class="note" id="cupInfo"></div>
   </fieldset>
 </aside>
 <section class="view">
@@ -122,9 +128,9 @@ input[type=range]:disabled{opacity:.4;cursor:default}
     <input type="range" id="scrub" min="0" max="0" value="0" step="1" disabled>
   </div>
   <div class="cards" id="cards"></div>
-  <div class="chartbox"><h3><span data-i18n="杯流 (g/s)">杯流 (g/s)</span><label class="rawtoggle"><input type="checkbox" id="rawToggle"> RAW dW/dt</label></h3><canvas id="cFlow"></canvas></div>
-  <div class="chartbox"><h3><span data-i18n="秤重 (g)">秤重 (g)</span></h3><canvas id="cWeight"></canvas></div>
-  <div class="chartbox"><h3><span data-i18n="压力 (bar) · 流量 (ml/s)">压力 (bar) · 流量 (ml/s)</span></h3><canvas id="cPress"></canvas></div>
+  <div class="chartbox" data-chart="cFlow"><h3><span class="charthandle" title="长按拖动排序">⠿</span><span data-i18n="杯流 (g/s)">杯流 (g/s)</span><label class="rawtoggle"><input type="checkbox" id="rawToggle"> RAW dW/dt</label></h3><canvas id="cFlow"></canvas></div>
+  <div class="chartbox" data-chart="cWeight"><h3><span class="charthandle" title="长按拖动排序">⠿</span><span data-i18n="秤重 (g)">秤重 (g)</span></h3><canvas id="cWeight"></canvas></div>
+  <div class="chartbox" data-chart="cPress"><h3><span class="charthandle" title="长按拖动排序">⠿</span><span data-i18n="压力 (bar) · 流量 (ml/s)">压力 (bar) · 流量 (ml/s)</span></h3><canvas id="cPress"></canvas></div>
   <div class="events" id="log"></div>
 </section>
 </main>

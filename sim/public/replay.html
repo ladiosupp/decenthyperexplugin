@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HyperEx 帧重放</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#121418;color:#e8eaee;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif}
+header{display:flex;align-items:baseline;gap:14px;padding:14px 20px;border-bottom:1px solid #262a31;background:#171a1f}
+h1{font-size:17px;margin:0;letter-spacing:.02em}
+header .meta{color:#8b93a1;font-size:12px}
+header .status{margin-left:auto;font-size:12px;color:#9fd4a8}
+header .status.busy{color:#e9c276}
+header a{color:#6ea8fe;font-size:12px;text-decoration:none}
+main{display:grid;grid-template-columns:330px minmax(0,1fr);gap:0;min-height:calc(100vh - 53px)}
+aside{border-right:1px solid #262a31;padding:16px;overflow-y:auto;max-height:calc(100vh - 53px)}
+section.view{padding:16px 20px;overflow-y:auto;max-height:calc(100vh - 53px)}
+fieldset{border:1px solid #2b3038;border-radius:10px;margin:0 0 12px;padding:10px 12px}
+legend{font-size:11px;letter-spacing:.08em;color:#8b93a1;padding:0 4px}
+label{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:6px 0;font-size:12px;color:#c6ccd6}
+label input[type=text],label select{background:#0e1116;color:#e8eaee;border:1px solid #333a44;border-radius:6px;padding:4px 6px;font:12px ui-monospace,monospace}
+label input[type=text]{width:100%;min-width:0}
+label select{width:100%;min-width:0}
+label.stack{display:block}
+label.stack select,label.stack input{margin-top:4px}
+button{border:0;border-radius:8px;padding:9px 12px;font-size:13px;font-weight:700;cursor:pointer}
+button.primary{background:#e8833a;color:#1a1208;width:100%;margin-top:4px}
+button.ghost{background:#2a2f37;color:#cfd5de;width:100%;margin-top:8px}
+button:disabled{opacity:.5;cursor:default}
+button{transition:filter .12s,transform .08s}
+.charthead{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.rawtoggle{display:flex;align-items:center;gap:5px;margin:0;font-size:11px;color:#8b93a1;cursor:pointer;font-weight:400}
+.rawtoggle input{width:13px;height:13px;margin:0}
+button:not(:disabled):hover{filter:brightness(1.15)}
+button:not(:disabled):active{transform:scale(.96)}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#2b3038;border-radius:5px;border:2px solid #121418}
+::-webkit-scrollbar-thumb:hover{background:#3a4150}
+*{scrollbar-width:thin;scrollbar-color:#2b3038 transparent}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px}
+.card{background:#191d23;border:1px solid #2a2f38;border-radius:10px;padding:10px 12px}
+.card{transition:border-color .15s}
+.card:hover{border-color:#3a4150}
+.card .k{font-size:11px;color:#8b93a1}
+.card .v{font-size:18px;font-weight:700;margin-top:3px;font-variant-numeric:tabular-nums}
+.card .s{font-size:11px;color:#8b93a1;margin-top:2px}
+.good{color:#7ed492}.warn{color:#e9c276}.bad{color:#f2909a}
+.chartbox{background:#171a1f;border:1px solid #262a31;border-radius:10px;padding:8px 10px 4px;margin-bottom:12px}
+.chartbox h3{margin:2px 0 4px;font-size:12px;color:#aab2bf;font-weight:600}
+.charthead .charthandle{flex:none;cursor:grab;color:#5b6472;padding:2px 8px;margin:-2px 0 -2px -6px;border-radius:6px;touch-action:none;user-select:none;font-size:13px;letter-spacing:1px}
+.charthandle:hover{color:#9aa3b2;background:#222732}
+.chartbox.dragging{opacity:.35}
+.chartbox.drop-target{border-color:#e8833a;box-shadow:0 0 0 1px rgba(232,131,58,.4)}
+.chartghost{position:fixed;left:0;top:0;z-index:99;margin:0;pointer-events:none;opacity:.92;border-color:#e8833a;box-shadow:0 10px 30px rgba(0,0,0,.55);will-change:transform}
+body.chart-dragging{cursor:grabbing;user-select:none}
+canvas{width:100%;height:180px;display:block}
+.events{background:#171a1f;border:1px solid #262a31;border-radius:10px;padding:10px 12px;font:11px ui-monospace,monospace;color:#aeb6c2;max-height:260px;overflow:auto}
+.events .row{display:flex;gap:8px;padding:1px 4px;border-radius:4px;cursor:pointer;white-space:nowrap}
+.events .row:hover{background:#222732}
+.events .row.now{background:#2c3442;color:#e8eaee}
+.events .row.trace .tag{color:#d5a8f5}
+.events .row:not(.trace) .tag{color:#9cc0ff}
+.events .row .t{color:#7d8592;flex:none;width:64px;text-align:right}
+.events .row .tag{flex:none;width:150px;overflow:hidden;text-overflow:ellipsis}
+.events .row .d{overflow:hidden;text-overflow:ellipsis}
+.note{font-size:11px;color:#8b93a1;margin:8px 0 0}
+.transport{position:sticky;top:-16px;z-index:5;background:#171a1f;border:1px solid #2a2f38;border-radius:10px;padding:10px 12px;margin-bottom:14px}
+.tbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.tbar button{padding:6px 10px;font-size:13px;background:#2a2f37;color:#cfd5de;min-width:38px}
+.tbar button.play{background:#e8833a;color:#1a1208;min-width:74px}
+.tbar button.play.active{box-shadow:0 0 0 2px rgba(232,131,58,.35)}
+.tbar select{background:#0e1116;color:#e8eaee;border:1px solid #333a44;border-radius:6px;padding:5px 6px;font:12px ui-monospace,monospace}
+.tbar label{margin:0;font-size:12px}
+.tbar .pos{margin-left:auto;font:12px ui-monospace,monospace;color:#c6ccd6;font-variant-numeric:tabular-nums}
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:22px;background:transparent;margin:6px 0 0;cursor:pointer}
+input[type=range]::-webkit-slider-runnable-track{height:6px;border-radius:3px;background:#2b3038}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:14px;height:14px;border-radius:50%;background:#e8833a;margin-top:-4px;border:0}
+input[type=range]::-moz-range-track{height:6px;border-radius:3px;background:#2b3038}
+input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:#e8833a;border:0}
+input[type=range]:disabled{opacity:.4;cursor:default}
+.phasepill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:700;background:#2a2f37;color:#cfd5de}
+.evdata{margin:4px 0 0;font:11px ui-monospace,monospace;color:#c6ccd6;white-space:pre-wrap;max-height:220px;overflow:auto}
+@media (max-width:900px){main{grid-template-columns:1fr}aside{max-height:none;border-right:0;border-bottom:1px solid #262a31}section.view{max-height:none}}
+</style>
+</head>
+<body>
+<header>
+  <h1>HyperEx 帧重放</h1>
+  <span class="meta" id="meta">历史归档 · 逐帧查看 · 不跑插件</span>
+  <a href="/">← 返回仿真台</a>
+  <span class="status" id="status">载入中…</span>
+</header>
+<main>
+<aside>
+  <fieldset><legend>数据源</legend>
+    <label class="stack">归档 JSON 路径<input id="file" type="text" value="D:/vscode/.tools/hx-data/hyperex-history-all.json"></label>
+    <button class="ghost" id="load">载入归档</button>
+    <label class="stack" style="margin-top:8px">选择杯<select id="cup"><option>—</option></select></label>
+    <p class="note" id="srcNote"></p>
+  </fieldset>
+  <fieldset><legend>本杯概要</legend>
+    <div id="cupInfo" class="note">尚未载入。</div>
+  </fieldset>
+  <fieldset><legend>快捷键</legend>
+    <p class="note">空格 播放/暂停 · ←/→ 逐帧（Shift ×10） · Home/End 首帧/末帧 · PageUp/PageDown 上一个/下一个事件</p>
+  </fieldset>
+</aside>
+<section class="view">
+  <div class="transport">
+    <div class="tbar">
+      <button id="btnStart" title="跳到开头">⏮︎</button>
+      <button id="btnPrevEv" title="上一个事件">⏪︎</button>
+      <button id="btnBack10" title="后退 10 帧">−10</button>
+      <button id="btnBack1" title="后退 1 帧">−1</button>
+      <button id="btnRev" class="play" title="倒放">◀ 倒放</button>
+      <button id="btnPlay" class="play" title="顺放">顺放 ▶</button>
+      <button id="btnFwd1" title="前进 1 帧">+1</button>
+      <button id="btnFwd10" title="前进 10 帧">+10</button>
+      <button id="btnNextEv" title="下一个事件">⏩︎</button>
+      <button id="btnEnd" title="跳到结尾">⏭︎</button>
+      <select id="speed" title="播放速度">
+        <option value="0.1">0.1×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option>
+        <option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option><option value="10">10×</option>
+      </select>
+      <label><input type="checkbox" id="loop"> 循环</label>
+      <span class="pos" id="pos">— / —</span>
+    </div>
+    <input type="range" id="scrub" min="0" max="0" value="0" step="1" disabled>
+  </div>
+  <div class="cards" id="cards"></div>
+  <div class="chartbox" data-chart="cFlow"><h3 class="charthead"><span class="charthandle" title="长按拖动排序">⠿</span>杯流 (g/s)<label class="rawtoggle"><input type="checkbox" id="rawToggle"> RAW dW/dt 叠加</label></h3><canvas id="cFlow"></canvas></div>
+  <div class="chartbox" data-chart="cWeight"><h3 class="charthead"><span class="charthandle" title="长按拖动排序">⠿</span>秤重 (g)：当前读数 · 插件累计</h3><canvas id="cWeight"></canvas></div>
+  <div class="chartbox" data-chart="cPress"><h3 class="charthead"><span class="charthandle" title="长按拖动排序">⠿</span>压力 (bar) · 流量指令 (ml/s)</h3><canvas id="cPress"></canvas></div>
+  <div class="chartbox"><h3>事件与调流轨迹（点击行跳到该时刻）</h3><div class="events" id="log"></div></div>
+</section>
+</main>
+<script src="/replay.js"></script>
+</body>
+</html>
+

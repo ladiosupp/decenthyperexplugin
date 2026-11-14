@@ -227,7 +227,8 @@ function rebuildCupList() {
     const ev = (fr.events || []).length;
     const tr = fr.liveFlowTrim && (fr.liveFlowTrim.trace || []).length || 0;
     return { index: i, runId: s.runId, startedAt: s.startedAt, result: s.result, raw, samples: sm, events: ev, trace: tr, playable: raw + sm > 0 };
-  }).filter((c) => c.playable || c.events + c.trace > 0);
+  }).filter((c) => c.playable || c.events + c.trace > 0)
+    .sort((a, b) => (Date.parse(b.startedAt) || 0) - (Date.parse(a.startedAt) || 0));
   const sel = $('cup');
   const prev = sel.value;
   sel.innerHTML = cups.map((c) => {
@@ -238,8 +239,8 @@ function rebuildCupList() {
   }).join('');
   if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
   else if (cups.length) {
-    const lastPlayable = cups.map((c, i) => c.playable ? i : -1).filter((i) => i >= 0).pop();
-    sel.value = String(cups[lastPlayable != null ? lastPlayable : 0].index);
+    const newestPlayable = cups.find((c) => c.playable);
+    sel.value = String((newestPlayable || cups[0]).index);
   }
   if (cups.length) loadCup(Number(sel.value));
 }
@@ -497,6 +498,24 @@ function buildCharts() {
       yMin = Math.min(yMin, v); yMax = Math.max(yMax, v);
     }
     if (!Number.isFinite(yMin)) { yMin = 0; yMax = 1; }
+    // RAW 差分有孤立尖峰（秤时间戳量化）：只约束 RAW 线——轴按其 p99 定，画时跳过突变值
+    let rawCap = Infinity;
+    const rawLine = lines.find((l) => l.label === 'RAW dW/dt');
+    if (rawLine) {
+      const rv = [];
+      for (const f of frames) { const v = rawLine.get(f); if (v != null && Number.isFinite(v)) rv.push(v); }
+      if (rv.length > 20) {
+        rv.sort((a, b) => a - b);
+        rawCap = rv[Math.floor((rv.length - 1) * 0.99)];
+        yMax = -Infinity;
+        for (const ln of lines) for (const f of frames) {
+          let v = ln.get(f);
+          if (v == null || !Number.isFinite(v)) continue;
+          if (ln === rawLine) v = Math.min(v, rawCap);
+          yMax = Math.max(yMax, v);
+        }
+      }
+    }
     if (!frames.length) { ctx.fillStyle = '#7d8592'; ctx.font = '12px sans-serif'; ctx.fillText(t('无帧数据（仅事件/轨迹）'), w / 2 - 78, h / 2); }
     if (yMin > 0) yMin = 0;
     const span = Math.max(0.5, yMax - yMin);
@@ -521,15 +540,17 @@ function buildCharts() {
     for (const ln of lines) {
       ctx.strokeStyle = ln.color; ctx.lineWidth = ln.width || 1.5;
       ctx.setLineDash(ln.dash || []);
+      ctx.save(); ctx.beginPath(); ctx.rect(pad.l, pad.t, w - pad.l - pad.r, h - pad.t - pad.b); ctx.clip();
       ctx.beginPath();
       let started = false;
       for (let i = 0; i < frames.length; i++) {
         const v = ln.get(frames[i]);
-        if (v == null || !Number.isFinite(v)) { started = false; continue; }
+        if (v == null || !Number.isFinite(v) || (ln === rawLine && v > rawCap)) { started = false; continue; }
         const px = x(frameTimes[i] / 1000), py = y(v);
         if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
       }
       ctx.stroke(); ctx.setLineDash([]);
+      ctx.restore();
     }
     ctx.font = '10px sans-serif';
     let lx = pad.l + 4;
@@ -543,7 +564,7 @@ function buildCharts() {
       }
       ctx.fillText(t('▲ 写入'), lx, pad.t + 9);
     }
-    chartGeo.push({ canvas, ctx, def: view, x, y, w, h, pad, dpr });
+    chartGeo.push({ canvas, ctx, def: view, x, y, w, h, pad, dpr, yMin, yMax });
   }
   chartsReady = true;
   for (const g of chartGeo) {
@@ -653,6 +674,98 @@ document.addEventListener('keydown', (ev) => {
 let resizeTimer = 0;
 window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (cup) { buildCharts(); chartBase = []; paint(); } }, 150); });
 
+// ---- 图表卡长按拖动排序（⠿ 把手；顺序持久化）----
+const CHART_IDS = ['cFlow', 'cWeight', 'cPress'];
+function chartBoxes() { return CHART_IDS.map((id) => document.querySelector('.chartbox[data-chart="' + id + '"]')).filter(Boolean); }
+function applyChartOrder(order) {
+  const view = document.querySelector('section.view');
+  const log = $('log');
+  const boxes = chartBoxes();
+  const byId = {};
+  boxes.forEach((b) => { byId[b.dataset.chart] = b; });
+  const seq = (Array.isArray(order) ? order : []).filter((id) => byId[id]);
+  CHART_IDS.forEach((id) => { if (!seq.includes(id)) seq.push(id); });
+  seq.forEach((id) => view.insertBefore(byId[id], log));
+}
+function saveChartOrder() {
+  const order = [...document.querySelectorAll('section.view .chartbox[data-chart]')].map((b) => b.dataset.chart);
+  dbSet('chartOrder', order);
+}
+function initChartDrag() {
+  const view = document.querySelector('section.view');
+  let drag = null;
+  const arm = (handle, ev) => {
+    if (drag || (ev.button != null && ev.button !== 0)) return;
+    const box = handle.closest('.chartbox');
+    const x0 = ev.clientX, y0 = ev.clientY;
+    const timer = setTimeout(() => begin(box, handle, x0, y0), 350);
+    const cancel = () => { clearTimeout(timer); handle.removeEventListener('pointermove', preMove); handle.removeEventListener('pointerup', cancel); handle.removeEventListener('pointercancel', cancel); };
+    const preMove = (e) => { if (Math.hypot(e.clientX - x0, e.clientY - y0) > 8) cancel(); };
+    handle.addEventListener('pointermove', preMove);
+    handle.addEventListener('pointerup', cancel);
+    handle.addEventListener('pointercancel', cancel);
+    handle.addEventListener('pointerdown', (e) => { if (drag) e.preventDefault(); }, { once: true });
+  };
+  const begin = (box, handle, x0, y0) => {
+    const rect = box.getBoundingClientRect();
+    const ghost = box.cloneNode(true);
+    ghost.classList.add('chartghost');
+    ghost.style.width = rect.width + 'px';
+    document.body.appendChild(ghost);
+    box.classList.add('dragging');
+    document.body.classList.add('chart-dragging');
+    drag = { box, ghost, dx: x0 - rect.left, dy: y0 - rect.top, target: null };
+    moveGhost(x0, y0);
+    if (navigator.vibrate) navigator.vibrate(10);
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+  };
+  const moveGhost = (x, y) => { drag.ghost.style.transform = 'translate(' + (x - drag.dx) + 'px,' + (y - drag.dy) + 'px)'; };
+  const onMove = (e) => {
+    if (!drag) return;
+    e.preventDefault();
+    moveGhost(e.clientX, e.clientY);
+    const boxes = chartBoxes().filter((b) => b !== drag.box);
+    let target = null;
+    for (const b of boxes) {
+      const r = b.getBoundingClientRect();
+      if (e.clientY >= r.top && e.clientY <= r.bottom) { target = { el: b, before: e.clientY < r.top + r.height / 2 }; break; }
+    }
+    if (!target && boxes.length) {
+      const first = boxes[0].getBoundingClientRect(), last = boxes[boxes.length - 1].getBoundingClientRect();
+      if (e.clientY < first.top) target = { el: boxes[0], before: true };
+      else if (e.clientY > last.bottom) target = { el: boxes[boxes.length - 1], before: false };
+    }
+    chartBoxes().forEach((b) => b.classList.remove('drop-target'));
+    if (target) {
+      target.el.classList.add('drop-target');
+      view.insertBefore(drag.box, target.before ? target.el : target.el.nextSibling);
+    }
+    drag.target = target;
+    const vr = view.getBoundingClientRect();
+    if (e.clientY < vr.top + 40) view.scrollTop -= 8;
+    else if (e.clientY > vr.bottom - 40) view.scrollTop += 8;
+  };
+  const onUp = () => {
+    if (!drag) return;
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    window.removeEventListener('pointercancel', onUp);
+    drag.ghost.remove();
+    drag.box.classList.remove('dragging');
+    document.body.classList.remove('chart-dragging');
+    chartBoxes().forEach((b) => b.classList.remove('drop-target'));
+    drag = null;
+    saveChartOrder();
+    if (cup) { buildCharts(); chartBase = []; paint(); }
+  };
+  document.querySelectorAll('.charthandle').forEach((h) => {
+    h.addEventListener('pointerdown', (ev) => arm(h, ev));
+    h.addEventListener('contextmenu', (ev) => ev.preventDefault());
+  });
+}
+
 // ---- 启动 ----
 (async () => {
   await openDb();
@@ -663,6 +776,8 @@ window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer
   if (savedSec) $('autoSec').value = savedSec;
   const savedLang = await dbGet('lang');
   if (savedLang === 'en' || savedLang === 'zh') { lang = savedLang; $('lang').value = lang; }
+  applyChartOrder(await dbGet('chartOrder'));
+  initChartDrag();
   // APK 后台服务抓回的原始导出：打开 App 时合并进归档
   if (window.HxBridge) {
     try {

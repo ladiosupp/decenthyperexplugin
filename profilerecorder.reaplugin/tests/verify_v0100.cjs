@@ -53,7 +53,7 @@ function setup(options = {}) {
       throw Error('unexpected fetch ' + url);
     }
   });
-  const injection = 'globalThis.hooks={state,extractMachine,noteMachine,handleStateUpdate,startRun,finishRun,sample,captureRawScaleSample,onScaleSnapshot,queueOwnership,probeOwnership,settleOwnership,hyperexMatches,appendHistory,trimHistory,persistHistory,onStorageRead,historyExportPayload,statusPayload,loadConfig,clearAllTimers,scheduleScaleReconnect,handleScaleTransportEvent,connectScaleStream,closeScaleStream};\n';
+  const injection = 'globalThis.hooks={state,extractMachine,noteMachine,handleStateUpdate,startRun,finishRun,sample,captureRawScaleSample,onScaleSnapshot,queueOwnership,probeOwnership,settleOwnership,hyperexMatches,isHyperExTitle,appendHistory,trimHistory,persistHistory,onStorageRead,historyExportPayload,statusPayload,loadConfig,clearAllTimers,scheduleScaleReconnect,handleScaleTransportEvent,connectScaleStream,closeScaleStream};\n';
   const token = '  return {\n    id: ID,';
   assert(source.includes(token), 'injection token missing');
   vm.runInContext(source.replace(token, injection + token), context);
@@ -68,13 +68,16 @@ function setup(options = {}) {
   function idle() { event('stateUpdate', { state: { state: 'idle', substate: 'idle' }, pressure: 0, flow: 0 }); }
   function shot(startMs, endMs, title) {
     clock = startMs;
-    if (title !== undefined) mock.workflowTitle = title;
+    // Ownership tests default to a HyperEx-titled shot so the probe path runs;
+    // pass an explicit non-HyperEx title to exercise the immediate-keep gate.
+    mock.workflowTitle = title !== undefined ? title : 'HyperEx Pulse Filter auto';
     event('workflowUpdated', { profile: { title: mock.workflowTitle } });
     espresso();
     for (let i = 1; i <= 5; i++) { clock = startMs + i * 1000; scaleData({ weight: i * 8, weightFlow: 2, timestamp: (startMs + i * 1000) / 1000 }); }
     clock = endMs;
     idle();
-    return h.state.pendingOwnership[h.state.pendingOwnership.length - 1];
+    // Title-gated (non-HyperEx) shots settle immediately: no pending entry.
+    return h.state.pendingOwnership[h.state.pendingOwnership.length - 1] || { run: h.state.historyFile.shots[h.state.historyFile.shots.length - 1], settled: true };
   }
   return { h, s: h.state, plugin, mock, storage, storageCalls, pendingReads, fetchCalls, logs, timers, run, runAll, event, deliverReads, scaleData, espresso, idle, shot, flush, advance(ms) { clock += ms; }, now() { return clock; }, setNow(ms) { clock = ms; } };
 }
@@ -111,12 +114,13 @@ test('extractMachine mirrors HyperEx shape and picks up temperatures', () => {
 // ---- lifecycle ----
 
 test('espresso starts a run; idle finalizes and queues ownership', async () => {
-  const e = loaded();
+  // HyperEx-titled so the run queues ownership probes (non-HyperEx titles keep immediately).
+  const e = loaded({ workflowTitle: 'HyperEx Pulse Filter auto' });
   await e.flush();
-  assert.equal(e.s.workflowTitle, 'Default Profile');
+  assert.equal(e.s.workflowTitle, 'HyperEx Pulse Filter auto');
   e.espresso();
   assert.equal(e.s.phase, 'recording'); assert(e.s.run); assert(e.s.run.runId.startsWith('pr-'));
-  assert.equal(e.s.run.profileTitle, 'Default Profile');
+  assert.equal(e.s.run.profileTitle, 'HyperEx Pulse Filter auto');
   e.advance(1000); e.scaleData({ weight: 10, weightFlow: 2, timestamp: e.now() / 1000 });
   e.advance(1000); e.idle();
   assert.equal(e.s.phase, 'idle'); assert.equal(e.s.run, null);
@@ -237,15 +241,69 @@ test('non-matching HyperEx summary (different cup) keeps the run', async () => {
   assert.equal(e.s.historyFile.shots.length, 1);
 });
 
-test('match windows: start ±5s, end ±10s', () => {
+test('match windows: start containment (preheat-safe), end ±10s', () => {
   const e = setup();
   const run = { startedAtMs: 1000000, endedAtMs: 1030000 };
   const sum = (s, en) => ({ runId: 'x', startedAt: new Date(s).toISOString(), endedAt: new Date(en).toISOString() });
   assert.equal(e.h.hyperexMatches(sum(1004999, 1039999), run), true);
-  assert.equal(e.h.hyperexMatches(sum(1005001, 1030000), run), false);
-  assert.equal(e.h.hyperexMatches(sum(1000000, 1040001), run), false);
+  assert.equal(e.h.hyperexMatches(sum(1005001, 1030000), run), true); // long preheat: pour confirmed 5s after espresso edge
+  assert.equal(e.h.hyperexMatches(sum(1029999, 1030000), run), true); // pour confirmed near the end still matches
+  assert.equal(e.h.hyperexMatches(sum(997999, 1030000), run), false); // earlier than 2s tolerance
+  assert.equal(e.h.hyperexMatches(sum(1030001, 1030000), run), false); // starts after our window ended
+  assert.equal(e.h.hyperexMatches(sum(1000000, 1040001), run), false); // end outside ±10s
   assert.equal(e.h.hyperexMatches(null, run), false);
   assert.equal(e.h.hyperexMatches({ runId: 'x' }, run), false);
+});
+
+test('long-preheat HyperEx shot is dropped, not duplicated', async () => {
+  const e = loaded({ workflowTitle: 'HyperEx Pulse Filter auto' });
+  await e.flush();
+  const start = e.now();
+  const entry = e.shot(start, start + 60000, 'HyperEx Pulse Filter auto');
+  // HyperEx stamps its start at confirmed pour, 20s after the espresso edge (cold-machine preheat).
+  e.mock.hyperexStatus = { diagnosticSummary: { runId: String(start + 20000) + '-1', startedAt: new Date(start + 20000).toISOString(), endedAt: new Date(start + 60500).toISOString() } };
+  await e.h.probeOwnership(entry);
+  assert.equal(entry.settled, true);
+  assert.equal(e.s.historyFile.shots.length, 0);
+  assert(e.logs.some(l => l.includes('Dropped')));
+});
+
+test('non-HyperEx title keeps the shot immediately, no probes scheduled', async () => {
+  const e = loaded();
+  await e.flush();
+  const start = e.now();
+  e.shot(start, start + 30000, 'John Weiss开发的拉杆程序');
+  assert.equal(e.s.pendingOwnership.length, 0);
+  assert.equal(e.s.historyFile.shots.length, 1);
+  assert.equal(e.s.historyFile.shots[0].profileTitle, 'John Weiss开发的拉杆程序');
+  for (const t of e.timers.values()) assert(![2000, 5000, 8000, 12000].includes(t.ms), 'ownership probe scheduled for non-HyperEx title');
+  assert(!e.fetchCalls.some(c => String(c.url).includes('/status')), 'HyperEx status fetched for non-HyperEx title');
+  assert(e.logs.some(l => l.includes('non-HyperEx profile')));
+});
+
+test('HyperEx title still runs probes even when HyperEx is absent', async () => {
+  const e = loaded({ workflowTitle: 'HyperEx Pulse Filter auto' });
+  await e.flush();
+  const start = e.now();
+  const entry = e.shot(start, start + 30000, 'HyperEx Pulse Filter auto');
+  assert.equal(e.s.pendingOwnership.length, 1);
+  assert.equal(e.s.historyFile.shots.length, 0); // not settled yet
+  e.mock.hyperexStatus = null; // 404
+  e.setNow(start + 30000 + 12000);
+  for (const id of [...e.timers.keys()]) { const t = e.timers.get(id); if (t.ms === 12000) { e.timers.delete(id); await t.fn(); } }
+  assert.equal(entry.settled, true);
+  assert.equal(e.s.historyFile.shots.length, 1); // timeout keeps it
+});
+
+test('title gate helper recognizes the fixed HyperEx prefix', () => {
+  const e = setup();
+  assert.equal(e.h.isHyperExTitle('HyperEx Pulse Filter'), true);
+  assert.equal(e.h.isHyperExTitle('HyperEx Pulse Filter auto'), true);
+  assert.equal(e.h.isHyperExTitle('HyperEx Flow Calibration'), true);
+  assert.equal(e.h.isHyperExTitle('John Weiss开发的拉杆程序'), false);
+  assert.equal(e.h.isHyperExTitle(''), false);
+  assert.equal(e.h.isHyperExTitle(null), false);
+  assert.equal(e.h.isHyperExTitle('My HyperEx Copy'), false); // prefix, not substring
 });
 
 test('late HyperEx evidence after timeout does not duplicate or resurrect', async () => {

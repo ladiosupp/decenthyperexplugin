@@ -2,8 +2,8 @@
   "id": "profilerecorder.reaplugin",
   "author": "ladiosupp",
   "name": "Profile Recorder",
-  "description": "Records full-point curves (machine telemetry + RAW scale + state events) for every espresso shot that HyperEx Pulse Filter does NOT record. HyperEx-managed shots and calibration runs stay exclusively in HyperEx's own history; this plugin drops its duplicate after matching HyperEx's diagnostic summary by start/end time. Keeps the newest 4 full records (new overwrites old) and serves them at /history-export in the same shape as HyperEx's export, so ProfileReplayer merges both sources with runId dedup. Read-only: never writes machine state, profiles or settings.",
-  "version": "1.0.0",
+  "description": "Records full-point curves (machine telemetry + RAW scale + state events) for every espresso shot that HyperEx Pulse Filter does NOT record. Shots whose profile title does not start with the fixed HyperEx prefix are kept immediately (HyperEx never records them). HyperEx-titled shots are matched against HyperEx diagnostic summary (start contained in the espresso window, end within 10s) and dropped on match, so sources never overlap. Keeps the newest 4 full records (new overwrites old) and serves them at /history-export in the same shape as HyperEx export, so ProfileReplayer merges both sources with runId dedup. Read-only: never writes machine state, profiles or settings.",
+  "version": "1.0.1",
   "apiVersion": 1,
   "permissions": [
     "log",

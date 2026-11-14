@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const HYPEREX_STATUS_URL = API + "/plugins/decenthyperexplugin.reaplugin/status";
   const ID = "profilerecorder.reaplugin";
-  const PLUGIN_VERSION = "1.0.0";
+  const PLUGIN_VERSION = "1.0.1";
   const STORAGE_HISTORY_FILE = "profileRecorderHistoryV1";
   const HISTORY_FULL_SHOTS = 4;      // newest 4 full records; older ones are dropped
   const SAMPLE_CAP = 3000;           // same caps as HyperEx diagnostics
@@ -14,8 +14,9 @@ function createPlugin(host) {
   const TARE_RESET_THRESHOLD_G = 2.0;
   const OWNERSHIP_PROBES_MS = [2000, 5000, 8000];
   const OWNERSHIP_TIMEOUT_MS = 12000; // give up waiting for HyperEx evidence after this
-  const START_MATCH_MS = 5000;
+  const START_EARLY_TOLERANCE_MS = 2000; // HyperEx may stamp its start slightly before our espresso edge
   const END_MATCH_MS = 10000;
+  const HYPEREX_TITLE_PREFIX = "HyperEx"; // HyperEx only controls/records profiles under this fixed prefix
 
   const state = {
     cfg: { enabled: true, sampleIntervalMs: 100 },
@@ -326,6 +327,13 @@ function createPlugin(host) {
   // ---- ownership: drop runs that HyperEx already recorded ----
 
   function queueOwnership(run) {
+    // Title gate: HyperEx only records profiles whose title carries its fixed
+    // prefix, so any other profile is ours to keep immediately — no probes.
+    if (!isHyperExTitle(run.profileTitle)) {
+      log("Keeping " + run.runId + ": non-HyperEx profile (" + (run.profileTitle || "untitled") + ")");
+      appendHistory(run);
+      return;
+    }
     const entry = { run, deadlineMs: Date.now() + OWNERSHIP_TIMEOUT_MS, settled: false };
     state.pendingOwnership.push(entry);
     for (const delay of OWNERSHIP_PROBES_MS) {
@@ -336,12 +344,20 @@ function createPlugin(host) {
     state.ownershipTimers.push(timeoutId);
   }
 
+  function isHyperExTitle(title) {
+    return String(title || "").startsWith(HYPEREX_TITLE_PREFIX);
+  }
+
+  // HyperEx stamps startedAt at confirmed pour (preinfusion/pouring), which can be
+  // many seconds after the espresso edge (preparingForShot preheat). Containment,
+  // not a tight start window: its start must fall inside our espresso window and
+  // its end must align with ours.
   function hyperexMatches(summary, run) {
     if (!summary || !summary.runId) return false;
     const hStart = Date.parse(summary.startedAt || "");
     const hEnd = Date.parse(summary.endedAt || "");
     if (!Number.isFinite(hStart) || !Number.isFinite(hEnd)) return false;
-    return Math.abs(hStart - run.startedAtMs) <= START_MATCH_MS && Math.abs(hEnd - run.endedAtMs) <= END_MATCH_MS;
+    return hStart >= run.startedAtMs - START_EARLY_TOLERANCE_MS && hStart <= run.endedAtMs && Math.abs(hEnd - run.endedAtMs) <= END_MATCH_MS;
   }
 
   async function probeOwnership(entry) {

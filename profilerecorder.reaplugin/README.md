@@ -2,7 +2,7 @@
 
 记录 **HyperEx Pulse Filter 不记录的每一杯萃取**的全点曲线（机器遥测 + RAW 秤 + 状态事件），
 供 ProfileReplayer App / PC 仿真台回放。HyperEx 介入的杯（含校准）仍走 HyperEx 自己的记录，
-本插件在杯结束后按起止时间匹配 HyperEx 的诊断摘要，匹配上就丢弃自己那份——**源头不重叠**。
+本插件只保留其余杯——**源头不重叠**。
 
 ## 数据流
 
@@ -14,9 +14,16 @@
 
 ## 归属判定（不重叠的关键）
 
-杯结束后 2 / 5 / 8 秒各查一次 HyperEx 的 /status：diagnosticSummary 的 startedAt 与本杯开始
-相差 ≤5 s 且 endedAt 与本杯结束相差 ≤10 s → 判定为 HyperEx 已记录，丢弃本插件这份。
-12 秒内无匹配证据（HyperEx 未装 / 关闭 / 非 HyperEx 曲线 / 观察模式）→ 保留。
+**曲线名前缀闸门（v1.0.1）**：HyperEx 只控制并记录标题以固定前缀 `HyperEx` 开头的曲线
+（`HyperEx Pulse Filter` / `HyperEx Pulse Filter auto` / `HyperEx Flow Calibration`）。
+标题不带该前缀的杯（如拉杆曲线）HyperEx 根本不会记录，本插件**杯一结束立即保留**，
+不跑任何探针、不查 HyperEx 状态——非 HyperEx 杯落盘从 12 s 缩到 ~0 s。
+
+**复杂检查只对带前缀的杯跑**：杯结束后 2 / 5 / 8 秒各查一次 HyperEx 的 /status，
+diagnosticSummary 的 startedAt 落在本杯 espresso 窗内（允许早 2 s）且 endedAt 与本杯结束
+相差 ≤10 s → 判定 HyperEx 已记录，丢弃本插件这份。起始用「包含式」而非紧窗：HyperEx 在
+确认出液（preinfusion/pouring）才打开始时间，可能比 espresso 边沿晚一个预热段（冷机可超 5 s），
+紧窗会把这种杯误留造成重叠。12 秒内无匹配证据（HyperEx 未装 / 关闭 / 观察模式）→ 保留。
 插件卸载时未决的杯一律保留（宁可 App 端按 runId 去重，不丢杯）。
 
 ## 存储与导出
@@ -35,6 +42,7 @@
 
 ## 验证
 
-node tests/verify_v0100.cjs（26 项：生命周期、采样/封顶、归属双窗、4 杯裁剪、
-存储回读合并、导出经 archive-core 合并幂等、卸载保全、秤流重连）。
+node tests/verify_v0100.cjs（30 项：生命周期、采样/封顶、前缀闸门立即保留、
+包含式起始窗 + 长预热丢弃、4 杯裁剪、存储回读合并、导出经 archive-core 合并幂等、
+卸载保全、秤流重连）。
 

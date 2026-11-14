@@ -85,6 +85,63 @@ public class HxBridge {
         }
     }
 
+    // DE1 实时状态：Decaid 无 CORS 头，WebView 直接 fetch 会被拦，走原生 HTTP 子线程读
+    // /api/v1/machine/state，只取 state/substate 两项回调网页（顶栏胶囊 + 睡眠停抓）。
+    // 结果同时写 SharedPreferences，后台服务与回前台秒读都复用这一份。
+    @JavascriptInterface
+    public void machineState(final String baseUrl, final String callback) {
+        net.execute(() -> {
+            String json;
+            try {
+                URL u = new URL(baseUrl);
+                URL api = new URL(u.getProtocol(), u.getHost(), u.getPort(), "/api/v1/machine/state");
+                HttpURLConnection c = (HttpURLConnection) api.openConnection();
+                c.setConnectTimeout(4000);
+                c.setReadTimeout(6000);
+                int code = c.getResponseCode();
+                if (code != 200) {
+                    json = "{\"ok\":false,\"error\":\"HTTP " + code + "\"}";
+                } else {
+                    BufferedReader r = new BufferedReader(new InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8));
+                    StringBuilder sb = new StringBuilder();
+                    String line;
+                    while ((line = r.readLine()) != null) sb.append(line);
+                    r.close();
+                    org.json.JSONObject p = new org.json.JSONObject(sb.toString());
+                    org.json.JSONObject m = p.optJSONObject("machine");
+                    if (m == null) m = p;
+                    org.json.JSONObject st = m.optJSONObject("state");
+                    if (st == null) st = p.optJSONObject("state");
+                    String state = st != null ? st.optString("state") : m.optString("state");
+                    String substate = st != null ? st.optString("substate") : m.optString("substate");
+                    long now = System.currentTimeMillis();
+                    ctx.getSharedPreferences("hx", Context.MODE_PRIVATE).edit()
+                        .putString("de1State", state).putString("de1Substate", substate)
+                        .putLong("de1StateAt", now).apply();
+                    json = new org.json.JSONObject().put("ok", true).put("state", state)
+                        .put("substate", substate).put("at", now).toString();
+                }
+            } catch (Exception e) {
+                json = "{\"ok\":false,\"error\":" + org.json.JSONObject.quote(String.valueOf(e.getMessage() == null ? e : e.getMessage())) + "}";
+            }
+            final String payload = json;
+            if (ctx instanceof MainActivity) {
+                ((MainActivity) ctx).runOnWeb(jsCall(callback, payload));
+            }
+        });
+    }
+
+    // 最近一次 DE1 状态（前台轮询/后台服务写入的缓存），回前台秒读不发起网络。
+    @JavascriptInterface
+    public String lastMachineState() {
+        SharedPreferences sp = ctx.getSharedPreferences("hx", Context.MODE_PRIVATE);
+        long at = sp.getLong("de1StateAt", 0);
+        if (at == 0) return "{\"ok\":false}";
+        return "{\"ok\":true,\"state\":" + org.json.JSONObject.quote(sp.getString("de1State", ""))
+            + ",\"substate\":" + org.json.JSONObject.quote(sp.getString("de1Substate", ""))
+            + ",\"at\":" + at + "}";
+    }
+
     private static String jsCall(String fn, String jsonArg) {
         return fn + "(" + org.json.JSONObject.quote(jsonArg) + ")";
     }

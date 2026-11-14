@@ -14,15 +14,25 @@ header{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:
 h1{font-size:17px;margin:0;letter-spacing:.02em}
 header .status{margin-left:auto;font-size:12px;color:#9fd4a8;text-align:right;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 header .status.busy{color:#e9c276}
-.fetchbtn{flex:none;display:inline-flex;align-items:center;gap:7px;background:#e8833a;color:#1a1208;border:0;border-radius:9px;padding:7px 13px;font-size:13px;font-weight:700;cursor:pointer;transition:filter .12s,transform .08s;white-space:nowrap}
+.fetchbtn{flex:none;display:inline-flex;align-items:center;gap:7px;background:#e8833a;color:#1a1208;border:0;border-radius:9px;padding:7px 13px;font-size:13px;line-height:1.5;font-weight:700;cursor:pointer;transition:filter .12s,transform .08s;white-space:nowrap}
 .fetchbtn:hover{filter:brightness(1.08)}
 .fetchbtn:active{transform:scale(.96)}
 .fetchbtn .fetch-count{font:11px ui-monospace,monospace;font-weight:600;background:rgba(26,18,8,.18);border-radius:6px;padding:1px 6px;min-width:34px;text-align:center}
 .fetchbtn.busy{filter:saturate(.7) brightness(.92);cursor:default}
 .fetchbtn.busy .fetch-ico{display:inline-block;animation:fetchspin 1s linear infinite}
 @keyframes fetchspin{to{transform:rotate(360deg)}}
-@media (max-width:600px){header{gap:8px;padding:10px 12px}h1{font-size:15px}.fetchbtn{padding:6px 10px;font-size:12px}.fetchbtn .fetch-count{min-width:30px}}
-@media (max-width:480px){header h1{display:none}header .status{font-size:11px}.fetchbtn{padding:6px 9px;font-size:12px;gap:5px}}
+.de1pill{flex:none;display:inline-flex;align-items:center;gap:6px;font-size:13px;line-height:1.5;font-weight:700;border-radius:999px;padding:7px 11px;background:#2a2f37;color:#cfd5de;white-space:nowrap}
+.de1pill .dot{width:7px;height:7px;border-radius:50%;background:#8b93a1;flex:none}
+.de1pill.sleeping{background:#20304d;color:#9cc0ff}
+.de1pill.sleeping .dot{background:#6ea8fe}
+.de1pill.idle{background:#173a2a;color:#8fe0b0}
+.de1pill.idle .dot{background:#7ed492}
+.de1pill.espresso{background:#3d2c17;color:#f5c078}
+.de1pill.espresso .dot{background:#e8833a;animation:de1pulse 1.2s ease-in-out infinite}
+.de1pill.off{background:#2a2f37;color:#8b93a1}
+@keyframes de1pulse{50%{opacity:.35}}
+@media (max-width:600px){header{gap:8px;padding:10px 12px}h1{font-size:15px}.fetchbtn{padding:6px 10px;font-size:12px}.fetchbtn .fetch-count{min-width:30px}.de1pill{font-size:12px;padding:6px 10px}}
+@media (max-width:480px){header h1{display:none}header .status{font-size:11px}.fetchbtn{padding:6px 9px;font-size:12px;gap:5px}.de1pill{padding:6px 9px}}
 main{flex:1;display:flex;min-height:0}
 aside{width:340px;flex:none;border-right:1px solid #262a31;padding:14px;overflow-y:auto;overflow-x:hidden}
 section.view{flex:1;min-width:0;padding:14px 16px;overflow-y:auto;display:flex;flex-direction:column}
@@ -62,11 +72,14 @@ button.ghost{width:100%;margin-top:8px}
 .cupdrop.compact .cupdrop-item{text-align:right}
 .cupdrop.compact .cupdrop-item.sel{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .note{font-size:12px;color:#8b93a1;margin:8px 0 0}
-.cards{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin-bottom:12px;flex:none}
-.card{background:#191d23;border:1px solid #2a2f38;border-radius:10px;padding:8px 10px;min-width:0;container-type:inline-size}
-.card .k{font-size:11px;font-size:clamp(9px,10cqi,11px);color:#8b93a1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.card .v{font-size:18px;font-size:clamp(8px,13cqi,18px);font-weight:700;margin-top:3px;font-variant-numeric:tabular-nums;white-space:nowrap}
-.card .s{font-size:11px;font-size:clamp(8px,8.5cqi,11px);color:#8b93a1;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cards{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr) minmax(0,.8fr) minmax(0,.85fr) minmax(0,.55fr) minmax(0,.7fr) minmax(0,1.5fr);gap:8px;margin-bottom:12px;flex:none;container-type:inline-size}
+.card{background:#191d23;border:1px solid #2a2f38;border-radius:10px;padding:8px 10px;min-width:0}
+/* 标题与主数值同一字号（以整行为容器基准，七卡一致）；辅助小字单独缩小 */
+.card .k{font-size:16px;font-size:clamp(9px,1.6cqw,16px);color:#8b93a1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card .v{font-size:16px;font-size:clamp(9px,1.6cqw,16px);font-weight:700;margin-top:3px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.card .v .vs{font-size:11px;font-size:clamp(7px,1.1cqw,11px);font-weight:400;color:#8b93a1;margin-left:5px}
+.card .v .phasepill{font-size:16px;font-size:clamp(9px,1.6cqw,16px)}
+.card .s{font-size:10px;font-size:clamp(7px,1.1cqw,10px);color:#8b93a1;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .phasepill{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
 .good{color:#7ed492}.warn{color:#e9c276}.bad{color:#f2909a}
 .chartbox{background:#171a1f;border:1px solid #262a31;border-radius:10px;padding:8px 10px 4px;margin-bottom:10px;flex:none}
@@ -101,8 +114,17 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;
 input[type=range]:disabled{opacity:.4;cursor:default}
 .phasepill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:700;background:#2a2f37;color:#cfd5de}
 .evdata{margin:4px 0 0;font:12px ui-monospace,monospace;color:#c6ccd6;white-space:pre-wrap;max-height:220px;overflow:auto}
-.rawtoggle{display:flex;align-items:center;gap:5px;margin:0;font-size:11px;color:#8b93a1;cursor:pointer;font-weight:400}
-.rawtoggle input{width:15px;height:15px;margin:0}
+.rawtoggle{display:inline-flex;align-items:center;gap:6px;margin:0;font-size:11px;color:#8b93a1;cursor:pointer;font-weight:400;flex:none}
+.rawtoggle input{position:absolute;opacity:0;width:0;height:0;margin:0}
+.rawtoggle .sw{flex:none;width:30px;height:17px;border-radius:999px;background:#2b3038;border:1px solid #3a4150;position:relative;transition:background .15s,border-color .15s}
+.rawtoggle .sw::after{content:"";position:absolute;top:2px;left:2px;width:11px;height:11px;border-radius:50%;background:#8b93a1;transition:transform .15s,background .15s}
+.rawtoggle input:checked + .sw{background:#e8833a;border-color:#e8833a}
+.rawtoggle input:checked + .sw::after{transform:translateX(13px);background:#1a1208}
+.chartlegend{display:flex;align-items:center;gap:14px;flex-wrap:wrap;min-width:0;flex:1;margin-left:8px;font-size:11px;font-weight:400;color:#aab2bf}
+.charttitle{flex:none;margin-left:10px}
+.chartlegend .lg{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.chartlegend .lg i{width:9px;height:9px;border-radius:2px;flex:none;display:inline-block}
+.chartlegend .lg.dash i{background:transparent !important;border-top:2px dashed currentColor;height:0;border-radius:0}
 ::-webkit-scrollbar{width:8px;height:8px}
 ::-webkit-scrollbar-thumb{background:#2b3038;border-radius:4px}
 *{scrollbar-width:thin;scrollbar-color:#2b3038 transparent}
@@ -128,13 +150,16 @@ input[type=range]:disabled{opacity:.4;cursor:default}
 .modal-actions .ghost{background:#2a2f37;color:#cfd5de}
 .modal-foot{margin-top:10px;font-size:11px;color:#6b7380;text-align:center}
 @media (max-width:900px){main{flex-direction:column;overflow-y:auto}aside{width:100%;border-right:0;border-bottom:1px solid #262a31;overflow:visible}section.view{overflow:visible}}
-@media (max-width:600px){.cards{gap:4px}.card{padding:5px 4px;border-radius:7px}.card .v{font-size:clamp(7px,13cqi,18px)}}
+@media (max-width:600px){.cards{gap:4px}.card{padding:5px 4px;border-radius:7px}}
 @media (max-width:340px){.cards{gap:3px}.card{padding:4px 3px}}
+@media (max-width:560px){.cards{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media (max-width:400px){.cards .card:nth-child(2){grid-column:span 2}}
 </style>
 </head>
 <body>
 <header>
   <h1 data-i18n="ProfileReplayer">ProfileReplayer</h1>
+  <span class="de1pill off" id="de1Pill"><span data-i18n="咖啡机状态">咖啡机状态</span><span class="dot"></span><span id="de1PillTxt">—</span></span>
   <button type="button" class="fetchbtn" id="manualFetch"><span class="fetch-ico">⟳</span><span class="fetch-txt" data-i18n="抓取">抓取</span><span class="fetch-count" id="fetchCount">—</span></button>
   <select id="lang" style="width:auto;padding:6px 8px"><option value="zh">中文</option><option value="en">EN</option></select>
   <span class="status" id="status">载入中…</span>
@@ -187,9 +212,9 @@ input[type=range]:disabled{opacity:.4;cursor:default}
     <input type="range" id="scrub" min="0" max="0" value="0" step="1" disabled>
   </div>
   <div class="cards" id="cards"></div>
-  <div class="chartbox" data-chart="cFlow"><h3><span class="charthandle" title="长按拖动排序">⠿</span><span data-i18n="杯流 (g/s)">杯流 (g/s)</span><label class="rawtoggle"><input type="checkbox" id="rawToggle"> RAW dW/dt</label></h3><canvas id="cFlow"></canvas></div>
-  <div class="chartbox" data-chart="cWeight"><h3><span class="charthandle" title="长按拖动排序">⠿</span><span data-i18n="秤重 (g)">秤重 (g)</span></h3><canvas id="cWeight"></canvas></div>
-  <div class="chartbox" data-chart="cPress"><h3><span class="charthandle" title="长按拖动排序">⠿</span><span data-i18n="压力 (bar) · 流量 (ml/s)">压力 (bar) · 流量 (ml/s)</span></h3><canvas id="cPress"></canvas></div>
+  <div class="chartbox" data-chart="cFlow"><h3><span class="charthandle" title="长按拖动排序">⠿</span><span class="chartlegend" id="legend-cFlow"></span><label class="rawtoggle"><input type="checkbox" id="rawToggle"><span class="sw"></span>RAW dW/dt</label><span class="charttitle" data-i18n="杯流 (g/s)">杯流 (g/s)</span></h3><canvas id="cFlow"></canvas></div>
+  <div class="chartbox" data-chart="cWeight"><h3><span class="charthandle" title="长按拖动排序">⠿</span><span class="chartlegend" id="legend-cWeight"></span><span class="charttitle" data-i18n="秤重 (g)">秤重 (g)</span></h3><canvas id="cWeight"></canvas></div>
+  <div class="chartbox" data-chart="cPress"><h3><span class="charthandle" title="长按拖动排序">⠿</span><span class="chartlegend" id="legend-cPress"></span><span class="charttitle" data-i18n="压力 (bar) · 流量 (ml/s)">压力 (bar) · 流量 (ml/s)</span></h3><canvas id="cPress"></canvas></div>
   <div class="events" id="log"></div>
 </section>
 </main>

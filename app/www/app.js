@@ -57,6 +57,8 @@ const EN = {
   '稍后': 'Later', '重新检测': 'Re-check', '检测中…': 'Checking…',
   '插件检测失败：无法连接 Decaid': 'Plugin check failed: cannot reach Decaid',
   '抓取': 'Fetch', '手动': 'manual',
+  '睡眠': 'Sleep', '待机': 'Idle', '萃取中': 'Brewing', '未连接': 'Offline',
+  '咖啡机状态': 'DE1', '无': 'None', 'RAW dW/dt': 'RAW dW/dt', '机器流量/目标流量': 'Machine / target flow',
 };
 function t(s) { return lang === 'en' && EN[s] != null ? EN[s] : s; }
 function applyLang() {
@@ -71,6 +73,7 @@ function applyLang() {
   renderStatus();
   renderFetchCount();
   renderWhitelistWarning();
+  renderDe1Pill();
 }
 
 // ---- IndexedDB ----
@@ -110,6 +113,9 @@ let autoTimer = 0;
 let nextAutoAt = 0, countdownTimer = 0, fetching = false;
 let cupPending = null;
 let speedPending = null;
+// DE1 实时状态（顶栏胶囊 + 睡眠停抓）。前台 10s 轮询，回前台先读缓存秒显。
+let de1State = null, de1Timer = 0, de1Busy = false;
+const DE1_POLL_MS = 10000;
 
 const fmtT = (ms) => (ms / 1000).toFixed(2) + 's';
 const num = (v, d) => (v == null || !Number.isFinite(Number(v))) ? (d == null ? '—' : d) : Number(v);
@@ -285,7 +291,9 @@ async function compressAndShare() {
 function startAuto() {
   stopAuto();
   const sec = Math.max(5, Number($('autoSec').value) || 30);
-  autoTimer = setInterval(() => doFetch(true), sec * 1000);
+  // 睡眠停抓：到点先看 DE1 状态，睡眠就跳过本轮（机器睡了没新杯）。
+  // 页面隐藏（灭屏/切后台）时前台定时器不发起网络，交给后台服务按屏幕广播门控。
+  autoTimer = setInterval(() => { if (document.hidden || de1IsSleeping()) return; doFetch(true); }, sec * 1000);
   resetAutoCountdown();
   refreshAutoNote();
   if (window.HxBridge) window.HxBridge.setAutoFetch($('srcUrl').value.trim(), sec);
@@ -310,6 +318,55 @@ function renderFetchCount() {
   if (!$('autoOn').checked || !nextAutoAt) { el.textContent = '—'; return; }
   const remain = Math.max(0, Math.ceil((nextAutoAt - Date.now()) / 1000));
   el.textContent = remain >= 60 ? Math.floor(remain / 60) + ':' + String(remain % 60).padStart(2, '0') : remain + 's';
+}
+
+// ---- DE1 状态胶囊：睡眠/待机/萃取中/未连接 ----
+function renderDe1Pill() {
+  const pill = $('de1Pill'), txt = $('de1PillTxt');
+  if (!pill || !txt) return;
+  const s = de1State && de1State.ok ? String(de1State.state || '') : '';
+  let cls = 'off', label = t('未连接');
+  if (s === 'sleeping') { cls = 'sleeping'; label = t('睡眠'); }
+  else if (s === 'idle') { cls = 'idle'; label = t('待机'); }
+  else if (s === 'espresso') { cls = 'espresso'; label = t('萃取中'); }
+  else if (s) { cls = 'idle'; label = s; }
+  pill.className = 'de1pill ' + cls;
+  txt.textContent = label;
+}
+function de1IsSleeping() { return !!(de1State && de1State.ok && de1State.state === 'sleeping'); }
+window.__hxMachineState = function (payload) {
+  de1Busy = false;
+  try { de1State = JSON.parse(payload); } catch (_) { de1State = { ok: false }; }
+  renderDe1Pill();
+};
+function pollDe1() {
+  if (document.hidden) return;
+  const url = $('srcUrl').value.trim();
+  if (!url || de1Busy) return;
+  if (window.HxBridge && window.HxBridge.machineState) {
+    de1Busy = true;
+    window.HxBridge.machineState(url, '__hxMachineState');
+  } else {
+    // 浏览器预览：直接 fetch（预览服务带 CORS 头）；真机 Decaid 无 CORS 会失败按未连接。
+    fetch(new URL('/api/v1/machine/state', url).href, { cache: 'no-store' })
+      .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then((p) => {
+        const m = p.machine || p;
+        const st = (m.state && typeof m.state === 'object') ? m.state : (p.state && typeof p.state === 'object' ? p.state : null);
+        const state = st ? st.state : (m.state || p.state || '');
+        window.__hxMachineState(JSON.stringify({ ok: true, state, substate: st ? st.substate : '' }));
+      })
+      .catch(() => window.__hxMachineState(JSON.stringify({ ok: false })));
+  }
+}
+function startDe1Poll() {
+  if (de1Timer) clearInterval(de1Timer);
+  // 回前台先读后台服务/上次轮询写下的缓存，秒显不发起网络
+  if (window.HxBridge && window.HxBridge.lastMachineState) {
+    try { de1State = JSON.parse(window.HxBridge.lastMachineState()); renderDe1Pill(); } catch (_) {}
+  }
+  pollDe1();
+  de1Timer = setInterval(pollDe1, DE1_POLL_MS);
 }
 function startCountdownTick() {
   if (countdownTimer) clearInterval(countdownTimer);
@@ -608,13 +665,20 @@ function renderCards(f, tMs) {
   const mflow = num(f.machineFlowMlS);
   const target = num(f.targetFlowMlS);
   const pill = PHASE_PILL[phase] || ['#2a2f37', '#cfd5de'];
+  // recorder 杯（pr-）没有相位记录：胶囊显示「无」，不显示 recording
+  const isPr = String((cup && cup.runId) || '').startsWith('pr-');
+  const phaseTxt = (!phase || (isPr && phase === 'recording')) ? t('无') : t(PHASE_LABEL[phase] || phase);
+  const phasePill = (!phase || (isPr && phase === 'recording')) ? ['#2a2f37', '#8b93a1'] : pill;
   let html = '';
-  html += card(t('时刻'), fmtT(tMs), t('帧') + ' ' + (idx + 1) + ' / ' + frames.length + (isRaw && f.tareReset ? ' · tare/reset' : ''));
-  html += card(t('相位'), '<span class="phasepill" style="background:' + pill[0] + ';color:' + pill[1] + '">' + t(PHASE_LABEL[phase] || phase || '—') + '</span>', t('逻辑帧') + ' ' + (f.profileFrame == null ? '—' : f.profileFrame) + ' · ' + t('物理帧') + ' ' + (f.physicalProfileFrame == null ? '—' : f.physicalProfileFrame));
+  // 行内帧计数用短标签（英文 f），避免窄卡裁切；状态栏的「N frames」不受影响
+  html += card(t('时刻'), fmtT(tMs) + '<span class="vs">' + (lang === 'en' ? 'f' : '帧') + ' ' + (idx + 1) + '/' + frames.length + (isRaw && f.tareReset ? ' · tare' : '') + '</span>', '');
+  // 相位副信息只留数字（逻辑帧 · 物理帧），卡片收窄
+  html += card(t('相位'), '<span class="phasepill" style="background:' + phasePill[0] + ';color:' + phasePill[1] + '">' + phaseTxt + '</span><span class="vs">' + (f.profileFrame == null ? '—' : f.profileFrame) + ' · ' + (f.physicalProfileFrame == null ? '—' : f.physicalProfileFrame) + '</span>', '');
   html += card(t('秤重'), f2(weight) + ' g', cum != null && Number.isFinite(cum) ? t('插件累计') + ' ' + f2(cum) + ' g' : '');
-  html += card(t('decaid 杯流'), f2(decaid) + ' g/s', 'RAW dW/dt ' + f2(rawDw) + ' g/s');
-  html += card(t('压力'), f2(press) + ' bar', '', press > 8 ? 'bad' : press > 6 ? 'warn' : '');
-  html += card(t('机器流量'), f2(mflow) + ' ml/s', t('目标') + ' ' + f3(target) + ' ml/s');
+  html += card(t('decaid 杯流'), f2(decaid), '');
+  html += card(t('压力'), f2(press), '', press > 8 ? 'bad' : press > 6 ? 'warn' : '');
+  html += card(t('RAW dW/dt'), f2(rawDw), '');
+  html += card(t('机器流量/目标流量'), f2(mflow) + ' / ' + f3(target), '');
   $('cards').innerHTML = html;
 }
 function nearestSample(tMs) {
@@ -698,6 +762,18 @@ const chartDefs = [
     { get: (f) => num(f.targetFlowMlS, null), color: '#f5a442', width: 1.2, dash: [5, 4], label: '目标指令' },
   ] },
 ];
+// 每个卡片的图示上移到它自己标题那一行：图例靠左、标题文字靠右（画布内不再画）；
+// 杯流卡的 RAW 滑块在标题文字左侧。
+function renderChartLegend() {
+  for (const def of chartDefs) {
+    const box = $('legend-' + def.id);
+    if (!box) continue;
+    const lines = def.id === 'cFlow' && !$('rawToggle').checked ? def.lines.filter((l) => l.label !== 'RAW dW/dt') : def.lines;
+    const items = lines.map((ln) => ({ label: t(ln.label), color: ln.color, dash: !!ln.dash }));
+    if (def.id === 'cPress' && cup && cup.log && cup.log.some((e) => e.src === 'trace' && e.name === 'write')) items.push({ label: t('▲ 写入'), color: '#e8833a', dash: false });
+    box.innerHTML = items.map((it) => '<span class="lg' + (it.dash ? ' dash' : '') + '" style="color:' + it.color + '"><i style="background:' + it.color + '"></i><span style="color:#aab2bf">' + it.label + '</span></span>').join('');
+  }
+}
 function buildCharts() {
   sampleTimes = []; chartGeo = []; chartBase = [];
   for (const def of chartDefs) {
@@ -773,9 +849,6 @@ function buildCharts() {
       ctx.stroke(); ctx.setLineDash([]);
       ctx.restore();
     }
-    ctx.font = '10px sans-serif';
-    let lx = pad.l + 4;
-    for (const ln of lines) { const lbl = t(ln.label); ctx.fillStyle = ln.color; ctx.fillText('■ ' + lbl, lx, pad.t + 9); lx += ctx.measureText('■ ' + lbl).width + 14; }
     if (def.id === 'cPress' && cup && cup.log) {
       ctx.fillStyle = '#e8833a';
       for (const e of cup.log) {
@@ -783,11 +856,11 @@ function buildCharts() {
         const px = x(e.tMs / 1000);
         ctx.beginPath(); ctx.moveTo(px - 4, pad.t + 12); ctx.lineTo(px + 4, pad.t + 12); ctx.lineTo(px, pad.t + 19); ctx.closePath(); ctx.fill();
       }
-      ctx.fillText(t('▲ 写入'), lx, pad.t + 9);
     }
     chartGeo.push({ canvas, ctx, def: view, x, y, w, h, pad, dpr, yMin, yMax });
   }
   chartsReady = true;
+  renderChartLegend();
   for (const g of chartGeo) {
     const locate = (clientX) => {
       if (!frames.length) return;
@@ -1080,13 +1153,14 @@ function renderWhitelistWarning() {
     await mergePending();
     window.HxBridge.setAutoFetch($('srcUrl').value.trim(), $('autoOn').checked ? Number($('autoSec').value) : 0);
     // 回前台自动合并：MainActivity.onResume 发 hxresume，visibilitychange 双保险。
-    window.addEventListener('hxresume', () => { mergePending(); });
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) mergePending(); });
+    window.addEventListener('hxresume', () => { mergePending(); pollDe1(); });
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) { mergePending(); pollDe1(); } });
   }
   renderArchiveInfo();
   rebuildCupList();
   if (await dbGet('autoOn')) { $('autoOn').checked = true; startAuto(); }
   startCountdownTick();
+  startDe1Poll();
   applyLang();
   renderWhitelistWarning();
   renderReadyStatus();

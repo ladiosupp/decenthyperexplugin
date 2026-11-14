@@ -1,6 +1,6 @@
 # HyperEx 2.2.47 交接：曲线标题前缀固定为 HyperEx
 
-日期：2026-11-14（北京时间）。本地改动 + 回归完成，**未打包、未发版**（发版需用户另行授权）。
+日期：2026-11-14（北京时间）。已发版（GitHub Release + 夸克），发布记录见 §6；真机验证待做。
 
 分支：auto-hyperex。基线：2.2.46（tag v2.2.46，提交 63e788e）。
 
@@ -42,8 +42,18 @@ recorder 认为归 HyperEx，插件却不绑定。本版把插件侧对齐到固
 
 皮肤、宿主、ProfileRecorder（其 v1.0.1 未提交改动保持原样）、sim/、app/。
 
-## 6. 待办（需用户授权）
+## 6. 发布记录（2026-11-14，用户授权「提交，发版上传github和夸克」）
 
-- 打包 ZIP / 推送 / GitHub Release / 夸克：均未做，等用户发话。
+- 代码提交 25e43da，tag v2.2.47（annotated），分支 auto-hyperex 已推送（走 VPN 代理 127.0.0.1:57890）。
+  同批推上去的还有另一对话的提交 284c626（ProfileReplayer UI，只动 app/ 四文件）；发版包从 tag 用 git archive 取，不含该提交内容。
+- GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.47 （Latest，非 draft、非 prerelease）。
+- 附件：HyperExPulseFilter_v2.2.47.zip，487,570 字节。
+- SHA256：357E9DA7A628FFE34DBD7E4709E74B237486E425D74CD58CFBD092EB1FE63731。
+- 夸克：夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.47.zip，487,570 字节，fileId 2c2e129fe75140d1806843ab5dea10a3。
+- 包内复核：解压后 node --check 通过、tests/verify_v02247.cjs 801/801。
+- gh 登录态说明：gh 默认 token 已失效，本次按 release/__gh_token_check.ps1 的口径从 git 凭据管理器取 token（GH_TOKEN）发 Release。
+
+## 7. 待办
+
 - 真机验证：平板当前 2.2.45/2.2.46；装 2.2.47 后出一杯 HyperEx 曲线 + 一杯非 HyperEx 曲线，
   确认插件只绑定前者、recorder 只记后者。

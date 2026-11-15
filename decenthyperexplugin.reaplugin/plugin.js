@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.47";
+  const PLUGIN_VERSION = "2.2.48";
   // Generated profiles and profile binding share one fixed title prefix,
   // matching ProfileRecorder's ownership gate. Settings no longer rename them.
   const HYPEREX_TITLE_PREFIX = "HyperEx";
@@ -90,6 +90,20 @@ function createPlugin(host) {
     ["Continuous S1 → S2 → S3","连续 S1 → S2 → S3"],
     ["Full: normal + rescue · Off: detect only","全开：正常 + 救急 · 全关：只检测"],
     ["Detect only · no writes","只检测 · 不写入"],
+    ["HEC","HEC"],
+    ["This shot: algorithm HEC","本杯 算法HEC"],
+    ["Next shot: algorithm HEC · saved","下一杯 算法HEC · 已保存"],
+    ["HEC: APK trims · plugin guards + learns","HEC：APK 调流 · 插件监护 + 学习"],
+    ["Full: plugin trims · HEC: APK trims · Off: detect only","全开：插件调流 · HEC：APK 调流 · 全关：只检测"],
+    ["HEC: plugin took over this shot","HEC：本杯插件已接管"],
+    ["APK connected","APK 已连接"],
+    ["APK not connected","APK 未连接"],
+    ["heartbeat lost","心跳断开"],
+    ["no handshake","未握手"],
+    ["external writes","外部写入"],
+    ["rejected","拒绝"],
+    ["watchdog","看门狗"],
+    ["shot budget","本杯预算"],
     ["observation-only","仅观测"],
     ["Algorithm intervention off; observation only","算法介入已关闭：仅观测"],
     ["Change algorithm intervention only while idle","仅空闲时可改算法介入"],
@@ -110,7 +124,12 @@ function createPlugin(host) {
   // normal trim, no rescue write, and the shot is excluded from automatic
   // learning/curve rewrite. Stored separately from core settings so changing
   // it does not reload the plugin or disturb an in-flight shot.
+  // 2.2.48 adds "hec": the APK (HyperExControler) owns live trim through the
+  // external-flow endpoint while the plugin keeps guarding, recording and
+  // learning. A heartbeat insurance latches a per-shot plugin takeover when
+  // the APK never handshakes before the S2 refill or goes silent mid-shot.
   const STORAGE_ALGORITHM_INTERVENTION="algorithmInterventionV1";
+  const HEC_HEARTBEAT_MS=4000;
   // T-11: approachMs 200 was shorter than one 250 ms tick, so the handover guards
   // could be skipped entirely. 800 covers about three ticks at level 3.
   const S2_REFILL_DEFAULTS=Object.freeze({startDelayMs:0,targetPercent:160,cutoffPercent:85,maxDurationMs:4000,approachMs:800,floodMaxMlS:7});
@@ -315,6 +334,7 @@ function createPlugin(host) {
     overrideStorageLoaded: false,
     s2RefillSettings:null,s2RefillPrevious:null,s2RefillStorageLoaded:true,s2RefillLoadWarning:null,
     algorithmIntervention:"full",algorithmInterventionStorageLoaded:false,
+    hecLastContactAtMs:0,hecClient:null,hecExternalWrites:0,hecExternalRejects:0,hecWatchdogs:0,
     scopeStorageLoaded: false,
     scopedOriginalStorageLoaded: false,
     workflowSelectionRevision: 0,
@@ -628,11 +648,87 @@ function createPlugin(host) {
     const t = String(title);
     return t.startsWith(HYPEREX_TITLE_PREFIX) && !isCalibrationProfileTitle(t);
   }
-  // External algorithm intervention is intentionally two-state. "full" keeps
-  // every shipped write path; "off" is observation only. The mode is latched
-  // into run.config at shot start, so changing it mid-shot cannot alter the
-  // controller that is already running.
-  function normalizeAlgorithmIntervention(value) { return value === "off" ? "off" : "full"; }
+  // External algorithm intervention is three-state since 2.2.48. "full" keeps
+  // every shipped write path; "off" is observation only; "hec" hands live trim
+  // to the APK through external-flow while the plugin guards and learns. The
+  // mode is latched into run.config at shot start, so changing it mid-shot
+  // cannot alter the controller that is already running.
+  function normalizeAlgorithmIntervention(value) { return value === "off" ? "off" : value === "hec" ? "hec" : "full"; }
+  // Effective write authority for the running shot: a latched HEC takeover
+  // restores the full plugin controller for the rest of that shot only.
+  function hecTakeoverActive(run) {
+    return !!(run && run.config && run.config.algorithmIntervention === "hec" && run.config.hecTakeover);
+  }
+  function effectiveInterventionForRun(run) {
+    const mode = algorithmInterventionForRun(run);
+    return mode === "hec" && hecTakeoverActive(run) ? "full" : mode;
+  }
+  function hecHeartbeatFresh(now) {
+    return state.hecLastContactAtMs > 0 && now - state.hecLastContactAtMs <= HEC_HEARTBEAT_MS;
+  }
+  function hecTouchContact(client) {
+    state.hecLastContactAtMs = Date.now();
+    if (client && typeof client === "object") state.hecClient = { name: String(client.client || client.name || "HyperExControler").slice(0, 64), version: String(client.version || "").slice(0, 32) };
+  }
+  // Insurance latch: once per shot. Rebuilds the S2 refill plan as the full
+  // plugin plan when the takeover happens before the refill dispatch, so the
+  // beans are not wasted on a missing APK.
+  function hecLatchTakeover(run, reason) {
+    if (!run || !run.config || run.config.algorithmIntervention !== "hec" || run.config.hecTakeover) return false;
+    run.config.hecTakeover = { reason, atMs: Date.now() };
+    if (state.liveTrim && state.liveTrim.run === run) {
+      const t = state.liveTrim;
+      t.algorithmIntervention = "full";
+      if (t.startup && (t.startup.status === "armed" || t.startup.status === "disabled") && state.phase === "stage2") {
+        const plan = stage2StartupPlan("full");
+        t.startup.plan = plan;
+        t.run.config.s2StartupPlan = plan;
+        t.report.s2StartupPlan = plan;
+        t.report.startupExecution = { status: plan.enabled ? "armed" : "not-planned", reason: plan.reason || "HEC takeover rebuilt S2 startup plan" };
+        if (plan.enabled) t.startup.status = "armed";
+      }
+      if (t.report.status === "hec-external") t.report.status = "monitoring";
+    }
+    diagnosticEvent("hec_takeover", { reason, runId: run.runId || null });
+    log("HEC takeover latched (" + reason + "); plugin controls the rest of this shot");
+    emitSkinChanged();
+    return true;
+  }
+  // Mid-shot heartbeat loss: return the pump to the profile base first (the
+  // APK may have left a flood command running), then let the full law resume.
+  async function hecHeartbeatWatchdog(t) {
+    if (!t || !t.active || state.liveTrim !== t) return;
+    const run = t.run;
+    if (algorithmInterventionForRun(run) !== "hec" || hecTakeoverActive(run)) return;
+    if (state.phase !== "stage2" && state.phase !== "stage3") return;
+    // The refill-window no-handshake check owns the pre-refill case (armed, or
+    // HEC-disabled startup with no handshake ever); this watchdog covers
+    // heartbeat loss after the APK was in control.
+    if (state.phase === "stage2" && t.startup && (t.startup.status === "armed" || (t.startup.status === "disabled" && state.hecLastContactAtMs === 0))) return;
+    if (hecHeartbeatFresh(Date.now())) return;
+    hecLatchTakeover(run, "hec-heartbeat-lost");
+    state.hecWatchdogs++;
+    const frame = finiteOrNull(state.lastFrame);
+    if (frame === null || !t.handle || t.pending || state.commandBusy) return;
+    const layout = runProfileLayout(run);
+    const physicalFrame = physicalFrameForLogical(frame, layout);
+    const step = t.profile.steps[physicalFrame];
+    if (!step || step.pump !== "flow" || step.exit) return;
+    const base = Math.floor(Number(step.flow) * 16 + 0.5) / 16;
+    const current = Number.isFinite(t.commands[frame]) ? t.commands[frame] : base;
+    if (Math.abs(current - base) < 1 / 32) return;
+    if (base < LIMITS.commandFlowMin || base > LIMITS.commandFlowMax) return;
+    if (t.report.writes >= t.report.maxWrites) return;
+    const payload = encodeLiveFlowFrame(step, physicalFrame, base);
+    const p = { frame, command: base, at: Date.now(), ack: false, targetSeen: false, flowAtWrite: finiteOrNull(state.lastFlow), slopeAtWrite: null, sourceStamp: null, hecWatchdog: true };
+    t.pending = p;
+    t.lastWriteAt = p.at;
+    t.commands[frame] = base;
+    t.report.writes++;
+    state.liveTrimDirty = true;
+    liveTrimRecord("write", { frame, commandMlS: base, previousMlS: current, retry: false, external: false, hecWatchdog: true, reason: "hec-heartbeat-lost-base-return", payload });
+    await host.transport.send(t.handle, { type: "text", data: JSON.stringify({ type: "request", operation: "write", characteristicUUID: "A010", payload }) });
+  }
   function algorithmInterventionForRun(run) {
     return normalizeAlgorithmIntervention(run && run.config && run.config.algorithmIntervention || state.algorithmIntervention);
   }
@@ -2034,6 +2130,9 @@ function createPlugin(host) {
     state.diagnosticRunSeq += 1;
     const now = Date.now();
     const intervention = kind === "calibration" ? "full" : normalizeAlgorithmIntervention(state.algorithmIntervention);
+    // HEC counters are per-shot; the heartbeat itself persists across shots so
+    // a continuously polling APK keeps the next shot in APK control.
+    state.hecExternalWrites = 0; state.hecExternalRejects = 0; state.hecWatchdogs = 0;
     state.diagnosticCurrent = {
       schema: 3,
       kind: String(kind || "hyperex"),
@@ -2046,6 +2145,7 @@ function createPlugin(host) {
       result: null,
       observationOnly: intervention === "off",
       config: {
+        hecTakeover: null,
         activeRelease:activeReleaseEnabled(state.cfg),releaseMode:releaseMode(state.cfg),
         profileLayout:profileLayoutForMode(releaseMode(state.cfg)),adaptiveLearningLevel:state.cfg.adaptiveLearningLevel,
         algorithmIntervention:intervention,
@@ -2971,6 +3071,7 @@ function createPlugin(host) {
   function stage2StartupPlan(mode) {
     const intervention = normalizeAlgorithmIntervention(mode === undefined ? state.algorithmIntervention : mode);
     if (intervention === "off") return disabledS2StartupPlan("算法介入已关闭：仅检测，不执行补水或起步增强");
+    if (intervention === "hec") return disabledS2StartupPlan("HEC：补水由 APK 负责；握手失败时插件接管重建本计划");
     if(!activeReleaseEnabled(state.cfg))return stage2LegacyStartupPlan();
     const settings=currentS2RefillSettings();
     const cupTarget=Number(state.cfg.stage2Flow);
@@ -3131,7 +3232,7 @@ function createPlugin(host) {
   async function dispatchS2Startup(t,action) {
     const p=t.startup,frame=finiteOrNull(state.lastFrame),now=Date.now(),refill=p&&p.plan.strategy==="refill-85";
     const current=state.liveTrim===t&&t.active&&state.diagnosticCurrent===t.run;
-    if(algorithmInterventionForRun(t.run)==="off"){if(p)p.status="disabled";return false;}
+    if(effectiveInterventionForRun(t.run)==="off"){if(p)p.status="disabled";return false;}
     if(current&&action==="boost"&&p.status==="armed"&&state.phase==="stage2"&&frame!==1&&!state.stage2SkipSent)return startupBlock(t,"S2 startup waiting for confirmed frame 1");
     if(current&&state.phase==="stage2"&&frame===null&&!state.stage2SkipSent)return startupBlock(t,"S2 startup waiting for fresh frame telemetry");
     if(!current||state.phase!=="stage2"||frame!==1||state.stage2SkipSent){clearS2StartupTimers(t);if(p)p.status="frame-ended";return false;}
@@ -3768,6 +3869,7 @@ function createPlugin(host) {
       releaseMode:releaseMode(run.config),
       algorithmIntervention: run.config && run.config.algorithmIntervention || "full",
       observationOnly: run.observationOnly === true,
+      hecTakeover: run.config && run.config.hecTakeover ? run.config.hecTakeover : null,
       learningIntegrity: assessRunLearningIntegrity(run),
       learningReview: run.learningReview||null,
       basketContext: run.config && run.config.basketContext || "unknown",
@@ -4811,8 +4913,109 @@ function createPlugin(host) {
       algorithmIntervention: normalizeAlgorithmIntervention(state.algorithmIntervention),
       algorithmInterventionActive: activeAlgorithmIntervention(),
       algorithmInterventionLoaded: state.algorithmInterventionStorageLoaded,
-      canEdit: state.phase === "idle" && !state.calibrationActive && !state.curveApplyBusy && (!state.autoApplyLastStatus || state.autoApplyLastStatus.status !== "applying")
+      canEdit: state.phase === "idle" && !state.calibrationActive && !state.curveApplyBusy && (!state.autoApplyLastStatus || state.autoApplyLastStatus.status !== "applying"),
+      hec: hecStatusPayload()
     };
+  }
+  // HEC guardian/heartbeat snapshot shared by control-mode, external-status
+  // and the diagnostics card. Pure state annotation, no control authority.
+  function hecStatusPayload() {
+    const now = Date.now(), run = state.diagnosticCurrent;
+    const ageMs = state.hecLastContactAtMs > 0 ? Math.max(0, now - state.hecLastContactAtMs) : null;
+    return {
+      heartbeatTimeoutMs: HEC_HEARTBEAT_MS,
+      lastContactAtMs: state.hecLastContactAtMs || null,
+      ageMs,
+      ok: hecHeartbeatFresh(now),
+      client: state.hecClient,
+      takeover: run && run.config && run.config.hecTakeover ? run.config.hecTakeover : null,
+      externalWrites: state.hecExternalWrites,
+      externalRejects: state.hecExternalRejects,
+      watchdogs: state.hecWatchdogs
+    };
+  }
+  function externalStatusPayload() {
+    const t = state.liveTrim, run = state.diagnosticCurrent;
+    const frame = finiteOrNull(state.lastFrame);
+    const layout = run ? runProfileLayout(run) : currentProfileLayout();
+    const physicalFrame = frame === null ? null : physicalFrameForLogical(frame, layout);
+    const step = t && physicalFrame !== null && t.profile.steps[physicalFrame] ? t.profile.steps[physicalFrame] : null;
+    const phase = state.phase;
+    const targetGS = phase === "stage1" ? (state.cfg ? state.cfg.stage1Flow : null) : phase === "stage2" ? (state.cfg ? state.cfg.stage2Flow : null) : phase === "stage3" ? (state.cfg ? state.cfg.stage3Flow : null) : null;
+    const baseCommandMlS = step && step.pump === "flow" ? Math.floor(Number(step.flow) * 16 + 0.5) / 16 : null;
+    const lastCommandMlS = t && frame !== null && Number.isFinite(t.commands[frame]) ? t.commands[frame] : baseCommandMlS;
+    const reg = t && t.active ? liveTrimRegression(t) : null;
+    return {
+      pluginVersion: PLUGIN_VERSION,
+      mode: run ? algorithmInterventionForRun(run) : normalizeAlgorithmIntervention(state.algorithmIntervention),
+      phase,
+      extracting: phase === "stage1" || phase === "stage2" || phase === "stage3",
+      logicalFrame: frame,
+      physicalFrame,
+      layout,
+      targetGS,
+      baseCommandMlS,
+      lastCommandMlS,
+      pending: t && t.pending ? { frame: t.pending.frame, command: t.pending.command, ack: !!t.pending.ack } : null,
+      pressureBar: finiteOrNull(state.lastPressure),
+      limiterBar: step && step.limiter ? finiteOrNull(step.limiter.value) : null,
+      machineAgeMs: state.lastMachineAtMs ? Math.max(0, Date.now() - state.lastMachineAtMs) : null,
+      scaleAgeMs: state.latestScaleAtMs ? Math.max(0, Date.now() - state.latestScaleAtMs) : null,
+      rawGS: reg ? round(reg.slope, 3) : null,
+      writes: t ? t.report.writes : 0,
+      maxWrites: t ? t.report.maxWrites : 0,
+      heartbeat: hecStatusPayload(),
+      takeover: run && run.config && run.config.hecTakeover ? run.config.hecTakeover : null,
+      runId: run ? run.runId : null
+    };
+  }
+  // The single external write path. Validates exactly like the internal trim
+  // gates (bounds, frame, budget, upward pressure, telemetry) and reuses the
+  // pending/ACK ledger so learning evidence stays on one writer.
+  async function externalFlowCommand(request) {
+    const reject = (status, reason) => { state.hecExternalRejects++; return pluginHttpJson(request, status, { ok: false, reason, ...externalStatusPayload() }); };
+    const run = state.diagnosticCurrent;
+    if (!run || algorithmInterventionForRun(run) !== "hec") return reject(409, "hec-mode-required");
+    if (hecTakeoverActive(run)) return reject(409, "hec-takeover");
+    const t = state.liveTrim;
+    if (!t || !t.active || !t.handle) return reject(409, "not-extracting");
+    if (!liveTrimPhaseAllowed(t)) return reject(409, "not-extracting");
+    const body = request.body && typeof request.body === "object" ? request.body : {};
+    const raw = Number(body.command);
+    if (!Number.isFinite(raw)) return reject(400, "command-invalid");
+    if (raw < LIMITS.commandFlowMin || raw > LIMITS.commandFlowMax) return reject(400, "command-out-of-bounds");
+    const frame = finiteOrNull(state.lastFrame);
+    if (frame === null || !Number.isInteger(frame)) return reject(409, "frame-not-confirmed");
+    if (body.frame !== undefined && body.frame !== null && Number(body.frame) !== frame) return reject(409, "frame-mismatch");
+    const layout = runProfileLayout(run);
+    const logicalS3Max = 2 + Math.max(0, t.profile.steps.length - layout.s3 - 1);
+    if (state.phase === "stage1" ? frame !== 0 : state.phase === "stage2" ? frame !== 1 : frame < 2 || frame > logicalS3Max) return reject(409, "frame-mismatch");
+    if (t.pending || t.retry) return reject(409, "write-pending");
+    if (state.commandBusy) return reject(409, "command-busy");
+    if (t.report.writes >= t.report.maxWrites) return reject(409, "write-budget");
+    const now = Date.now();
+    if (!state.lastMachineTelemetryValid || now - state.lastMachineAtMs > 600 || now - state.latestScaleAtMs > 600 || state.lastMachineState !== "espresso" || !["preinfusion", "pouring"].includes(state.lastSubstate)) return reject(409, "telemetry-stale");
+    const physicalFrame = physicalFrameForLogical(frame, layout);
+    const step = t.profile.steps[physicalFrame];
+    if (!step || step.pump !== "flow" || step.exit) return reject(409, "frame-not-writable");
+    const command = snapCommandFlow(raw);
+    const previous = Number.isFinite(t.commands[frame]) ? t.commands[frame] : Math.floor(Number(step.flow) * 16 + 0.5) / 16;
+    const limiter = Number(step.limiter && step.limiter.value);
+    if (command > previous && Number.isFinite(limiter) && limiter > 0 && Number.isFinite(state.lastPressure) && state.lastPressure >= limiter * .90) return reject(409, "pressure-upward-blocked");
+    const payload = encodeLiveFlowFrame(step, physicalFrame, command);
+    const p = { frame, command, at: now, ack: false, targetSeen: false, flowAtWrite: finiteOrNull(state.lastFlow), slopeAtWrite: null, sourceStamp: null, external: true };
+    t.pending = p;
+    t.lastWriteAt = now;
+    t.commands[frame] = command;
+    if (!t.sentCommands) t.sentCommands = {};
+    t.sentCommands[frame] = { command, at: now, sample: null };
+    t.report.writes++;
+    state.hecExternalWrites++;
+    state.liveTrimDirty = true;
+    hecTouchContact(null);
+    liveTrimRecord("write", { frame, commandMlS: command, previousMlS: previous, retry: false, external: true, payload });
+    await host.transport.send(t.handle, { type: "text", data: JSON.stringify({ type: "request", operation: "write", characteristicUUID: "A010", payload }) });
+    return pluginHttpJson(request, 200, { ok: true, commandMlS: command, frame, writes: t.report.writes, maxWrites: t.report.maxWrites, ack: false });
   }
 
   function stripRealFlowText() {
@@ -5034,6 +5237,13 @@ body.diagview #brewingmode{display:none}
 #modecard .latch{display:flex;align-items:center;gap:7px;font:11px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;color:#b8b0a5;white-space:nowrap}
 #modecard .latch .dot{width:6px;height:6px;border-radius:50%;background:#53d68e;box-shadow:0 0 0 3px rgba(83,214,142,.12)}
 #modecard.state-off .latch .dot{background:#7f8fa3;box-shadow:0 0 0 3px rgba(127,143,163,.12)}
+#modecard.state-hec{background:linear-gradient(135deg,rgba(110,168,254,.10),rgba(255,255,255,.028) 46%,rgba(255,255,255,.018));border-color:rgba(110,168,254,.30)}
+#modecard.state-hec::before{background:linear-gradient(180deg,#6ea8fe,rgba(110,168,254,.12))}
+#modecard.state-hec .latch .dot{background:#6ea8fe;box-shadow:0 0 0 3px rgba(110,168,254,.14)}
+#modecard .hec-status{display:flex;align-items:center;gap:9px;margin:8px 4px 2px;padding:8px 12px;border-radius:12px;background:rgba(110,168,254,.07);border:1px solid rgba(110,168,254,.18);font:11.5px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace;color:#b8c6dd;flex-wrap:wrap}
+#modecard .hec-status .dot{width:6px;height:6px;border-radius:50%;background:#53d68e;box-shadow:0 0 0 3px rgba(83,214,142,.12);flex:none}
+#modecard .hec-status .dot.bad{background:#f49090;box-shadow:0 0 0 3px rgba(244,144,144,.14)}
+#modecard .hec-status .sep{width:1px;height:10px;background:rgba(255,255,255,.12)}
 #modecard .mode-grid{display:grid;grid-template-columns:minmax(0,1fr) 1px minmax(0,1fr);gap:18px;align-items:stretch;margin:2px 4px 4px}
 #modecard .mode-cell{display:flex;align-items:center;gap:11px;min-width:0;padding:6px 4px}
 #modecard .mode-sep{width:1px;background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(255,255,255,.09),rgba(255,255,255,.02))}
@@ -5059,8 +5269,15 @@ body.diagview #brewingmode{display:none}
 #modecard .switch[data-on="true"] .switch-opt.on:hover{color:#241a10}
 #modecard .switch[data-on="false"] .switch-opt.off:hover{color:#fff}
 #modecard .switch-opt:focus-visible{outline:2px solid rgba(239,173,86,.65);outline-offset:2px}
-/* 2026-11-08: three-position release switch (auto / on / off). The algorithm
-   switch keeps its two-position data-on behavior above. */
+/* 2026-11-08: three-position release switch (auto / on / off).
+   2.2.48: the algorithm switch joins it as three-position (full / hec / off). */
+#modecard .algo-switch{grid-template-columns:1fr 1fr 1fr;width:252px}
+#modecard .algo-switch .switch-thumb{width:calc(33.333% - 2.667px)}
+#modecard .algo-switch[data-mode="full"] .switch-opt.full{color:#241a10}
+#modecard .algo-switch[data-mode="hec"] .switch-thumb{transform:translateX(100%);background:linear-gradient(180deg,#8dbaff,#5b93e8);box-shadow:0 4px 12px rgba(110,168,254,.26),inset 0 1px 0 rgba(255,255,255,.30)}
+#modecard .algo-switch[data-mode="hec"] .switch-opt.hec{color:#0e1a2c}
+#modecard .algo-switch[data-mode="off"] .switch-thumb{transform:translateX(200%);background:linear-gradient(180deg,#6f7c8c,#596574);box-shadow:0 4px 12px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.16)}
+#modecard .algo-switch[data-mode="off"] .switch-opt.off{color:#f1eee8}
 #modecard .release-switch{grid-template-columns:1fr 1fr 1fr;width:276px}
 #modecard .release-switch .switch-thumb{width:calc(33.333% - 2.667px)}
 #modecard .release-switch[data-mode="on"] .switch-thumb{transform:translateX(100%)}
@@ -5080,15 +5297,15 @@ body.diagview #brewingmode{display:none}
 }
 </style></head><body><div class="card"><div class="row" style="justify-content:space-between;align-items:center;gap:10px;margin:0 0 10px"><div class="row" style="gap:9px;flex:none"><button id="close-top" class="b s" type="button">CLOSE / HOME</button><button id="jump-weight" class="b s" type="button">REAL SCALE CURVES</button><div id="presetbar" class="row" style="gap:6px;margin:0;flex:none"></div></div><div id="hx-language" data-no-i18n class="row" style="justify-content:flex-end;margin:0;gap:9px"><button class="b s" data-language="zh" lang="zh-CN" aria-pressed="true">中文</button><button class="b s" data-language="en" lang="en" aria-pressed="false">English</button><span id="hx-language-status" style="align-self:center" aria-live="polite"></span></div></div><div class="k">HYPEREX v${PLUGIN_VERSION}</div><div id="brewingmode" class="m" role="status" style="margin:10px 0 14px;padding:12px 16px;border:1px solid rgba(239,173,86,.42);border-radius:16px;background:rgba(239,173,86,.10);font-weight:600;letter-spacing:.02em">${releaseMode(state.cfg)==="auto"?"Release: AUTO · 0 bar release / soak → S2":releaseMode(state.cfg)==="on"?"Release: ON · Release / soak / GHC restart":"Release: OFF · Continuous S1 → S2 → S3"}</div><div id="title" class="t">Checking…</div><div id="detail" class="d"></div>
 <div id="diag" style="display:none">
-  <div id="modecard"${normalizeAlgorithmIntervention(state.algorithmIntervention)==="off"?' class="state-off"':''}>
+  <div id="modecard"${normalizeAlgorithmIntervention(state.algorithmIntervention)==="off"?' class="state-off"':normalizeAlgorithmIntervention(state.algorithmIntervention)==="hec"?' class="state-hec"':''}>
     <div class="mode-head">
       <span class="mode-kicker">萃取模式</span>
       <div class="head-status">
-        <span class="latch"><span class="dot"></span><span id="mode-latch">本杯 算法${activeAlgorithmIntervention()==="off"?"全关":"全开"}</span></span>
+        <span class="latch"><span class="dot"></span><span id="mode-latch">本杯 算法${activeAlgorithmIntervention()==="off"?"全关":activeAlgorithmIntervention()==="hec"?"HEC":"全开"}</span></span>
         <span class="head-sep" aria-hidden="true"></span>
         <span class="latch"><span class="dot"></span><span>本杯锁定</span></span>
         <span class="head-sep" aria-hidden="true"></span>
-        <span class="latch"><span class="dot"></span><span id="mode-next">下一杯 算法${normalizeAlgorithmIntervention(state.algorithmIntervention)==="off"?"全关":"全开"} · 已保存</span></span>
+        <span class="latch"><span class="dot"></span><span id="mode-next">下一杯 算法${normalizeAlgorithmIntervention(state.algorithmIntervention)==="off"?"全关":normalizeAlgorithmIntervention(state.algorithmIntervention)==="hec"?"HEC":"全开"} · 已保存</span></span>
       </div>
     </div>
     <div class="mode-grid">
@@ -5108,14 +5325,21 @@ body.diagview #brewingmode{display:none}
       <div class="mode-cell">
         <div class="mode-copy">
           <div class="mode-label">算法介入</div>
-          <div class="mode-sub" id="mode-algo-sub">${normalizeAlgorithmIntervention(state.algorithmIntervention)==="off"?"只检测 · 不写入":"全开：正常 + 救急 · 全关：只检测"}</div>
+          <div class="mode-sub" id="mode-algo-sub">${normalizeAlgorithmIntervention(state.algorithmIntervention)==="off"?"只检测 · 不写入":normalizeAlgorithmIntervention(state.algorithmIntervention)==="hec"?"HEC：APK 调流 · 插件监护 + 学习":"全开：插件调流 · HEC：APK 调流 · 全关：只检测"}</div>
         </div>
-        <div class="switch" id="mode-algo" data-on="${normalizeAlgorithmIntervention(state.algorithmIntervention)==="off"?"false":"true"}" role="group" aria-label="算法介入">
+        <div class="switch algo-switch" id="mode-algo" data-mode="${normalizeAlgorithmIntervention(state.algorithmIntervention)}" role="group" aria-label="算法介入">
           <span class="switch-thumb" aria-hidden="true"></span>
-          <button class="switch-opt on" type="button" data-algo="full" aria-pressed="true">全开</button>
-          <button class="switch-opt off" type="button" data-algo="off" aria-pressed="false">全关</button>
+          <button class="switch-opt full" type="button" data-algo="full" aria-pressed="${normalizeAlgorithmIntervention(state.algorithmIntervention)==="full"}">全开</button>
+          <button class="switch-opt hec" type="button" data-algo="hec" aria-pressed="${normalizeAlgorithmIntervention(state.algorithmIntervention)==="hec"}">HEC</button>
+          <button class="switch-opt off" type="button" data-algo="off" aria-pressed="${normalizeAlgorithmIntervention(state.algorithmIntervention)==="off"}">全关</button>
         </div>
       </div>
+    </div>
+    <div class="hec-status" id="hec-status" style="display:${normalizeAlgorithmIntervention(state.algorithmIntervention)==="hec"?"flex":"none"}">
+      <span class="dot" id="hec-dot"></span><span id="hec-conn">APK 未连接</span>
+      <span class="sep"></span><span id="hec-counts">外部写入 0 · 拒绝 0 · 看门狗 0</span>
+      <span class="sep"></span><span id="hec-budget">本杯预算 0 / 0</span>
+      <span class="sep" id="hec-takeover-sep" style="display:none"></span><span id="hec-takeover" style="display:none">HEC：本杯插件已接管</span>
     </div>
   </div>
   <div class="d" style="margin:2px 0 14px;padding:12px 14px;border-radius:16px;background:rgba(255,255,255,.04)"><b>ENTRY</b> · Dashboard <b>DIAG / CAL</b> is enabled by default. If another plugin occupies the reserved header slot, open <b>Plugins → HyperEx Pulse Filter</b>.</div>
@@ -5539,7 +5763,7 @@ function updateFoldStatuses(){
  set('st-historyjson',shots?(shots+' 杯'):'—');
 }
 if(typeof setInterval==='function')setInterval(updateFoldStatuses,600);
-function paint(x){const mode=$('brewingmode');if(mode&&x.releaseMode)mode.textContent=x.releaseMode==='auto'?'Release: AUTO · 0 bar release / soak → S2':x.releaseMode==='on'?'Release: ON · Release / soak / GHC restart':'Release: OFF · Continuous S1 → S2 → S3';else if(mode&&typeof x.activeRelease==='boolean')mode.textContent=x.activeRelease?'Active release: ON · Release / soak / restart':'Active release: OFF · Continuous S1 → S2 → S3';if(x.phase==='soak'){t.textContent='SOAK '+x.soakSecondsRemaining+'s';d.textContent=x.releaseMode==='auto'?'0 bar soak is running. S2 starts automatically at the configured soak time; no GHC press.':'Active release is complete. Wait until the soak reaches 0. The plugin will arm the second stage only after the full soak.';b.disabled=true;}else if(x.phase==='dumping'){t.textContent='AUTO RELEASE';d.textContent='0 bar release frame requested; the soak countdown uses the configured soak time.';b.disabled=true;}else if(x.phase==='restart_wait'){t.textContent='CHECK PINK LIGHT · '+x.ghcSecondsRemaining+'s';d.textContent='Pink ON → press the physical GHC Espresso button. Pink OFF → tap RE-ARM, then press GHC when the light turns pink.';b.disabled=false;}else if(x.calibrationActive){t.textContent='FLOW CAL RUNNING';d.textContent='EMPTY BASKET. Leave the staircase running until Idle. Do not remove the catch vessel; the plugin will stop at the selected-mode actual-water safety cap before 300 ml.';b.disabled=true;}else if(['stage1','stage2','stage3'].includes(x.phase)){t.textContent='HYPEREX · '+x.phase.toUpperCase();d.textContent=x.releaseMode==='auto'?'Auto release · 0 bar soak then weight-driven S2/S3 in the same shot.':x.releaseMode==='on'?'Active release mode · Weight-driven stage progression.':'Continuous extraction · No intermediate release or restart.';b.disabled=true;}else{t.textContent='HYPEREX IDLE';d.textContent='No GHC action is required.';b.disabled=true;}m.textContent='Cumulative '+Number(x.cumulativeWeight||0).toFixed(1)+'g · arm requests '+(x.armRequestCount||0)+(x.directStartTest?' · DIRECT TEST: '+x.directStartTest.status:'');}
+function paint(x){if(x.liveFlowTrimTest)window.__hecTrim={writes:x.liveFlowTrimTest.writes||0,maxWrites:x.liveFlowTrimTest.maxWrites||0};if(lastModeCard)renderHecStatus(lastModeCard);const mode=$('brewingmode');if(mode&&x.releaseMode)mode.textContent=x.releaseMode==='auto'?'Release: AUTO · 0 bar release / soak → S2':x.releaseMode==='on'?'Release: ON · Release / soak / GHC restart':'Release: OFF · Continuous S1 → S2 → S3';else if(mode&&typeof x.activeRelease==='boolean')mode.textContent=x.activeRelease?'Active release: ON · Release / soak / restart':'Active release: OFF · Continuous S1 → S2 → S3';if(x.phase==='soak'){t.textContent='SOAK '+x.soakSecondsRemaining+'s';d.textContent=x.releaseMode==='auto'?'0 bar soak is running. S2 starts automatically at the configured soak time; no GHC press.':'Active release is complete. Wait until the soak reaches 0. The plugin will arm the second stage only after the full soak.';b.disabled=true;}else if(x.phase==='dumping'){t.textContent='AUTO RELEASE';d.textContent='0 bar release frame requested; the soak countdown uses the configured soak time.';b.disabled=true;}else if(x.phase==='restart_wait'){t.textContent='CHECK PINK LIGHT · '+x.ghcSecondsRemaining+'s';d.textContent='Pink ON → press the physical GHC Espresso button. Pink OFF → tap RE-ARM, then press GHC when the light turns pink.';b.disabled=false;}else if(x.calibrationActive){t.textContent='FLOW CAL RUNNING';d.textContent='EMPTY BASKET. Leave the staircase running until Idle. Do not remove the catch vessel; the plugin will stop at the selected-mode actual-water safety cap before 300 ml.';b.disabled=true;}else if(['stage1','stage2','stage3'].includes(x.phase)){t.textContent='HYPEREX · '+x.phase.toUpperCase();d.textContent=x.releaseMode==='auto'?'Auto release · 0 bar soak then weight-driven S2/S3 in the same shot.':x.releaseMode==='on'?'Active release mode · Weight-driven stage progression.':'Continuous extraction · No intermediate release or restart.';b.disabled=true;}else{t.textContent='HYPEREX IDLE';d.textContent='No GHC action is required.';b.disabled=true;}m.textContent='Cumulative '+Number(x.cumulativeWeight||0).toFixed(1)+'g · arm requests '+(x.armRequestCount||0)+(x.directStartTest?' · DIRECT TEST: '+x.directStartTest.status:'');}
 async function post(ep,body){const r=await fetch(base+'/'+ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});let j={};try{j=await r.json()}catch(_){j={error:await r.text()}}if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j;}
 async function doRearm(auto){b.disabled=true;b.textContent='RE-ARMING…';try{const x=await post('rearm',{retry:1});paint(x);t.textContent='RE-ARM REQUEST SENT';d.textContent='Wait for the pink GHC Espresso light, then press the physical GHC Espresso button.';if(auto)setTimeout(closeUi,1300)}catch(e){t.textContent='RE-ARM FAILED';d.textContent=String(e)}finally{b.textContent='RE-ARM';setTimeout(()=>b.disabled=false,800)}}
 function stat(label,v){return '<div class="stat"><span class="small">'+label+'</span><b>'+v+'</b></div>'}
@@ -5560,8 +5784,8 @@ function renderModeCard(data){
   if(!data)return;
   lastModeCard=data;
   const releaseModeValue=data.releaseMode||(data.activeRelease===false?'off':'on');
-  const next=data.algorithmIntervention==='off'?'off':'full';
-  const active=data.algorithmInterventionActive==='off'?'off':(data.algorithmInterventionActive==='full'?'full':next);
+  const next=data.algorithmIntervention==='off'?'off':(data.algorithmIntervention==='hec'?'hec':'full');
+  const active=data.algorithmInterventionActive==='off'?'off':(data.algorithmInterventionActive==='hec'?'hec':(data.algorithmInterventionActive==='full'?'full':next));
   const release=$('mode-release'),algo=$('mode-algo'),card=$('modecard');
   if(release){
     release.dataset.mode=releaseModeValue;
@@ -5569,15 +5793,32 @@ function renderModeCard(data){
     release.classList.toggle('locked',data.canEdit===false);
   }
   if(algo){
-    algo.dataset.on=next==='full'?'true':'false';
+    algo.dataset.mode=next;
     algo.querySelectorAll('[data-algo]').forEach(function(b){b.setAttribute('aria-pressed',String(b.dataset.algo===next))});
     algo.classList.toggle('locked',data.canEdit===false);
   }
-  if(card)card.classList.toggle('state-off',next==='off');
+  if(card){card.classList.toggle('state-off',next==='off');card.classList.toggle('state-hec',next==='hec');}
   const rs=$('mode-release-sub');if(rs)rs.textContent=modeUiText(releaseModeValue==='auto'?'Auto · 0 bar 泄压 / 浸泡 → S2':releaseModeValue==='on'?'泄压 · 浸泡 · GHC 重启':'连续 S1 → S2 → S3');
-  const as=$('mode-algo-sub');if(as)as.textContent=modeUiText(next==='full'?'全开：正常 + 救急 · 全关：只检测':'只检测 · 不写入');
-  const l=$('mode-latch');if(l)l.textContent=modeUiText('本杯 算法'+(active==='full'?'全开':'全关'));
-  const n=$('mode-next');if(n)n.textContent=modeUiText('下一杯 算法'+(next==='full'?'全开':'全关')+' · 已保存');
+  const as=$('mode-algo-sub');if(as)as.textContent=modeUiText(next==='full'?'全开：插件调流 · HEC：APK 调流 · 全关：只检测':(next==='hec'?'HEC：APK 调流 · 插件监护 + 学习':'只检测 · 不写入'));
+  const l=$('mode-latch');if(l)l.textContent=modeUiText('本杯 算法'+(active==='full'?'全开':(active==='hec'?'HEC':'全关')));
+  const n=$('mode-next');if(n)n.textContent=modeUiText('下一杯 算法'+(next==='full'?'全开':(next==='hec'?'HEC':'全关'))+' · 已保存');
+  renderHecStatus(data);
+}
+function renderHecStatus(data){
+  const bar=$('hec-status');if(!bar)return;
+  const mode=data.algorithmIntervention==='off'?'off':(data.algorithmIntervention==='hec'?'hec':'full');
+  bar.style.display=mode==='hec'?'flex':'none';
+  if(mode!=='hec')return;
+  const h=data.hec||{};
+  const conn=$('hec-conn'),dot=$('hec-dot'),counts=$('hec-counts'),budget=$('hec-budget'),tk=$('hec-takeover'),tks=$('hec-takeover-sep');
+  if(conn)conn.textContent=modeUiText(h.ok?'APK 已连接':'APK 未连接')+(h.ok&&h.ageMs!=null?' '+(h.ageMs/1000).toFixed(1)+' s':'');
+  if(dot)dot.classList.toggle('bad',!h.ok);
+  if(counts)counts.textContent=modeUiText('外部写入')+' '+(h.externalWrites||0)+' · '+modeUiText('拒绝')+' '+(h.externalRejects||0)+' · '+modeUiText('看门狗')+' '+(h.watchdogs||0);
+  const t=window.__hecTrim||null;
+  if(budget)budget.textContent=modeUiText('本杯预算')+' '+(t?t.writes:0)+' / '+(t?t.maxWrites:0);
+  const taken=!!(h.takeover);
+  if(tk){tk.style.display=taken?'':'none';tk.textContent=modeUiText('HEC：本杯插件已接管')+(taken&&h.takeover.reason?' · '+modeUiText(h.takeover.reason==='hec-no-handshake'?'未握手':'心跳断开'):'');}
+  if(tks)tks.style.display=taken?'':'none';
 }
 async function loadModeCard(){
   try{
@@ -5587,7 +5828,7 @@ async function loadModeCard(){
   }catch(_){}
 }
 async function setAlgorithmMode(mode){
-  const next=mode==='off'?'off':'full';
+  const next=mode==='off'?'off':(mode==='hec'?'hec':'full');
   if(lastModeCard&&lastModeCard.algorithmIntervention===next)return;
   if(lastModeCard&&lastModeCard.canEdit===false){alert(modeUiText('仅空闲时可改算法介入'));return;}
   try{
@@ -8477,7 +8718,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       const opened=await host.transport.open({kind:"websocket",url:"ws://localhost:8080/ws/v1/machine/raw"});
       if(!opened||!opened.handle)throw new Error("raw socket missing handle");
       if(!live()){host.transport.close(opened.handle).catch(()=>{});return;}
-      t.handle=opened.handle;t.report.status=algorithmInterventionForRun(t.run)==="off"?"observe-only":"monitoring";
+      t.handle=opened.handle;t.report.status=algorithmInterventionForRun(t.run)==="off"?"observe-only":(algorithmInterventionForRun(t.run)==="hec"?"hec-external":"monitoring");
       kickS2Refill(t);
       host.transport.onEvent(t.handle,event=>{
         if(!live())return;
@@ -8635,7 +8876,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
   function liveTrimGovernor(t,reg,frame,command,target,base){
     const now=Date.now();
     if(state.cfg.liveTrimDecisionModel===false)return null;
-    if(algorithmInterventionForRun(t.run)==="off")return null;
+    if(effectiveInterventionForRun(t.run)==="off")return null;
     if(t.rescueMode)return null;
     if(state.phase==="stage2"&&t.startup&&t.startup.status==="complete"&&t.startup.plan&&t.startup.plan.strategy==="refill-85"){
       const rec=t.s2Recovery||(t.s2Recovery={});
@@ -8740,12 +8981,16 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
   async function liveTrimTick(t) {
     if(t.startup)t.startup.autoConfirmDelay=null;
     const predictiveMode=state.cfg.liveTrimDecisionModel!==false;
-    const intervention=algorithmInterventionForRun(t.run);
+    let intervention=effectiveInterventionForRun(t.run);
     const live=()=>state.liveTrim===t&&t.active&&state.diagnosticCurrent===t.run&&liveTrimPhaseAllowed(t);
     if(!live()){
       if(state.liveTrim===t&&t.active&&state.diagnosticCurrent===t.run&&["soak","restart_wait"].includes(state.phase))scheduleLiveTrimTick(t);
       return;
     }
+    // HEC insurance: confirm the APK handshake before the S2 refill dispatch.
+    // Runs ahead of every startup branch so a missing heartbeat latches the
+    // takeover and rebuilds the refill plan before any boost is issued.
+    if(algorithmInterventionForRun(t.run)==="hec"&&!hecTakeoverActive(t.run)&&state.phase==="stage2"&&Number(state.lastFrame)===1&&t.startup&&(t.startup.status==="armed"||(t.startup.status==="disabled"&&state.hecLastContactAtMs===0))&&!hecHeartbeatFresh(Date.now()))hecLatchTakeover(t.run,"hec-no-handshake");
     // A short boost has a reserved base-return write independent of ordinary
     // regression cadence. Never allow normal trim to extend the boost.
     if(t.startup&&["boosting","bleeding","returning","return-unconfirmed"].includes(t.startup.status)){
@@ -8801,6 +9046,12 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         scheduleLiveTrimTick(t);return;
       }
     }
+    // HEC insurance: heartbeat loss outside the refill window latches a plugin
+    // takeover and returns the pump to the profile base before the full law
+    // resumes. The refill-window check above owns the no-handshake case.
+    if(algorithmInterventionForRun(t.run)==="hec"&&!hecTakeoverActive(t.run))await hecHeartbeatWatchdog(t);
+    // A takeover latched this tick restores the full law immediately.
+    intervention=effectiveInterventionForRun(t.run);
     const exhausted=t.report.checks>=t.report.maxChecks;
     if(exhausted&&!t.pending){stopLiveTrim(`${t.report.maxChecks}-check-budget-complete`);return;}
     if(!exhausted)t.report.checks++;
@@ -8963,6 +9214,15 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         row.decision="observe";row.reason="algorithm-intervention-off-observe-only";
         t.report.observeOnlyChecks=(t.report.observeOnlyChecks||0)+1;
         if(rescueActive)t.report.observeOnlyRescue=(t.report.observeOnlyRescue||0)+1;
+        return;
+      }
+      // HEC without takeover: detection and learning evidence continue, but
+      // every live write belongs to the APK through external-flow. The trace
+      // still records would-be rescue state for the guardian report.
+      if(intervention==="hec"){
+        row.decision="observe";row.reason="hec-external-only";
+        t.report.hecObserveChecks=(t.report.hecObserveChecks||0)+1;
+        if(rescueActive)t.report.hecObserveRescue=(t.report.hecObserveRescue||0)+1;
         return;
       }
       if(!rescueActive){
@@ -9657,6 +9917,19 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         }
         return pluginHttpJson(request, 200, algorithmInterventionPayload());
       }
+      if (request.endpoint === "external-hello") {
+        if (String(request.method || "GET").toUpperCase() !== "POST") return pluginHttpJson(request, 405, { ok: false, reason: "method-not-allowed" });
+        hecTouchContact(request.body && typeof request.body === "object" ? request.body : null);
+        return pluginHttpJson(request, 200, { ok: true, ...externalStatusPayload() });
+      }
+      if (request.endpoint === "external-status") {
+        hecTouchContact(null);
+        return pluginHttpJson(request, 200, externalStatusPayload());
+      }
+      if (request.endpoint === "external-flow") {
+        if (String(request.method || "GET").toUpperCase() !== "POST") return pluginHttpJson(request, 405, { ok: false, reason: "method-not-allowed" });
+        return await externalFlowCommand(request);
+      }
       if (request.endpoint === "diagnostics") {
         const run = state.diagnosticLast;
         return pluginHttpJson(request, run ? 200 : 404, run ? { summary: diagnosticSummary(run), run } : { error: "No diagnostic run captured yet" });
@@ -10083,7 +10356,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
           emitSkinChanged();
         } else if (key === STORAGE_ALGORITHM_INTERVENTION) {
           let raw=value;
-          if(raw!=="off"&&raw!=="full"){try{const parsed=parseStoredJson(value);raw=parsed==="off"||parsed==="full"?parsed:"full";}catch(_){raw="full";}}
+          if(raw!=="off"&&raw!=="full"&&raw!=="hec"){try{const parsed=parseStoredJson(value);raw=parsed==="off"||parsed==="full"||parsed==="hec"?parsed:"full";}catch(_){raw="full";}}
           state.algorithmIntervention=normalizeAlgorithmIntervention(raw);
           state.algorithmInterventionStorageLoaded=true;
           emitSkinChanged();

@@ -1,3 +1,14 @@
+# 2.2.48 experimental
+
+算法介入开关扩成三档（全开 / HEC / 全关）。HEC 档把杯内调流交给 APK（HyperExControler），插件保留监护、记录与杯间学习，并带握手/心跳保险。见 [HANDOFF_v02248.md](HANDOFF_v02248.md) 与 [HEC_PROTOCOL_FOR_APK.md](../HEC_PROTOCOL_FOR_APK.md)。
+
+- **三档开关**：control-mode 接受 full / hec / off，旧存储值兼容；模式开杯锁存，运行中改档 409。诊断页算法滑块改三态（复用泄压模式样式），HEC 蓝色主题 + 状态条（连接心跳 / 外部写入·拒绝·看门狗计数 / 本杯预算），纯状态标注。
+- **外部调流**：新端点 external-hello（握手）、external-status（决策上下文 + 心跳）、external-flow（代写 A010）。写者仍只有插件一个：1/16 量化、0.10–8.00 硬边界、逻辑帧校验、预算复用档位滑块、上行压力门（≥限压×0.90 拒上行，下行不限）、遥测过期拒绝；pending/ACK 串行复用，trace write 行带 external:true。
+- **保险（本杯锁存接管）**：S2 补水前确认握手，从未握手或心跳超时 → 接管并当场把补水计划重建为插件 full 计划；萃取中心跳断 4 s → 接管，先把泵收回曲线基值再交回 full 控制律（含救急）。接管后本杯拒绝外部指令防双写，下一杯重新评估。HEC_HEARTBEAT_MS=4000。
+- **学习**：hec 杯 observationOnly=false，进杯间学习与自动下一杯；接管杯同样进学习；compactPersistentShotRecord 带 hecTakeover，增益指纹暂不加模式维度（学习连续）。
+- **不碰**：full/off 两档行为逐字不变（801 基线全绿）；LUT、校准、arming、泄压模式、皮肤、宿主。
+- **测试**：tests/verify_v02248.cjs **818/818**（801 基线 + 17 新增）；node --check 通过；manifest JSON 校验通过；渲染页 3 段脚本编译通过。
+
 # 2.2.47 experimental
 
 曲线标题前缀固定为 `HyperEx`：生成的曲线名与绑定判定都改用固定前缀，不再读设置里的自定义标题。与 ProfileRecorder 的归属判定（标题以 HyperEx 开头才算 HyperEx 的杯）对齐。见 [HANDOFF_v02247.md](HANDOFF_v02247.md)。

@@ -4,6 +4,8 @@
 > 本文是给 APK 对话的接口契约，**逐条实现即可，不需要改插件**。中立对话评估用同一份。
 > 基址：http://127.0.0.1:8080（APK 与 Decaid 同平板回环）。插件 id：decenthyperexplugin.reaplugin。
 > 下文省略前缀 /api/v1/plugins/decenthyperexplugin.reaplugin。
+> 2026-11-15 修订：字段名与拒绝分支按 plugin.js 2.2.48 实测更正（heartbeat / takeover 字段名、
+> external 计数并入 heartbeat 块、补 frame-not-confirmed / frame-not-writable）；插件代码未动。
 
 ## 0. 总原则
 
@@ -17,7 +19,8 @@
 
 ## 1. 版本与模式
 
-- GET /status 或 GET /control-mode → pluginVersion / algorithmIntervention。
+- 版本核对：GET /status 的 calibration.pluginVersion，或 GET /external-status 顶层 pluginVersion
+  （GET /control-mode 返回里没有 pluginVersion 字段）。档位核对：GET /control-mode → algorithmIntervention。
   **HEC 需要 pluginVersion ≥ 2.2.48**；旧插件没有 external-* 端点，APK 应提示升级而不是硬调。
 - POST /control-mode，body {"mode":"hec"|"full"|"off"}。
   仅空闲 200；运行中 409（本杯锁定）。下一杯生效。GET 同路读 {algorithmIntervention, algorithmInterventionActive, canEdit, ...}。
@@ -26,8 +29,9 @@
 ## 2. 握手与心跳（保险的核心）
 
 - POST /external-hello，body {"client":"HyperExControler","version":"<apk版本>"}（字段可省略，仅作记录）。
-  返回 200 {ok:true, mode, heartbeatTimeoutMs:4000, ...}。**hello 与 external-status 都刷新心跳**。
-- 心跳超时 HEC_HEARTBEAT_MS = 4000 ms（插件常量，external-status 里透出 heartbeatTimeoutMs）。
+  返回 200 {ok:true, mode, ...（其余字段同 §4 external-status）}，超时在 heartbeat.heartbeatTimeoutMs（=4000）。
+  **hello 与 external-status 都刷新心跳**。
+- 心跳超时 HEC_HEARTBEAT_MS = 4000 ms（插件常量，external-status 里透出 heartbeat.heartbeatTimeoutMs）。
 - **建议节奏**：控制界面打开即 hello；之后每 500–1000 ms GET /external-status（兼心跳兼决策上下文）。
   萃取中若 APK 决策周期更短，external-flow 本身也刷新心跳。
 - 保险判定（插件侧，APK 只需知道后果）：
@@ -55,12 +59,16 @@
   | hec-mode-required | 本杯不是 hec 档 | 停止发指令，提示切档 |
   | hec-takeover | 本杯已被插件接管 | 停止发指令，显示接管 |
   | not-extracting | 非萃取中 / 相位不允许 | 等下一杯 |
+  | frame-not-confirmed | 当前逻辑帧尚未确认 | 等 external-status 的 logicalFrame 非 null 再发 |
   | frame-mismatch | 逻辑帧不符 | 用 external-status 的 logicalFrame 重发 |
+  | frame-not-writable | 当前帧非流量泵步 / 是退出步 | 等进入可写帧再发 |
   | write-pending | 上一笔未确认 | 等 ACK 或超时（≤2 s）再发 |
   | write-budget | 本杯预算耗尽 | 停止，插件接管剩余 |
   | pressure-upward-blocked | 上行且压力 ≥ 限压×0.90 | 改下行或保持 |
   | telemetry-stale | 机器/秤遥测过期 | 等遥测恢复 |
   | command-busy | 插件正在写曲线等 | 稍后重试 |
+  400 分支：command-invalid（command 不是有限数字）、command-out-of-bounds（越出 0.10–8.00）。
+  未知 reason 一律按「停发 + 显示原文」兜底，不要按前缀猜。
 - 预算复用现有档位滑块（LiveFlowTrimLevel 1–4 → 50/150/200/250 笔/杯），external-status 透出 writes/maxWrites。
 - 上行压力门与内部补水门同口径（≥ limiter×0.90 拒上行）；**下行不限**（救急要能断流）。
 
@@ -72,11 +80,15 @@
     logicalFrame, physicalFrame, layout:{s1,release,s2,s3},
     targetGS, baseCommandMlS, lastCommandMlS, pending:{frame,command,ack}|null,
     pressureBar, limiterBar, machineAgeMs, scaleAgeMs, rawGS,
-    writes, maxWrites, heartbeat:{lastAtMs, ageMs, timeoutMs, ok},
-    takeover:{active, reason, atMs}|null,
-    external:{writes, rejects, watchdogs},
+    writes, maxWrites,
+    heartbeat:{heartbeatTimeoutMs, lastContactAtMs, ageMs, ok, client, takeover,
+               externalWrites, externalRejects, watchdogs},
+    takeover:{reason, atMs}|null,
     runId
   }
+- takeover 非 null 即本杯已接管（没有 active 字段）；heartbeat.takeover 与顶层 takeover 是同一对象。
+- client 为 hello 记录的 {name, version}|null；externalWrites / externalRejects / watchdogs 为
+  插件加载以来的累计计数（每杯开杯清零）。
 - rawGS 是插件最近一次 RAW 回归杯流（g/s），与插件决策同源；APK 若要更细可自行订阅
   Decaid 官方 ws/v1/scale/snapshot、ws/v1/machine/snapshot（与插件同源，不冲突）。
 - lastCommandMlS = 插件指令台账当前值（含外部代写与接管后的内部写）。takeover 后 APK 用它做显示即可。
@@ -91,10 +103,10 @@
 
 ## 6. APK 侧建议状态机
 
-1. 打开控制页 → GET /control-mode 核对版本与档位；需要时 POST 切 hec（空闲）。
+1. 打开控制页 → GET /status 核对版本（calibration.pluginVersion）+ GET /control-mode 核对档位；需要时 POST 切 hec（空闲）。
 2. POST /external-hello → 进入「已连接」；起 500–1000 ms external-status 轮询。
 3. 萃取中：按 external-status + 自取 WS 做决策 → POST /external-flow。
-4. 读到 takeover.active 或 409 hec-takeover → 停发指令，UI 显示「插件接管本杯」，继续轮询显示曲线。
+4. 读到 takeover 非 null 或 409 hec-takeover → 停发指令，UI 显示「插件接管本杯」，继续轮询显示曲线。
 5. 杯结束 → 回 idle；下一杯开杯前确认心跳仍在（轮询不断），否则插件会再次接管。
 6. 切后台/被杀：插件 4 s 后接管兜底；回前台读 external-status 重新同步（本杯若已接管则只读）。
 

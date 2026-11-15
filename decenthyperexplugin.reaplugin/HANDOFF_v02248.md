@@ -1,6 +1,6 @@
 # HyperEx 2.2.48 交接：HEC 档（外部调流 + 插件监护学习 + 握手保险）
 
-日期：2026-11-15（北京时间）。**代码已实现、回归全绿；未发版、未推送、未真机验证。**
+日期：2026-11-15（北京时间）。**已发版（GitHub Release + 夸克），用户授权「按规矩发版」；真机验证待做。**
 
 分支：auto-hyperex。基线：2.2.47（tag v2.2.47）。
 
@@ -80,9 +80,18 @@ full/off 两档行为、LUT、校准、arming/GHC、泄压模式、预设、曲�
 4. external-status 轮询 300–500 ms 是否够（APK 决策周期更短时上下文略旧，原始流自取补）。
 5. HEC 状态条字段取舍（示意 review/hec-mock/）。
 
-## 7. 发版（待用户授权）
+## 7. 发版回执（2026-11-15，用户授权「你要是确定不会影响现有功能的，可以按规矩发版了」）
 
-走 1.8xds：版本号已升、verify_v02248.cjs / RESULTS_v02248.txt / README 小节已备。
-提交只 add 本批：plugin.js / manifest.json / README.md / tests/verify_v02248.cjs / tests/RESULTS_v02248.txt /
-HANDOFF_v02248.md / 仓库根 HEC_PROTOCOL_FOR_APK.md 与 HANDOFF_2026-11-15-hec-mode-proposal.md。
-GitHub Release + 夸克上传先问用户。
+- 代码提交 6e6c2bb（auto-hyperex），tag v2.2.48（annotated），已推送（VPN 代理 127.0.0.1:57890）。
+  只 add 本批 9 文件：plugin.js / manifest.json / README.md / tests/verify_v02248.cjs / tests/RESULTS_v02248.txt /
+  HANDOFF_v02248.md / HEC_PROTOCOL_FOR_APK.md / HANDOFF_2026-11-15-hec-mode-proposal.md / release/notes-v2.2.48.md。
+  别人未提交的 HANDOFF_2026-10-31.md 等未碰。
+- 包从 tag 用 git archive 取（release/__build_v2248.ps1）：HyperExPulseFilter_v2.2.48.zip，**498,792 字节**。
+  SHA256：**919E1B2D965A86B7995C766F59E9AFC1368613DC74F47EACF4DFDFBAC580D64A**。
+  包内复核：解压后 node --check 通过、tests/verify_v02248.cjs **818/818**。
+- GitHub Release：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.48 （Latest，非 draft/prerelease；
+  资产 digest 与本地 SHA256 一致，gh release view 核对）。
+- 夸克：夸克网盘/来自：Codex/HyperExPulseFilter_v2.2.48.zip，498,792 字节，fileId 96a71fbc29484fbda2849ca771fbbb6f。
+- 发版说明：release/notes-v2.2.48.md。
+- 用户先更新平板插件；HEC 档真机联调待 APK 端（另一对话）实现后按协议 §8 清单做。
+  未装 APK 时选 HEC 档出杯，插件会在 S2 补水前自动接管，行为等同全开（保险兜底）。

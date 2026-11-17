@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.48";
+  const PLUGIN_VERSION = "2.2.49";
   // Generated profiles and profile binding share one fixed title prefix,
   // matching ProfileRecorder's ownership gate. Settings no longer rename them.
   const HYPEREX_TITLE_PREFIX = "HyperEx";
@@ -1245,7 +1245,7 @@ function createPlugin(host) {
           drift:finiteOrNull(x.drift)!==null?round(Number(x.drift),4):null,
           commandMlS:finiteOrNull(x.commandMlS)!==null?round(Number(x.commandMlS),4):null,
           commandBand:typeof x.commandBand==="string"?x.commandBand:null,
-          bands:(function(){const b={};for(const k of Object.keys(x.bands&&typeof x.bands==="object"?x.bands:{})){const v=x.bands[k],br=Number(v&&v.r);if(!(br>=GAIN_R_MIN&&br<=GAIN_R_MAX))continue;b[k]={r:round(br,4),n:Math.max(1,Math.floor(Number(v.n)||1)),lastObservedR:finiteOrNull(v.lastObservedR)!==null?round(Number(v.lastObservedR),4):null,updatedAt:v.updatedAt||null};}return Object.keys(b).length?b:null;})(),
+          bands:(function(){const b={};for(const k of Object.keys(x.bands&&typeof x.bands==="object"?x.bands:{})){const v=x.bands[k],br=Number(v&&v.r);if(!(br>=GAIN_R_MIN&&br<=GAIN_R_MAX))continue;b[k]={r:round(br,4),n:Math.max(1,Math.floor(Number(v.n)||1)),lastObservedR:finiteOrNull(v.lastObservedR)!==null?round(Number(v.lastObservedR),4):null,updatedAt:v.updatedAt||null,steadyN:v.steadyN==null?null:(Number.isFinite(Number(v.steadyN))?Math.max(0,Math.floor(Number(v.steadyN))):null),provisional:v.provisional===true};}return Object.keys(b).length?b:null;})(),
           lastRunId:x.lastRunId==null?null:String(x.lastRunId),updatedAt:x.updatedAt||null};
       }
       if(!Object.keys(stages).length)continue;
@@ -1299,6 +1299,14 @@ function createPlugin(host) {
       if(Number(trim.rescueWrites)>0)alpha=.5;
       else if(Number(trim.normalWrites)>0)alpha=.12;
     }
+    // 2.2.49 P2-5 (§22.3 fast absorption): a sub-threshold deviation scales alpha
+    // linearly toward the design base 0.35 instead of sitting at the 0.12
+    // normal-write damping (field 11-18 cup 8: 13.3% deviation absorbed at 0.12
+    // would need ~10 cups). Conservative: never above 0.35 below the 15% gate,
+    // zero boost at zero deviation; damped halving and the saturated 0.55
+    // override still apply downstream.
+    const dev=Number(deviation);
+    if(dev>0&&dev<=GAIN_MEMORY_DEVIATION)alpha=Math.max(alpha,GAIN_MEMORY_ALPHA*dev/GAIN_MEMORY_DEVIATION);
     if(Number(deviation)>GAIN_MEMORY_DEVIATION)alpha=Math.max(alpha,GAIN_MEMORY_DEVIATION_ALPHA);
     return alpha;
   }
@@ -1486,9 +1494,17 @@ function createPlugin(host) {
       const r=measured/command;
       if(!(r>=GAIN_R_MIN&&r<=GAIN_R_MAX))return null;
       const saturated=!!(evidence&&evidence.liveTrimChain&&evidence.liveTrimChain.usable===false);
+      // 2.2.49 P1-3: route the observation by the cup's BASE command, not the
+      // trim-modified plateau median. The r value still divides by the effective
+      // command (§22.3 denominator unchanged); the band key is the operating
+      // point the cup ran at, so within-cup trim excursions cannot move a HIT
+      // cup's gain into a neighbouring band (field 11-17 cup 6: base 3.875,
+      // effective 4.125 landed in 4.0-5.0 and woke a stale r=0.917 seed).
+      const baseCommand=Number(cfg.stage2CommandMlS);
+      const routeCommand=Number.isFinite(baseCommand)&&baseCommand>0?baseCommand:command;
       return {r,command,measured,reduced:!!quality.reducedWindow,source:saturated?"S2 tail local (actuator saturated)":"S2 steady tail",
         local:saturated,damped:ripple>=12,alphaOverride:saturated?.55:null,
-        commandBand:commandBandOf(command),window:{startPct:40,endPct:100}};
+        baseCommand:routeCommand,commandBand:commandBandOf(routeCommand),window:{startPct:40,endPct:100}};
     }
     if(stage==="s3"){
       if(String(cfg.stage3CommandOrigin||"")==="manual")return null;
@@ -1586,11 +1602,21 @@ function createPlugin(host) {
       if(obsBand){
         const bands=current.bands&&typeof current.bands==="object"?current.bands:{};
         const row=bands[obsBand]&&Number(bands[obsBand].r)>0?bands[obsBand]:null;
+        // 2.2.49 P1-4: a band seeded by a saturated/local estimate is provisional
+        // until two steady (non-local) observations confirm it; provisional rows
+        // never drive the suggestion base (gainMemorySuggestion falls back to the
+        // overall bucket r). Legacy rows without steadyN are grandfathered mature
+        // on first touch -- natural expiry, no retroactive downweight, no data
+        // rewrite (the P0-2 immature-band gate covers legacy n<3 rows).
+        const steadyObs=!observation.local;
         if(row){
           const bandAlpha=Number(alpha)>0?Number(alpha):GAIN_MEMORY_ALPHA;
           row.r=round(row.r+bandAlpha*(observation.r-row.r),4);
           row.n=(Number(row.n)||1)+1;row.lastObservedR=round(observation.r,4);row.updatedAt=now;
-        }else bands[obsBand]={r:round(observation.r,4),n:1,lastObservedR:round(observation.r,4),updatedAt:now};
+          if(row.steadyN==null||!Number.isFinite(Number(row.steadyN)))row.steadyN=2;
+          if(steadyObs)row.steadyN=Number(row.steadyN)+1;
+          row.provisional=Number(row.steadyN)<2;
+        }else bands[obsBand]={r:round(observation.r,4),n:1,lastObservedR:round(observation.r,4),updatedAt:now,steadyN:steadyObs?1:0,provisional:true};
         current.bands=bands;current.band=obsBand;
       }
       out.stages[stage]={status:"updated",r:current.r,n:current.n,observedR:current.lastObservedR,
@@ -1640,7 +1666,10 @@ function createPlugin(host) {
     // cross-band estimate is reported but never silently substituted.
     const effectiveBand=stage==="s2"?commandBandOf(stage2EffectiveCommand(run)):null;
     const band=effectiveBand||stateRow.commandBand||commandBandOf(stateRow.commandMlS);
-    const bandRow=band&&stateRow.bands&&stateRow.bands[band]&&Number(stateRow.bands[band].r)>0?stateRow.bands[band]:null;
+    const bandRowRaw=band&&stateRow.bands&&stateRow.bands[band]&&Number(stateRow.bands[band].r)>0?stateRow.bands[band]:null;
+    // 2.2.49 P1-4: provisional (local-seeded, unconfirmed) band rows never drive
+    // the suggestion; fall back to the overall bucket r.
+    const bandRow=bandRowRaw&&bandRowRaw.provisional!==true?bandRowRaw:null;
     const bandR=bandRow?Number(bandRow.r):null;
     const bandN=bandRow?Math.max(1,Math.floor(Number(bandRow.n)||1)):0;
     const localR=Number(stateRow.lastLocalR);
@@ -1649,6 +1678,12 @@ function createPlugin(host) {
     if(!(r>=GAIN_R_MIN&&r<=GAIN_R_MAX))return null;
     const ceiling=Math.min(LIMITS.commandFlowMax,Number.isFinite(lut)&&lut>0?lut*2:LIMITS.commandFlowMax);
     const command=snapCommandFlow(Math.max(LIMITS.commandFlowMin,Math.min(ceiling,target/r)));
+    // 2.2.49 P1-3: cross-band keeps the L-7 estimate-vs-command comparison but
+    // drops the trim-sensitive effective-band term; a within-cup trim excursion
+    // across 4.0 is not a regime change. The base-band term adds operating-point
+    // moves between cups.
+    const baseBand=stage==="s2"?commandBandOf(Number(cfg.stage2CommandMlS)):null;
+    const crossBand=!!(stateRow.commandBand&&(stateRow.commandBand!==commandBandOf(command)||(baseBand&&stateRow.commandBand!==baseBand)));
     return {stage,bucketId:sourceBucket.id,activeBucketId:activeBucket.id,center:sourceBucket.center,radius:sourceBucket.radius,bucketSamples:stateRow.n,
       stale:!regime||fallback,fallback:fallback?"cross-bucket":null,r:round(r,4),smoothedR:round(stateRow.r,4),observedR:stateRow.lastObservedR,
       band:band||null,bandR:bandR?round(bandR,4):null,bandN,bandMatched:!!bandRow,
@@ -1656,7 +1691,7 @@ function createPlugin(host) {
       confidence:local?"LOW":(hintBucket?"LOW":gainConfidence(stateRow)),targetGS:round(target,3),lutCommandMlS:Number.isFinite(lut)?round(lut,3):null,
       commandMlS:command,drift:stateRow.drift==null?null:round(stateRow.drift,4),
       commandBand:stateRow.commandBand||null,currentBand:commandBandOf(command),
-      crossBand:!!(stateRow.commandBand&&((band&&stateRow.commandBand!==band)||stateRow.commandBand!==commandBandOf(command))),
+      crossBand,bandProvisional:!!(bandRowRaw&&bandRowRaw.provisional===true),baseBand:baseBand||null,
       sourceRunId:stateRow.lastRunId||null,s1Hint:hint||null,hintApplied:!!hintBucket,applied:false};
   }
   function scalarLearningSuggestion(label,key,current,previous,policy,steadyLarge) {
@@ -4324,7 +4359,22 @@ function createPlugin(host) {
       }
       const curve=Number(run.config&&run.config.stage2CommandMlS);
       const numeric=s2.usable!==false&&(s2.action==="ADJUST"||s2.action==="LUT COMPENSATE")&&Number.isFinite(Number(s2.suggestedCommandMlS));
-      if(numeric){
+      // 2.2.49 P0-2: HIT anchor + immature-band gate guard BOTH memory branches.
+      // tailHit: the RAW tail is inside the learning band at the current base.
+      // regimeChange: a local estimate or the operating point (base band) moving
+      // between cups -- NOT the L-7 estimate-vs-command crossBand used by the
+      // pull branch: a contaminated band pushes the memory command into a far
+      // band, which would circularly disable the anchor when it is needed most.
+      const oq2=controlOutputQuality(run,"stage2");
+      const tailHit=!!(oq2&&oq2.available&&Number.isFinite(Number(oq2.tailErrorPct))&&Math.abs(Number(oq2.tailErrorPct))<=policy.deadband);
+      const regimeChange=!!(memoryS2.local||(memoryS2.baseBand&&memoryS2.commandBand&&memoryS2.commandBand!==memoryS2.baseBand));
+      const bandImmature=!regimeChange&&memoryS2.bandMatched&&Number(memoryS2.bandN)<3;
+      if(numeric&&((tailHit&&!regimeChange)||bandImmature)){
+        // The scalar correction stays as-is; memory must not amplify it toward
+        // a stale target/r (field cup 6 shape: tail-reverse 4.25 pulled to 5.25).
+        s2.gainMemory.role=tailHit&&!regimeChange?"hit-anchor":"immature-band";
+        s2.reason=(s2.reason?String(s2.reason)+"; ":"")+(tailHit&&!regimeChange?"HIT anchor: tail "+round(oq2.tailErrorPct,1)+"% inside the band; gain memory pull withheld (r="+memoryS2.r+")":"gain memory band n="+memoryS2.bandN+" < 3: immature band pull withheld");
+      }else if(numeric){
         // 2.2.28: a local/cross-band/high-confidence memory is an estimator
         // output, not just a prior. Pull the next base toward target/r by 70%
         // (LOW/local) or 100% (HIGH); the same-shot reverse stays as a bounded
@@ -4356,9 +4406,36 @@ function createPlugin(host) {
         s2.usable=true;s2.action="HOLD";delete s2.suggestedCommandMlS;
         s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory already maps to the curve command";
       }else{
-        s2.usable=true;s2.action=s2.action==="LUT COMPENSATE"?"LUT COMPENSATE":"ADJUST";
-        s2.suggestedCommandMlS=memoryS2.commandMlS;s2.gainMemory.applied=true;
-        s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory "+memoryS2.bucketId+" maps "+memoryS2.targetGS+" g/s to "+memoryS2.commandMlS+" ml/s (r="+memoryS2.r+", n="+memoryS2.bucketSamples+", "+memoryS2.confidence+")";
+        // 2.2.49 P0-2/P0-1: direct mapping -- HIT anchor, immature-band gate,
+        // then a damped one-step transition (§22.1 shrink the true amplitude
+        // error; §22.8 downweight + one-step transition, not a wall).
+        if(s2.action==="HOLD"&&tailHit&&!regimeChange){
+          s2.usable=true;s2.action="HOLD";delete s2.suggestedCommandMlS;
+          s2.gainMemory.applied=false;s2.gainMemory.role="hit-anchor";
+          s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"HIT anchor: tail "+round(oq2.tailErrorPct,1)+"% inside the band; gain memory override withheld (r="+memoryS2.r+")";
+        }else if(bandImmature){
+          // 2.2.49 P0-2: an immature band row (<3 samples) cannot move the base
+          // through the direct-mapping branch (field 11-17 cup 6: an n=2 band
+          // seeded by a saturated local r=0.917 jumped the base +29% in one cup).
+          s2.usable=true;s2.action="HOLD";delete s2.suggestedCommandMlS;
+          s2.gainMemory.applied=false;s2.gainMemory.role="immature-band";
+          s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory band n="+memoryS2.bandN+" < 3: immature band cannot move the base";
+        }else{
+          // 2.2.49 P0-1: the direct mapping is a damped one-step transition, not
+          // a jump -- the same ±25% / 0.35 ml/s envelope as the pull branch
+          // (§22.8 downweight + one-step transition, not a wall).
+          const c=Number.isFinite(curve)?curve:Number(memoryS2.commandMlS);
+          const hi=Math.max(c*1.25,c+0.35),lo=Math.min(c*0.75,c-0.35);
+          const bounded=snapCommandFlow(clampCommandFlow(Math.max(lo,Math.min(hi,Number(memoryS2.commandMlS)))));
+          if(Number.isFinite(bounded)&&Math.abs(bounded-c)>=.005){
+            s2.usable=true;s2.action=s2.action==="LUT COMPENSATE"?"LUT COMPENSATE":"ADJUST";
+            s2.suggestedCommandMlS=round(bounded,4);s2.gainMemory.applied=true;s2.gainMemory.role="base";
+            s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory "+memoryS2.bucketId+" maps "+memoryS2.targetGS+" g/s to "+memoryS2.commandMlS+" ml/s (r="+memoryS2.r+", n="+memoryS2.bucketSamples+", "+memoryS2.confidence+"); damped transition "+formatCommandFlow(c)+" -> "+formatCommandFlow(bounded)+" ml/s";
+          }else{
+            s2.usable=true;s2.action="HOLD";delete s2.suggestedCommandMlS;
+            s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory damped transition retains the curve command";
+          }
+        }
       }
     }
     if(memoryS3){

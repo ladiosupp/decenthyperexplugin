@@ -61,17 +61,28 @@
 - 评估报告 §4 的 §22 冲突清单中，「学习输出仍是绝对指令 / mapCreatedAt 作废」（§22.7 仍然差 1）与「S2 无方向保护」（仍然差 2）**本批未动**（不在授权范围），留后续设计。
 - 残留风险（已记录）：legacy 成熟污染带在**非 HIT** 杯仍可能经 pull 分支做有界（±25%/0.35）移动；P1-3 路由 + P2 吸收使其逐杯衰减，真机观察。
 
-## 8. 发版回执（commit 2 补）
+## 8. 发版回执（2026-11-18）
 
-- 版本 2.2.49 / tag v2.2.49 / commit：待补
-- zip 字节 / SHA256：待补
-- GitHub Release id / asset id：待补
-- 夸克 fileId（来自：Codex）：待补
-- 平板 Download/ 推送：待补（安装由用户在 Decaid 里做）
+- 版本 2.2.49 / tag v2.2.49 / 代码 commit **8593268**（branch auto-hyperex，已推 origin）。
+- zip **506532 字节**，SHA256 **AB47972049093076331F4C8A9C1FC5CBAB006AF858AA864482FA49FAD486414B**；git archive 自 tag 构建（干净基线，无他人 WIP）；包内回归 **829/829**、node --check 通过。
+- GitHub Release **449341221** / asset **RA_kwDOVO5zXc4tXbcI**：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.49
+- 夸克 fileId **6233e61ba962427385dc49bbcc6899e0**（夸克网盘/来自：Codex，506532 字节）。
+- 平板 **/sdcard/Download/HyperExPulseFilter_v2.2.49.zip** 已推并 ls 核对 506532 字节（taiko，mDNS adb）。**安装由用户在 Decaid 里做，不代装**。
+- 推送走 VPN 代理 127.0.0.1:57890（AGENTS 18）；gh token 走 git credential fill + HTTPS_PROXY。
 
 ## 9. 别碰 / 复跑索引
 
 - 别人未提交/未跟踪一律不碰不代提交；本批只 add：plugin.js / manifest.json / README.md / tests/verify_v02249.cjs / tests/RESULTS_v02249.txt / HANDOFF_v02249.md（+ commit 2 回执更新本 MD）。
 - 记忆数据不删；LUT/硬包线/单一写者/full-off-hec 协议不动。
 - 复跑：node tests/verify_v02249.cjs；node D:/vscode/HyperExController/.tools/__s2-fix-replay.cjs（交叉验证+回放）；评估脚本 __s2-eval-extract/scan/replay/sim.cjs（HEC .tools，不入库）。
+
+## 10. 观察项核实（统筹转达，只读，未扩 scope）
+
+杯末弹窗评估对话发现 controlOutputQuality reduced-window 回退重复 push（plugin.js:8352，同一 if-push 连写两遍）。**属实**。影响面核实：
+
+- 重复 push 是均匀加倍：**均值 / 方差 / RMSE / 过冲不变**；**p95 值也不变**（加倍保持经验分布，索引 ceil(0.95×2n)−1 虽变但映射到同一原序统计量）；唯一失真的是 **windows 计数（×2）**。
+- windows 的唯一消费方是 s2AdaptiveSuggestion 的 large 门（1965 行 q.windows>=2）：单个真实 reduced 窗会被算成 2，保守策略下大偏差快杯可能早一杯获得单杯数值学习资格（置信度仍被 reduced 封顶 MEDIUM、步长仍 policy 有界）——窄边界，非安全问题。诊断页 windows 显示虚高（外观）。
+- **杯间增益学习不受影响**：gainStageObservation 消费的 tailMeanGS / tailRippleCVPct / reducedWindow 均不变，r_obs 不变。
+- 真机 history-4 77 杯里仅 **1 杯**命中 reduced 回退：1794731835503-2（11-15，windows 8 = 实 4，hec 杯 NEAR −10.1%）；杯 6/7/8 链全不受影响。
+- 修法 = 删一行重复 if-push（零行为风险，windows 计数回正、large 门回紧）。**未修**（不在本批授权）；待用户拍板搭下一批（如 2.2.50）或另批。2.2.49 发版未因此延迟。
 

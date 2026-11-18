@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.49";
+  const PLUGIN_VERSION = "2.2.50";
   // Generated profiles and profile binding share one fixed title prefix,
   // matching ProfileRecorder's ownership gate. Settings no longer rename them.
   const HYPEREX_TITLE_PREFIX = "HyperEx";
@@ -181,6 +181,15 @@ function createPlugin(host) {
   // This only tightens the safety envelope; the flood amplitude stays envelope-bound.
   const S2_REFILL_BLIND_PRESSURE_BAR=2.5;
   const S2_REFILL_BLIND_RISE_BAR=0.5;
+  // 2.2.50 (user 2026-11-18 "过冲不能太高", peak scale-flow <=40% hard acceptance):
+  // cutoff robustness. The flood volume law (§22.11) is unchanged; these bound the
+  // RETURN timing so a noisy acceleration estimate cannot delay cutoff and inflate
+  // the retained-water peak (field cup 9 fired at observed 5.86 vs cup 6's 2.94,
+  // peaking +58.6%). Backstop = latest observed-slope firing fraction of target;
+  // accel history = median-filter window; predicted cap = sanity ceiling x target.
+  const S2_REFILL_CUTOFF_BACKSTOP=0.85;
+  const S2_REFILL_ACCEL_HISTORY=4;
+  const S2_REFILL_PREDICTED_CAP=1.6;
   // 2.2.46 (user 2026-11-14): after a refill return the cup flow overshoots and
   // then decays; the 1.5 s prediction extrapolates that decay too far and the
   // ordinary feedback chases it upward (field: 4.94->5.19->5.44->5.69 while the
@@ -3213,10 +3222,29 @@ function createPlugin(host) {
     if(tail[tail.length-1].x-tail[0].x<.6)return null;
     const fit=linearRegression(tail);if(!fit||tail.length<6||fit.r2<.90||fit.slope<0)return null;
     const previous=t.startup.lastEstimate,current={slope:fit.slope,stamp:tail[tail.length-1].x,r2:fit.r2};
-    let acceleration=previous&&current.stamp>previous.stamp?(current.slope-previous.slope)/(current.stamp-previous.stamp):0;
+    // 2.2.50: median-filter acceleration over a short history of slope estimates
+    // instead of one raw difference, so a lone noisy slope jump cannot alone drive
+    // the lead compensation. Clamp stays at the physical ±target bound.
+    if(!Array.isArray(t.startup.estHistory))t.startup.estHistory=[];
+    if(!previous||current.stamp>previous.stamp){
+      t.startup.estHistory.push(current);
+      if(t.startup.estHistory.length>S2_REFILL_ACCEL_HISTORY)t.startup.estHistory.shift();
+      t.startup.lastEstimate=current;
+    }
+    const hist=t.startup.estHistory;let acceleration=0;
+    if(hist.length>=2){
+      const pairs=[];
+      for(let i=1;i<hist.length;i++){const dt=hist[i].stamp-hist[i-1].stamp;if(dt>0)pairs.push((hist[i].slope-hist[i-1].slope)/dt);}
+      if(pairs.length){pairs.sort((a,b)=>a-b);acceleration=pairs.length%2?pairs[(pairs.length-1)/2]:(pairs[pairs.length/2-1]+pairs[pairs.length/2])/2;}
+    }
     acceleration=Math.max(-t.run.config.stage2Flow,Math.min(t.run.config.stage2Flow,acceleration));
-    if(!previous||current.stamp>previous.stamp)t.startup.lastEstimate=current;
-    return {...current,acceleration,predicted:Math.max(0,current.slope+acceleration*t.startup.plan.predictionSeconds)};
+    const predicted=Math.max(0,current.slope+acceleration*t.startup.plan.predictionSeconds);
+    // 2.2.50: the shaping law (boundedRefillCommand) keeps the UNCAPPED prediction
+    // so a massive overshoot still commands full bleed down to commandFlowMin
+    // (§22.11 full driver range). The sanity cap is display/record only; the
+    // observed backstop in s2RefillReturnReason bounds firing lateness independently.
+    const predictedCapped=Math.min(predicted,t.run.config.stage2Flow*S2_REFILL_PREDICTED_CAP);
+    return {...current,acceleration,predicted,predictedCapped:round(predictedCapped,3)};
   }
   function s2RefillReturnReason(t) {
     const p=t.startup,plan=p.plan;
@@ -3246,9 +3274,15 @@ function createPlugin(host) {
     // observed noise floor below which a spike may not end the refill. Measured
     // on the closed-loop plant: +36% peak with the old observed-flow criterion,
     // about half that with this one (2.2.2 measured +52% on the real machine).
-    if(flow&&Number.isFinite(observed)&&observed>=threshold*.6&&Number.isFinite(decisionFlow)&&decisionFlow>=target){
-      p.cutoff={rawGS:round(flow.slope,3),predictedGS:Number.isFinite(predicted)?round(predicted,3):null,decisionGS:round(decisionFlow,3),thresholdGS:round(threshold,3),atMs:Date.now()};
-      return "S2 refill reached predicted target with observed above noise floor";
+    // 2.2.50: prediction stays the primary cutoff; an observed-slope backstop bounds
+    // firing lateness when the acceleration estimate is unreliable, so the peak
+    // stays inside the <=40% tripwire without reducing the flood (§22.11 unchanged).
+    const backstop=target*S2_REFILL_CUTOFF_BACKSTOP;
+    const predictedHit=Number.isFinite(decisionFlow)&&decisionFlow>=target;
+    const backstopHit=Number.isFinite(observed)&&observed>=backstop;
+    if(flow&&Number.isFinite(observed)&&observed>=threshold*.6&&(predictedHit||backstopHit)){
+      p.cutoff={rawGS:round(flow.slope,3),predictedGS:flow.predictedCapped!=null?flow.predictedCapped:(Number.isFinite(predicted)?round(predicted,3):null),predictedRawGS:Number.isFinite(predicted)?round(predicted,3):null,decisionGS:round(decisionFlow,3),thresholdGS:round(threshold,3),backstopGS:round(backstop,3),basis:predictedHit?"predicted":"observed-backstop",atMs:Date.now()};
+      return predictedHit?"S2 refill reached predicted target with observed above noise floor":"S2 refill observed-slope backstop reached (bounded overshoot)";
     }
     return null;
   }
@@ -4367,7 +4401,8 @@ function createPlugin(host) {
       // band, which would circularly disable the anchor when it is needed most.
       const oq2=controlOutputQuality(run,"stage2");
       const tailHit=!!(oq2&&oq2.available&&Number.isFinite(Number(oq2.tailErrorPct))&&Math.abs(Number(oq2.tailErrorPct))<=policy.deadband);
-      const regimeChange=!!(memoryS2.local||(memoryS2.baseBand&&memoryS2.commandBand&&memoryS2.commandBand!==memoryS2.baseBand));
+        const manualOrigin=String(run.config&&run.config.stage2CommandOrigin||"")==="manual";
+        const regimeChange=!!(memoryS2.local||(!manualOrigin&&memoryS2.baseBand&&memoryS2.commandBand&&memoryS2.commandBand!==memoryS2.baseBand));
       const bandImmature=!regimeChange&&memoryS2.bandMatched&&Number(memoryS2.bandN)<3;
       if(numeric&&((tailHit&&!regimeChange)||bandImmature)){
         // The scalar correction stays as-is; memory must not amplify it toward
@@ -4441,6 +4476,16 @@ function createPlugin(host) {
     if(memoryS3){
       s3.gainMemory={...memoryS3,applied:false};
       s3.reason=(s3.reason?String(s3.reason)+"; ":"")+"S3 level memory recorded (r="+memoryS3.r+", n="+memoryS3.bucketSamples+"); shape application remains the separate S3 drift step";
+    }
+    // 2.2.50: respect a user-set manual base. With stage2CommandOrigin=manual the
+    // user explicitly chose the operating point; gain memory and the scalar learner
+    // advise only, they do not override it (symmetric with gainStageObservation
+    // refusing manual-origin learning). Breaks the cup-9 loop where manual 3.875 was
+    // re-written to 4.3125 by the damped memory mapping every cup.
+    if(String(run.config&&run.config.stage2CommandOrigin||"")==="manual"&&s2.action!=="HOLD"){
+      s2.usable=true;s2.action="HOLD";delete s2.suggestedCommandMlS;
+      if(s2.gainMemory){s2.gainMemory.applied=false;s2.gainMemory.role="manual-anchor";}
+      s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"manual origin: user-set base retained; memory/scalar advise only";
     }
     s1.evidenceBasis=s1ev&&s1ev.measurementBasis||"startup 20–80%";
     s1.historySearch=searchAudit(s1Search);s2.historySearch=searchAudit(s2Search);s3.historySearch=searchAudit(s3Search);
@@ -8349,7 +8394,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         const end=Number(data[i].scaleTimestampSeconds);if(end<tail+0.8)continue;
         const rows=data.slice(0,i+1).filter(x=>Number(x.scaleTimestampSeconds)>=Math.max(tail,end-2));
         if(rows.length<6||rows.some((x,j)=>j>0&&(Number(x.scaleTimestampSeconds)<=Number(rows[j-1].scaleTimestampSeconds)||Number(x.scaleTimestampSeconds)-Number(rows[j-1].scaleTimestampSeconds)>.6)))continue;
-        const r=regressionForRawSamples(rows);if(r&&r.seconds>=0.8&&r.r2>=.95&&r.slope>0){flows.push(r.slope);reducedWindow=true;}if(r&&r.seconds>=0.8&&r.r2>=.95&&r.slope>0){flows.push(r.slope);reducedWindow=true;}
+        const r=regressionForRawSamples(rows);if(r&&r.seconds>=0.8&&r.r2>=.95&&r.slope>0){flows.push(r.slope);reducedWindow=true;}
       }
     }
     const mean=average(flows),variance=mean===null?null:average(flows.map(x=>(x-mean)*(x-mean)));

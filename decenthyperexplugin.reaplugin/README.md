@@ -1,3 +1,15 @@
+# 2.2.50 experimental
+
+S2 收回稳健性 + manual 基值尊重（评估驱动，2.2.49 装机首杯杯 9：base 手动 3.875 正确、flood 7 与杯 6 同，但峰秤流 +58.6% 超 §22.5 40% 绊线）。**灌水量律不动（§22.11 维持）**；修的是收回时机与杯间锚。用户 2026-11-18 新增约束「过冲不能太高」→ 峰秤流 ≤40% 硬验收（争取更低），保住 ≥7.0 灌水与 90° 上升。见 [HANDOFF_v02250.md](HANDOFF_v02250.md) 与技能 §22.18。
+
+- **cutoff 实测斜率背 stop**：observed ≥0.85×target 作最晚触发界（预测 ≥target 仍主判，取先）；独立于 cutoffPercent。触发实测斜率有界 → 峰有界。杯 9 旧律触发 5.861（峰 +58.6%）→ 新律 ≤4.25。
+- **accel 中位滤波**：最近 4 个斜率估计的相邻差分中位（拒单尖峰），夹 ±target 不变；predicted 显示 sanity 封顶 1.6×target，**shaping 律仍用未封顶 predicted**（保满 bleed 到 commandFlowMin）。
+- **manual-origin 锚**：stage2CommandOrigin=manual → S2 强制 HOLD 保住用户 base（记忆/标量只建议不覆盖）；regimeChange 排除 manual 回基值。破「manual 3.875 每杯被写回 4.3125」环。
+- **重复 push 修**：controlOutputQuality reduced 回退删重复 if-push（windows 计数回正、large 门回紧）。
+- **不碰**：§22.11 灌水上限/矢量、LUT、硬包线、单一写者、full-off-hec 协议、两段收口、杯内灌水量律。
+- **测试**：tests/verify_v02250.cjs **837/837**（829 基线 + 8 新增；3 条 cutoff 基线按新口径重写、2 版本断言更新）；node --check / manifest JSON 通过。闭环（真实 dispatch/tick + 抖动 0/0.6/1.2）峰 +15.4% ≤40%、rise 0.6s、maxCmd 7；真机杯 9 回放新律触发 ≤4.25（旧记录 5.861）。
+
+
 # 2.2.49 experimental
 
 S2 杯间自适应加固（评估驱动，2026-11-17/18 真机杯 6/7/8 证据）。杯内自适应灌水律不动；修的是杯间 override 的「污染 band 先验 + 直接映射无步长阻尼」缺陷：杯 6 HIT 后 base 被一步从 3.875 跳到 5.0（+29%），造成杯 7/8 +30.1%/+21.8% 过冲、秤流峰值 +52%/+58%。见 [HANDOFF_v02249.md](HANDOFF_v02249.md)。

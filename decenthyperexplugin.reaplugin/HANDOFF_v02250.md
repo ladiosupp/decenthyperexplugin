@@ -1,7 +1,7 @@
 # HANDOFF v2.2.50：S2 收回稳健性 + manual 基值尊重 + 重复 push 修
 
 > 插件侧 only。用户 2026-11-18 授权「2.2.50 加上修重复 push 去动手吧，口径维持但是加上约束，过冲不能太高」。
-> **实施 + 测试 + 本地 commit 已授权；发版（push/Release/夸克/平板）未授权**——包备好回归全绿后停下，回叫统筹 ready，待用户批准发版。
+> 用户 2026-11-18 晚批准发版（「发，按接力 §3 全套执行」，统筹转达）；发版已执行，回执见 §4（本回执 commit 补）。
 > 口径真源 decentplugin §22（新增 §22.18 记录本批 + 用户过冲约束）；评估真源 HANDOFF_2026-11-18-flood-strategy-eval.md（未跟踪）。
 
 ## 0. 一句话
@@ -29,15 +29,19 @@
 - 评估选项 (a) 三项全做；选项 (b)（flood 相对 base 设上限）与 §22.11 冲突，**未做**（用户口径维持）。
 - 杯内 platform/center 读路径（P1-3 有意未动）证实良性，本批不动。
 
-## 4. 发版状态：待发版（用户批准后才执行）
+## 4. 发版回执（2026-11-18，用户批准「发，按接力 §3 全套执行」）
 
-- 本地 commit + tag v2.2.50 + 干净 zip（git archive 自 tag）已备；**push / GitHub Release / 夸克 / 平板推送未执行**（用户本次只说「动手」没说「发」）。
-- 发版步骤（批准后）：git -c http.proxy=http://127.0.0.1:57890 push origin auto-hyperex v2.2.50 → gh release create v2.2.50 zip（token git credential fill + HTTPS_PROXY 57890，notes-v2.2.50.md）→ 夸克 upload「来自：Codex」fid ~1gOHOd8RH7eUH3bLHdZgsnt7QwJnjHMsjNwDL1clUPAh17wXDef6aYH_RARNLHebEAcUK2Vb_boDGZYRKt8-4Fo|wgooCuplegY → adb -s adb-haf6uwvcqcdujzin-trqoCZ._adb-tls-connect._tcp push zip /sdcard/Download/（不代装）。
-- 装机首杯预期：manual 锚生效后用户手动 base 不再被覆盖；cutoff 背 stop 把峰压 ≤40%。建议装机仍可手动 S2 3.875（autoApply 可留 ON，manual 锚保住）。
+- 版本 2.2.50 / tag v2.2.50 / 代码 commit **930ce25**（branch auto-hyperex，已推 origin；远端分支头与 tag 均 930ce25，ls-remote 核过；自 fd32827 快进，只本批 1 commit）。
+- zip **510796 字节**，SHA256 **2C3B7378F86D8E67200508043F2B11190D8B564C9E857B9523D92600DEE4D863**；git archive 自 tag 构建（干净基线，无他人 WIP）；包内 9/9 文件与 tag 逐文件 SHA256 一致；包内回归 **837/837**（统筹独立复跑核过）。
+- GitHub Release **449845323** / asset **RA_kwDOVO5zXc4teoab**：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.50
+- 夸克 fileId **22cb7d9183be426c94d7444be269b95d**（夸克网盘/来自：Codex，510796 字节）。
+- 平板 **/sdcard/Download/HyperExPulseFilter_v2.2.50.zip** 已推并 ls 核对 510796 字节（2026-11-18 18:20，mDNS adb）。**安装由用户在 Decaid 里做，不代装**。
+- 推送走 VPN 代理 127.0.0.1:57890（AGENTS 18）；gh token 走 git credential fill + HTTPS_PROXY。
+- 装机首杯预期：manual 锚生效后用户手动 base 不再被覆盖；cutoff 背 stop 把峰秤流压 ≤40%。建议装机仍可手动 S2 3.875（autoApply 可留 ON，manual 锚保住）。首杯监测归取证对话 01a1e685。
 
 ## 5. 待拍板 / 后续
 
-- 发版批准（统筹问用户）。
+- 发版已批准并执行（2026-11-18 晚，回执见 §4）。
 - backstop 0.85 / accel 历史 4 / predicted cap 1.6 为保守起步，真机验证后可调（另批）。
 - 评估残留：legacy 成熟污染带在非 manual 杯仍可能经 pull 有界移动（P1-3 路由 + P2 吸收逐杯衰减），真机观察。
 

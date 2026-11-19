@@ -1,6 +1,6 @@
 # HANDOFF v2.2.52：诊断与编辑 UX 加固（非控制律小批）
 
-> 插件侧 only。用户 11-19 批「派插件接力做」——⑤ 小批三项（(c) 诊断字段＋§22.18 文案澄清＋③ UX 歧义修），**改码不发版**（发版另问）。
+> 插件侧 only。用户 11-19 批「派插件接力做」——⑤ 小批三项（(c) 诊断字段＋§22.18 文案澄清＋③ UX 歧义修）改码批；用户另批「2.2.52发版吧」全 SOP 已发版，回执见 §3。
 > 口径真源 decentplugin §22；杯 12 核码 ../HANDOFF_2026-11-19-cup12-observations-eval.md（未跟踪）。
 
 ## 0. 一句话
@@ -18,9 +18,15 @@
 - tests/verify_v02252.cjs **851/851**（846 基线＋5 新增）。新增：cutoff 诊断字段存在性＋margin 独立复算（rawGS−backstop）＋firingObservedGS=rawGS＋backstop 控制律不变 / refill check 斜率序列（rawGS/predictedGS/backstopGS=4.25/startupStatus）/ 按钮改名（新标签在、旧标签无）/ adaptiveModePreview 学习值与 HOLD/无建议文案 / stageTestRow ADAPTIVE 置灰＋adprev span＋manual 仍可编辑。
 - 版本钉 17 处＋文件名＋正则升 2.2.52；node --check / manifest JSON 通过。禁镜像断言（margin 复算、预览文案、HTML 字段存在性）。
 
-## 3. 发版状态
+## 3. 发版回执（2026-11-19，用户批准「2.2.52发版吧」全 SOP）
 
-- **改码批，未发版**（用户当次授权只对改码；发版须另批）。无 tag/Release/夸克/平板推送。本地 commit（只 add 本批 6 文件）。
+- 版本 2.2.52 / tag v2.2.52 / 代码 commit **4bca7ef**（branch auto-hyperex，已推 origin；远端分支头与 tag 均 4bca7ef，ls-remote 核过；自 07159d9 快进）。
+- zip **518062 字节**，SHA256 **B7D8B394FE935E0AF92FE8FF2678DCC222BFD549430EAD486F7D5312D5147922**；git archive 自 tag 干净基线（无他人 WIP）；包内回归 **851/851**。
+- GitHub Release **450818275** / asset **RA_kwDOVO5zXc4tp4Ch**：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.52
+- 夸克 fileId **6410d17dccdd472ab942abdd3ba6578b**（夸克网盘/来自：Codex，518062 字节；返回无 notice.text）。
+- 平板 **/sdcard/Download/HyperExPulseFilter_v2.2.52.zip** 已推并 ls 核 518062 字节（2026-11-19 10:49，mDNS adb）。**安装由用户在 Decaid 里做，不代装**。
+- 推送走 VPN 代理 127.0.0.1:57890（AGENTS 18）；gh token 走 git credential fill + HTTPS_PROXY（gh release create 上传成功，未用 curl 兜底）。
+- 装机后取证陪杯核 cutoff 新诊断字段（estHistory/margin/firingTickMs/firingObservedGS）＋refill check 斜率序列导出（tick 跳变 vs backstop 时序可区分）。
 
 ## 4. APK 移植同步点（同步债，full→hec 里程碑，AGENTS §1.12）
 

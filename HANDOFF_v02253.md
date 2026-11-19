@@ -1,7 +1,7 @@
 # HANDOFF v02253 — D1–D6＋sourceBucketId 改名（2.2.53 候选，改码完成待发版批）
 
 > 2026-11-19 插件侧实施接力（接 01a1ee30 交接 HANDOFF_2026-11-19-D1-6-impl-relay.md）。用户 11-19 批「D1-6全改」＋「sourceRunId 改名也做」；**改码本批授权，发版/装机/push 另问**。统筹 01a1f239-4de7-7213-bca0-f947b70c0c1b（hostId local），状态真源 D:/vscode/HyperExController/HEC_COORDINATOR_STATE.md。
-> 一句话现状：D1–D6＋改名全部落地，verify_v02253 **870/870** 全绿，D3/D4 稳定性回放红线全过，本地 commit 待建（本 MD 随批提交），**未 tag／未 push／未发版**。
+> 一句话现状：**2.2.53 已发版**（用户 11-19 批「2.2.53 发版」，统筹转达全 SOP）。代码 48c58e8＋本回执；tag v2.2.53=48c58e8；GitHub Release 451046769／asset RA_kwDOVO5zXc4ttOBi（uploaded）；夸克 dc47cde0ebf64ac281f780d45ce42ae2；平板 Download/ 已推核过（用户 Decaid 自装）。详见 §9。
 
 ## 1. 本轮改动（plugin.js 2.2.52→2.2.53）
 
@@ -67,4 +67,15 @@ C:/Users/ladios/.codex/skills/decentplugin/SKILL.md：§22.8 末「2.2.53 大缺
 - 探针：.tools/__d16-gmdebug.cjs（gm 链路）／__d16-gatedebug.cjs（门因）／__d16-ackdebug.cjs（harness ACK instrumentation，fs.readFileSync 拦截注入 DBG）。
 - 数据：D:/vscode/HyperExController/.tools/__live-plugin-history-9.json（17 杯，4 杯 fullRecord 可整杯回放：11/12pred/12/13）。
 - 评估来源：HANDOFF_2026-11-19-cup13-design-purpose-eval.md／-diagnostic-semantics-eval.md；实施交接 HANDOFF_2026-11-19-D1-6-impl-relay.md。
+
+## 9. 发版回执（2026-11-19，用户批「2.2.53 发版」，统筹转达全 SOP）
+
+- **基线**：48c58e8（发版批不改码；统筹复跑 870/870 核过）。tag **v2.2.53**=48c58e8953517a0120e5e0b2f26048ef82fa6e39（lightweight，同 v2.2.52 口径）。
+- **push**：origin auto-hyperex 1663e24..48c58e8＋new tag v2.2.53（VPN 代理 127.0.0.1:57890）；ls-remote 独立核过 refs/heads/auto-hyperex 与 refs/tags/v2.2.53 均=48c58e8953517a0120e5e0b2f26048ef82fa6e39。
+- **包**：release/HyperExPulseFilter_v2.2.53.zip **536730 字节**，SHA256 **9F6B36E6D5B4F507CCADE8F11586BB2880CF503AAAA58DB705017F781DD2DC0E**。git archive v2.2.53 → 9 条目（manifest/plugin/README/LICENSE/两校准 JSON/verify_v02253.cjs/RESULTS_v02253.txt/HANDOFF_v02253.md；handoff 在仓根，构建脚本按 pkg 前缀打包，同 v02252 包布局）。**包内复跑 870/870**＋node --check 通过。
+- **GitHub Release**：**451046769**（tag v2.2.53，--latest），asset **RA_kwDOVO5zXc4ttOBi**（HyperExPulseFilter_v2.2.53.zip，536730 字节，state=**uploaded**）。gh token 走 git credential fill 不回显＋HTTPS_PROXY=127.0.0.1:57890；notes=release/notes-v2.2.53.md。
+- **夸克**：「夸克网盘/来自：Codex」fileId **dc47cde0ebf64ac281f780d45ce42ae2**（536730 字节，非秒传；CLI 1.0.25，session 1795076203-0tejl9；result 无 notice.text）。
+- **平板**：adb mDNS adb-haf6uwvcqcdujzin-trqoCZ._adb-tls-connect._tcp push /sdcard/Download/HyperExPulseFilter_v2.2.53.zip，ls 核 **536730** 字节（2026-11-19 16:13）；**不代装，用户 Decaid 自装**。
+- **发版后测杯**（取证接力 01a1eec0 陪杯，§5 待办）：① 正常 base 杯核 c 诊断 firing 字段＋estimateGate；② ③ 清锚首杯 ≈4.0 HIT（D1/D2）；③ 大缺口收敛（D3）；④ 低 base flood≥7 峰≤40（D4）。
+- **APK 同步债**不变（§6，full→hec 里程碑）；backstop 加固仍另批。
 

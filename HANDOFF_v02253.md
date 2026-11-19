@@ -1,7 +1,7 @@
 # HANDOFF v02253 — D1–D6＋sourceBucketId 改名（2.2.53 候选，改码完成待发版批）
 
 > 2026-11-19 插件侧实施接力（接 01a1ee30 交接 HANDOFF_2026-11-19-D1-6-impl-relay.md）。用户 11-19 批「D1-6全改」＋「sourceRunId 改名也做」；**改码本批授权，发版/装机/push 另问**。统筹 01a1f239-4de7-7213-bca0-f947b70c0c1b（hostId local），状态真源 D:/vscode/HyperExController/HEC_COORDINATOR_STATE.md。
-> 一句话现状：**2.2.53 已发版**（用户 11-19 批「2.2.53 发版」，统筹转达全 SOP）。代码 48c58e8＋本回执；tag v2.2.53=48c58e8；GitHub Release 451046769／asset RA_kwDOVO5zXc4ttOBi（uploaded）；夸克 dc47cde0ebf64ac281f780d45ce42ae2；平板 Download/ 已推核过（用户 Decaid 自装）。详见 §9。
+> 一句话现状：**2.2.53 已发版＋资产已替换为短简介包**（用户 11-19 批「2.2.53 发版」＋「替换 github 上面 2.2.53 的内容」）。代码 48c58e8（零改）＋文案 54ffbc0＋本回执；tag v2.2.53=**54ffbc0**；Release 451046769／asset **RA_kwDOVO5zXc4ttk2b**（uploaded，534524 B）；夸克 **ad8ab50f25744d7daca43291d23ebb00**（旧 dc47cde0… 保留 superseded）；平板 Download/ 新包已推核（用户未装，将自装看短简介）。详见 §9/§10。
 
 ## 1. 本轮改动（plugin.js 2.2.52→2.2.53）
 
@@ -78,4 +78,14 @@ C:/Users/ladios/.codex/skills/decentplugin/SKILL.md：§22.8 末「2.2.53 大缺
 - **平板**：adb mDNS adb-haf6uwvcqcdujzin-trqoCZ._adb-tls-connect._tcp push /sdcard/Download/HyperExPulseFilter_v2.2.53.zip，ls 核 **536730** 字节（2026-11-19 16:13）；**不代装，用户 Decaid 自装**。
 - **发版后测杯**（取证接力 01a1eec0 陪杯，§5 待办）：① 正常 base 杯核 c 诊断 firing 字段＋estimateGate；② ③ 清锚首杯 ≈4.0 HIT（D1/D2）；③ 大缺口收敛（D3）；④ 低 base flood≥7 峰≤40（D4）。
 - **APK 同步债**不变（§6，full→hec 里程碑）；backstop 加固仍另批。
+
+## 10. 文案批＋资产替换回执（2026-11-19，用户批「替换 github 上面 2.2.53 的内容，那个我还没装，刚好可以看效果」＝交接 §6 选项 b）
+
+- **文案批**：commit **54ffbc0**——manifest.json description 整段替换为用户已确认的 275 字符固定短简介（「我觉得没问题」），其余字段逐字不动；JSON parse ok 2.2.53 275；verify_v02253 870/870 不受影响；diff 仅 manifest.json 一行（1 insertion/1 deletion）。新口径常设：description＝固定短简介＋只写大的功能改动更新，不堆 changelog/不留 Retains；版本细节归 release/notes-vX.md 与 Release body。交接 HANDOFF_2026-11-19-manifest-description-shorten.md（未入库）。
+- **tag 移动**：lightweight v2.2.53 由 48c58e8 强制更新到 **54ffbc09614a3b51bca8e2a7d19d8330afd671c4**（与旧 tag 差＝manifest description 一行＋§9 回执文档，**代码零改**）；push auto-hyperex c7278af..54ffbc0＋tag forced update（VPN 57890）。
+- **新包**：release/HyperExPulseFilter_v2.2.53.zip **534524 字节**，SHA256 **2940958E2B72E45926896DA8D7D026F865EDF9A1BF19A9A00C4072D0FC7A7195**（git archive v2.2.53@54ffbc0，9 条目；包内 manifest version=2.2.53 descLen=275 核过；**包内复跑 870/870**＋node --check）。旧包 536730 B／9F6B36E6…DC0E superseded。
+- **GitHub Release 451046769**：gh release upload --clobber 同名替换，asset 旧 RA_kwDOVO5zXc4ttOBi → 新 **RA_kwDOVO5zXc4ttk2b**（HyperExPulseFilter_v2.2.53.zip，534524 B，state=**uploaded**）。
+- **平板**：adb push 覆盖 /sdcard/Download/HyperExPulseFilter_v2.2.53.zip，ls 核 **534524** 字节（2026-11-19 16:45，mDNS）；**不代装**——用户尚未装 2.2.53，将自装新包看短简介效果（同版本 Decaid 不提示更新，手动装）。
+- **夸克**：「夸克网盘/来自：Codex」新 fileId **ad8ab50f25744d7daca43291d23ebb00**（534524 B，非秒传，result 无 notice.text）；**旧 dc47cde0ebf64ac281f780d45ce42ae2 保留注 superseded，不删**。
+- 红线遵守：不升版本／plugin.js 零改／只 add 本批（manifest.json 已于 54ffbc0 提交；本回执仅 HANDOFF_v02253.md）；gh/adb/push/夸克均提权；token git credential fill 不回显＋HTTPS_PROXY。
 

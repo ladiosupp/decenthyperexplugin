@@ -1,3 +1,16 @@
+# 2.2.51 experimental
+
+S2 平台估计器路由加固（A 批）＋诊断页回学习入口（③），合并同包。评估驱动：杯 11（1795046308506-2）红线全 PASS 但 S2 tail +18.9% 非 HIT——平台被污染 band r 0.9562 抬到 5.25。**灌水量律不动（§22.11 维持）**；修的是平台级 r 的估计路由（读取侧），面向 auto 主流。用户 11-19 裁定：manual 尊重不延伸杯内平台（§22.18 维持杯间建议侧）；偏好「立即应用最新学习值」。见 [HANDOFF_v02251.md](HANDOFF_v02251.md) 与 [杯 11 评估](../HANDOFF_2026-11-19-cup11-platform-estimator-eval.md)。
+
+- **A① 读取侧成熟度门**：boundedRefillControlBase / liveTrimControlCenter 消费 gain memory 时，bandN<3 或 provisional 的带行不驱动平台，回退 overall 桶 r（镜像建议侧 P0-2/P1-4）；当杯 local 估计（§22.3）不受压。gainMemorySuggestion 的 bandN/bandMatched 报告不变（建议侧 P0-2 依赖）。
+- **A② baseBand 路由**：gainMemorySuggestion 选行带改 commandBandOf(base 指令)（与 P1-3 写入侧对齐），effectiveBand 降为诊断量；effective 不可算时回退也用 baseBand（删 stage 级陈旧带回退）。断「污染行→trim 中心抬升→有效指令入高带→下一杯平台再抬」自强化环（杯 10→11 实证）。
+- **③ 诊断页 ADAPTIVE 入口**：S1/S2 模式下拉新增 ADAPTIVE（S3 shape 不动）；test-command-set mode=adaptive 取最新合格学习建议立即应用（origin=adaptive、command=学习值），无合格建议则清 manual 锚回 original/auto（下一杯 autoApply 学回）。编辑区说明文案中英同步。§22.18 manual 锚逻辑本身不动。
+- **不碰**：§22.11 灌水上限/矢量、LUT、硬包线、单一写者、full-off-hec 协议、两段收口结构、记忆数据；FF k 入平台（选项 3）另批；holdingReference.sourceRunId 改名另批。
+- **测试**：tests/verify_v02251.cjs **846/846**（837 基线 + A 6 + ③ 3；4 条 P0-2/P0-1 fixture 按 baseBand 口径重写、版本断言更新）；node --check / manifest JSON 通过。闭环（含污染 immature 带行注入）峰 ≤40%、rise ≤1.5s、maxCmd ≥7、两段收口。
+- **回放（杯 6–12 决策级，真机 fullRecord + 最终 gainMemory 快照）**：平台 before→after：杯 8 4.375→4.25（门）、杯 10 4.3125→4.125（路由）、**杯 11 5.25→3.875**（精确复现并修掉现场 bug，旧律 gain 0.9524/flood 8）、杯 12 预测 4.375→4.125（降温）。
+- **APK 移植同步债**：A 平台律改动记入 APK 同步债，full→hec 里程碑一次移植（AGENTS §1.12），见 HANDOFF「APK 移植同步点」。
+
+
 # 2.2.50 experimental
 
 S2 收回稳健性 + manual 基值尊重（评估驱动，2.2.49 装机首杯杯 9：base 手动 3.875 正确、flood 7 与杯 6 同，但峰秤流 +58.6% 超 §22.5 40% 绊线）。**灌水量律不动（§22.11 维持）**；修的是收回时机与杯间锚。用户 2026-11-18 新增约束「过冲不能太高」→ 峰秤流 ≤40% 硬验收（争取更低），保住 ≥7.0 灌水与 90° 上升。见 [HANDOFF_v02250.md](HANDOFF_v02250.md) 与技能 §22.18。

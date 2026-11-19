@@ -1,7 +1,7 @@
 # HANDOFF v02255 — Va+Vb3 补水估计稳健性加固（2.2.55 候选，改码完成待发版批）
 
 > 2026-11-19 插件对话（接杯 16 d 路径评估 HANDOFF_2026-11-19-cup16-dpath-eval.md）。用户批「1、批 Va+Vb3 改码批；2、40% 绊线区分正常/通道事件；3、衰减期安全例外派只读评估批，平滑优先不变的前提下提高反应敏感度；全部做完我再取验冷启动了」。本批＝批 1（Va+Vb3 改码，2.2.55 候选）；**改码本批授权，发版/push/tag 另问**。批 2（衰减例外只读评估＋通道接受准则提案）顺序续做。统筹 01a1f379-3282-7681-8ec5-86443b43708b（relay-4）。
-> 一句话现状：**Va+Vb3+Vd15 落地**（用户批 Vd15 并入），verify_v02255 **892/892** 全绿（含杯 16 真机 JSON 交叉），sim-regression 5/5，×1.1 回放通道峰 109.4→102.6／正常零误触，Vd15 通道首笔下调早 500ms／滞回退出／冷尾有界；本地 commit 待建，**未 tag／未 push／未发版**（发版用户已批「并入本次发版」，改码回叫后统筹独立复核另派全 SOP）。
+> 一句话现状：**Va+Vb3+Vd15 落地**（用户批 Vd15 并入），verify_v02255 **892/892** 全绿（含杯 16 真机 JSON 交叉），sim-regression 5/5，×1.1 回放通道峰 109.4→102.6／正常零误触，Vd15 通道首笔下调早 500ms／滞回退出／冷尾有界；**2.2.55 已发版**（用户批「并入本次发版」，统筹复核全过另派全 SOP）。代码 aca12a0＋本回执；tag v2.2.55=aca12a0；Release 451325193／asset RA_kwDOVO5zXc4twUF0（uploaded）；夸克 fd2c59ae37524fb7a4b6e18ac18e1941；平板 Download/ 已推核（用户 Decaid 自装一次验 O1+Va/Vb3+Vd15）。详见 §9。
 
 ## 1. 本轮改动（plugin.js 2.2.54→2.2.55，估计/触发路径，控制律主体零改）
 
@@ -61,3 +61,15 @@ SKILL.md **§22.18 末**「2026-11-19 杯 16 d 路径补注（2.2.55 Va/Vb3）�
 - **技能补注**：§22.18 末「2026-11-19 Vd15 衰减例外并入」（机制＋用户并入批准＋通道准则批准引用，只加不改统筹审）。
 - **冷启动验证**：发版后用户装机一次验 O1+Va/Vb3+Vd15，取证陪杯录 decayException 诊断供标定（用户点名两批做完再取验）。
 - **复跑**：node __d16-vd-replay.cjs（Vd15 含退出 vs 基线）；verify_v02255（892）。
+
+
+## 9. 发版回执（2026-11-19，用户批「并入本次发版」，统筹复核全过派全 SOP）
+
+- **基线**：aca12a0（发版批不改码；统筹独立复跑 verify_v02255 892/892＋sim 5/5＋__d16-vd-replay/__d16-b1-replay＋diff 审 43 行仅 Vd15＋MAX_WRITES=4 审过＋技能补注审过＋manifest descLen 275）。tag **v2.2.55**=aca12a00fdb99138fa6e343d12a5b22d7d66e860（lightweight）。
+- **push**：origin auto-hyperex 812b6bb..aca12a0＋new tag v2.2.55（VPN 代理 127.0.0.1:57890）。
+- **包**：release/HyperExPulseFilter_v2.2.55.zip **542182 字节**，SHA256 **77653A2C87FEAA9B92F18AEEE000B786B418FE89A553635EDF5008AD502EB975**（git archive v2.2.55，9 条目同 v2254 布局）。**包内复跑 892/892**＋node --check＋manifest version=2.2.55 descLen=275 核过。
+- **GitHub Release**：**451325193**（tag v2.2.55，--latest），asset **RA_kwDOVO5zXc4twUF0**（HyperExPulseFilter_v2.2.55.zip，542182 字节，state=**uploaded**）。gh token git credential fill 不回显＋HTTPS_PROXY=57890；notes-v2.2.55.md（版本细节归 notes/Release body，§1.15 短简介不动）。
+- **夸克**：「夸克网盘/来自：Codex」fileId **fd2c59ae37524fb7a4b6e18ac18e1941**（542182 字节，非秒传；result 无 notice.text）。
+- **平板**：adb mDNS push /sdcard/Download/HyperExPulseFilter_v2.2.55.zip，ls 核 **542182** 字节（2026-11-19 20:36）；**不代装，用户 Decaid 自装**一次验 O1+Va/Vb3+Vd15。
+- **发版后**：统筹独立远端核（ls-remote/Release API/zip SHA256 复算/平板 ls）→基线推 2.2.55→通知取证装机陪杯，录 decayException 诊断供标定（MAX_WRITES/退出阈值真机标定）。
+- 红线遵守：只 add 本批（回执仅 HANDOFF_v02255.md）；gh/夸克/adb/push 均提权；装机不代做；别人 WIP（HANDOFF_2026-10-31.md）不碰。

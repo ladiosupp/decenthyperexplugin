@@ -1,7 +1,7 @@
 # HANDOFF v02254 — O1 估计载体暖机（2.2.54 候选，改码完成待发版批）
 
 > 2026-11-19 插件对话（接 2.2.53 发版＋晚段 tail 评估）。用户批「暖机恢复 diagnosticLast，同意批」（O1）；**Q2 用户不批「坚持平滑度优先」——O2/O3 不做**，coast 8%／up-hold／治理链／死区全不动，§22.13 维持（whole HIT＋平台平直＝设计达成，tail ±4% 不作硬指标）。改码本批授权，**发版/装机/push 另问**。统筹 01a1f239-4de7-7213-bca0-f947b70c0c1b。
-> 一句话现状：O1 落地，verify_v02254 **880/880** 全绿，冷启动回放 before/after 验证（profile-base 2.5→feed-forward-k 4.0625），暖机逐字不受影响，sim-regression 5/5；本地 commit 待建，**未 tag／未 push／未发版**。
+> 一句话现状：**2.2.54 已发版**（用户 11-19 批「2.2.54 发版」，统筹转达全 SOP）。代码 aa93338＋本回执；tag v2.2.54=aa93338；GitHub Release 451186657／asset RA_kwDOVO5zXc4tuyEp（uploaded）；夸克 b89cb2fe7ce74e93bc1cd2d14f087794；平板 Download/ 已推核过（用户 Decaid 自装）。详见 §8。
 
 ## 1. 本轮改动（plugin.js 2.2.53→2.2.54，估计侧，控制律零改）
 
@@ -49,4 +49,15 @@ SKILL.md **§22.3 末**「2.2.54 估计载体暖机（2026-11-19 用户批 O1）
 - O1 回放：node D:/vscode/.tools/__d16-o1-replay.cjs <verify.cjs> [plugin.js]（before 用 __d16-plugin-2253.js＝git show 966e3c7 提取）。
 - 晚段评估：HANDOFF_2026-11-19-late-s2-tail-eval.md＋__d16-late-eval.cjs（O1 来源；O2/O3 已否）。
 - 数据：D:/vscode/HyperExController/.tools/__live-plugin-history-10.json（杯 14/15）。
+
+## 8. 发版回执（2026-11-19，用户批「2.2.54 发版」，统筹转达全 SOP）
+
+- **基线**：aa93338（发版批不改码；统筹复跑 880/880 核过）。tag **v2.2.54**=aa93338923569d7ed0e11ba255d993e32c5c8588（lightweight）。
+- **push**：origin auto-hyperex 966e3c7..aa93338＋new tag v2.2.54（VPN 代理 127.0.0.1:57890）。
+- **包**：release/HyperExPulseFilter_v2.2.54.zip **534760 字节**，SHA256 **A0440E2CA4AC3A5D13ABB130DC976642362875EED7010B1DB55360B043F102A1**（git archive v2.2.54，9 条目同 v2253 布局；HANDOFF 在仓根按 pkg 前缀打包）。**包内复跑 880/880**＋node --check 通过。manifest description 保持 275 短简介（版本细节在 notes-v2.2.54.md／Release body，AGENTS §1.15）。
+- **GitHub Release**：**451186657**（tag v2.2.54，--latest），asset **RA_kwDOVO5zXc4tuyEp**（HyperExPulseFilter_v2.2.54.zip，534760 字节，state=**uploaded**）。gh token git credential fill 不回显＋HTTPS_PROXY=57890。
+- **夸克**：「夸克网盘/来自：Codex」fileId **b89cb2fe7ce74e93bc1cd2d14f087794**（534760 字节，非秒传；result 无 notice.text）。
+- **平板**：adb mDNS push /sdcard/Download/HyperExPulseFilter_v2.2.54.zip，ls 核 **534760** 字节（2026-11-19 18:27）；**不代装，用户 Decaid 自装**。
+- **发版后测杯**（取证陪杯统筹另行通知）：reload 冷启动首杯验 O1——restored 日志（Warm start: restored diagnosticLast …）＋plan controlSource gain-memory/feed-forward-k＋base≈3.8–4.0；暖机杯对照不受影响；D1/D2 清锚场景仍待专门杯。
+- 红线遵守：只 add 本批（回执仅 HANDOFF_v02254.md）；gh/夸克/adb/push 均提权；装机不代做。
 

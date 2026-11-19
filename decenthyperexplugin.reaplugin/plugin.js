@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-  const PLUGIN_VERSION = "2.2.53";
+const PLUGIN_VERSION = "2.2.54";
   // Generated profiles and profile binding share one fixed title prefix,
   // matching ProfileRecorder's ownership gate. Settings no longer rename them.
   const HYPEREX_TITLE_PREFIX = "HyperEx";
@@ -4149,8 +4149,96 @@ function createPlugin(host) {
       if (ev && ev.runId && compatible(ev)) merged.set(ev.runId, ev);
     }
     state.adaptiveHistory = Array.from(merged.values()).slice(-20);
+    restoreDiagnosticLastFromPersistentFile();
     emitSkinChanged();
     return state.adaptiveHistory.length > 0;
+  }
+
+  // 2.2.54 (O1, user approved 2026-11-19): warm-start the estimate carrier.
+  // After a reload diagnosticLast stays null until the first cup completes,
+  // so the refill platform / trim center / FF k fall back to the profile base
+  // even though gain memory and the saved evidence rows survived on disk
+  // (cup 15: cold base 3.5 vs the learned ~3.8, tail -6.91% with whole HIT).
+  // Restore the newest eligible persisted shot as a READ-ONLY diagnosticLast
+  // so the first cup consumes the same estimates a warm cup would. Estimate
+  // side only: no memory mutation, no LUT change, no machine write, no
+  // autoApply trigger (a pending scheduled apply resumes through the existing
+  // restoreManualApplySchedule path, double-apply guarded by runId/status).
+  // Stale-prior risk is bounded by the existing trust gates: FULL fingerprint
+  // equality (calibration identity + LUT points + targets + weights/limits +
+  // release + temperature) + basket context + learning eligibility +
+  // completed result + retained full samples (only the newest
+  // HISTORY_FULL_SHOTS cups; trimmed shots are never restored). The full key
+  // is stricter than numericLearningFingerprintKey (which strips targets and
+  // shotSettings for evidence compatibility): the reconstructed config copies
+  // weights/limits from the current cfg and feeds weight-sensitive consumers
+  // (controlOutputQuality / s2RefillPumpEstimate), so any settings change
+  // blocks restoration. Commands/targets/LUT commands/shape come from the
+  // persisted command snapshot.
+  function restoreDiagnosticLastFromPersistentFile() {
+    if (state.diagnosticLast || state.phase !== "idle" || state.calibrationActive) return false;
+    if (state.persistentHistoryAvailable !== true || !state.persistentHistoryFile || !Array.isArray(state.persistentHistoryFile.shots)) return false;
+    const fp = adaptiveHistoryFingerprint();
+    const fpKey = fp ? adaptiveHistoryFingerprintKey(fp) : "";
+    if (!fpKey || !state.cfg) return false;
+    const shots = state.persistentHistoryFile.shots;
+    for (let i = shots.length - 1; i >= 0; i--) {
+      const row = shots[i];
+      if (!row || !row.runId || row.profileTruthSchema !== 3 || row.profileTruthVerified !== true) continue;
+      if (row.observationOnly === true || String(row.algorithmIntervention || "full") === "off") continue;
+      if (!row.fingerprint || adaptiveHistoryFingerprintKey(row.fingerprint) !== fpKey) continue;
+      if (String(row.basketContext || "") !== String(state.cfg.basketContext || "")) continue;
+      if (!historyLearningStatus(row).eligible) continue;
+      const fr = row.fullRecord;
+      if (!fr || !Array.isArray(fr.samples) || !fr.samples.length) continue;
+      const cmd = row.commands || {};
+      const c1 = cmd.stage1 || {}, c2 = cmd.stage2 || {}, c3 = cmd.stage3 || {};
+      if (!(Number(c2.desiredGS) > 0) || !(Number(c2.commandMlS) > 0)) continue;
+      const shape = c3.shape && c3.shape.enabled === true
+        ? { enabled:true, earlyCommand:c3.shape.earlyCommand, earlySeconds:c3.shape.earlySeconds, midCommand:c3.shape.midCommand, midSeconds:c3.shape.midSeconds, lateCommand:c3.shape.lateCommand }
+        : { enabled:false };
+      const run = {
+        runId: String(row.runId), kind: "hyperex", result: row.result,
+        startedAt: row.startedAt || null, endedAt: row.endedAt || null,
+        observationOnly: false, restoredFromDisk: true,
+        learningReview: row.learningReview || null,
+        learningIntegrity: row.learningIntegrity || null,
+        gainMemoryBucketId: row.evidence && row.evidence.gainMemory && row.evidence.gainMemory.bucketId || null,
+        config: {
+          basketContext: row.basketContext,
+          profileTruthVerified: true, profileTruthSchema: 3,
+          adaptiveFingerprint: row.fingerprint,
+          adaptiveLearningLevel: state.cfg.adaptiveLearningLevel,
+          releaseMode: row.releaseMode, activeRelease: row.activeRelease,
+          algorithmIntervention: row.algorithmIntervention || "full",
+          experimentalLiveTrim: !!row.experimentalLiveTrim,
+          flowMultiplier: row.flowMultiplier,
+          s3DriftModel: state.cfg.s3DriftModel,
+          stage1Flow: c1.desiredGS, stage1CommandMlS: c1.commandMlS, stage1LutCommandMlS: c1.lutCommandMlS,
+          stage1CommandMode: c1.mode || "auto", stage1CommandOrigin: c1.origin || null,
+          stage2Flow: c2.desiredGS, stage2CommandMlS: c2.commandMlS, stage2LutCommandMlS: c2.lutCommandMlS,
+          stage2CommandMode: c2.mode || "auto", stage2CommandOrigin: c2.origin || null,
+          stage3Flow: c3.desiredGS, stage3LutCommandMlS: c3.lutCommandMlS,
+          stage3CommandMlS: c3.mode === "shape" ? c3.shape.midCommand : c3.flatCommandMlS,
+          stage3CommandMode: c3.mode || "auto", stage3CommandOrigin: c3.origin || null,
+          stage3Shape: shape,
+          stage1Weight: state.cfg.stage1Weight, stage2Weight: state.cfg.stage2Weight, finalWeight: state.cfg.finalWeight,
+          stage1PressureLimit: state.cfg.stage1PressureLimit, stage2PressureLimit: state.cfg.stage2PressureLimit,
+          stage3PressureLimit: state.cfg.stage3PressureLimit, hardPressureLimit: state.cfg.hardPressureLimit,
+          temperature: state.cfg.temperature, soakSeconds: state.cfg.soakSeconds
+        },
+        samples: fr.samples, rawScaleSamples: fr.rawScaleSamples || [],
+        events: fr.events || [], liveFlowTrim: fr.liveFlowTrim || null,
+        evidence: row.evidence || null
+      };
+      if (!trustedAdaptiveRun(run)) continue;
+      run.summary = diagnosticSummary(run);
+      state.diagnosticLast = run;
+      log("Warm start: restored diagnosticLast " + run.runId + " from persistent history (fingerprint/basket matched; first cup consumes the learned estimates).");
+      emitSkinChanged();
+      return true;
+    }
+    return false;
   }
 
   function rememberAdaptiveEvidence(run) {

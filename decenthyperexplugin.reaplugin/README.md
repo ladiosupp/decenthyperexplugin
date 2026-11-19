@@ -1311,3 +1311,21 @@ Live trim defaults ON at level3; diagnostic slider/native dropdown. Saved explic
 Full browser visual/touch rendering was unavailable (Chromium/Firefox and SVG raster delegate not installed); simulated DOM/pointer checks are not hardware or full WebView validation. Existing handheld/tablet screenshots remain the actual1.60 evidence. No1.65 device results yet.
 
 Run node --check plugin.js and node tests/verify_v0174.cjs. Current HANDOFF_v0174.md and tests/RESULTS_v0174.txt accompany this package. LICENSE and original calibration JSON are unchanged. Delivered older ZIPs remain immutable; old remote files retained for history.
+# 2.2.53 experimental
+
+首杯与大缺口适应（D1–D6，用户 11-19 批全改＋sourceRunId 改名）。杯 13 设计目的重评驱动：S2 whole −12.7% 的根因是「好估计没被用上」（③ 清锚落 LUT 2.5、建议侧阻尼 2.5→3.125、弱灌 flood 5），不是没有估计（gain-memory HIGH 说 3.8125、FF k eligible 说 4.063）。**红线不动**：硬包线 0.10–8.00／1/16 量化／上行压力门、单一写者、影子 sent=false、LUT 不被学习改写、记忆数据、两段收口结构、灌水量律矢量、§22.18 杯间 manual 锚。见 [HANDOFF_v02253.md](HANDOFF_v02253.md)。
+
+- **D1 ③ 清锚 fallback 用最佳可用估计**：test-command-set mode=adaptive 无合格立即建议时，取成熟 gain-memory HIGH（platformMemoryGain 同口径：immature/provisional 回退 overall r）→ snap(target/r)，次取 eligible FF k → snap(target/k)，都无合格才清回 LUT（安全默认保留）。origin=adaptive，estimateSource 记估计来源。改「清锚＝LUT」语义（用户拍板；§22.1 LUT 空粉碗不当咖啡平台，2.2.27 饿死教训同形）。
+- **D2 FF k 入平台/trim 中心**：eligible k（与 addGain 同同意门：≥3 杯 spread≤12%／2 杯≤5%；混命令带收紧到≤5%——r 是命令的函数 §22.3）作 boundedRefillControlBase／liveTrimControlCenter 第一候选（当杯 local blend 之后）；与成熟记忆并存时套 P0-1 ±25%/0.35 包线防资格抖动跳变；controlSource=feed-forward-k 入 trustedControl。建议侧 addGain 的 span 限幅路径不动。
+- **D3 大缺口杯内提速**：命令距控制中心缺口 >30%（S2）时——常规步长上限 6（角度 streak≥3→8）、常规静默 1200→1000ms（救急 800ms 下限不动）、rescueHot 免等角度 streak≥2（predictedRel>25%／actualRel≥12%／cannotReturn 三门不动）；杯间一步包线仅缺口>30% 时放宽 ±50%（正常扰动 ±25% 不动）。步长仍过 predictiveStepQuanta／commandCeilingFor。
+- **D4 adaptive flood 下限≥7**：adaptiveColdMlS = max(7, refillFloodFloor(), min(8, 1.8×platform))——§22.11 实测≥7.0 才摸 0.7s 升流下限，独立于 base/target（杯 13 base 2.5→flood 5 浪费前段）；固定挡人工旋钮 floodMaxMlS 不动（人工折中，§22.5 v2.2.26 口径）；8.00 硬上限不动。
+- **D5 诊断 null 门因＋收口快照**：s2RefillFlowEstimate null 记 lastEstimateGate（points/span/stale/tail-span/tail-points/r2/slope）；refill check 行加 estimateGate/estimateGateDetail；completeS2Startup 的 startupExecution 加 estimate 快照＋estimateGate（定时/压力/stale 收口也记，additive；firing-only cutoff 语义不动）。
+- **D6 ③ 预览**：区分「将应用最新学习值 X」／「将应用估计值 X」（D1 fallback）／「无合格估计→清回 LUT（咖啡下可能欠流）＋armed 学习」；中英同步（UI_LANGUAGE_PAIRS 子串对，动态数字保留）。
+- **改名**：bounded cup-target holdingReference.sourceRunId → **sourceBucketId**（存的本来就是桶 ID）；legacy s2HoldingReference.sourceRunId 不动（真 runId）；plan.sourceRunIds 数组不动。取证脚本读 bounded sourceRunId 者由取证接力同步（统筹已通知）。
+- **测试**：tests/verify_v02253.cjs **870/870**（851 基线按新口径更新 5 条：T-5 大缺口步长／P0-1 ±50%／预览×2／2.2.27 adaptive 下限；＋19 新增：D1×4 D2×4 D3×4 D4×2 D5×3 D6×1 改名×1）；node --check／manifest JSON 通过。sim/tests/sim-regression.cjs 5/5（harness auto 泄压回放映射修复：录制逻辑帧→物理帧、soak=espresso、release 风格随录制杯；修前可选第 5 项基线即红）。
+- **回放（决策级，真机杯 6–13 fullRecord＋最终 gainMemory 快照）**：D2 平台杯 12 先验 3.875→4.0（FF k 1.257 eligible）；D1 fallback 杯 12 先验 HOLD→feed-forward-k 4.0（manual 先验记忆降 MEDIUM，k 接管）／杯 6/7/11 先验 HOLD→gain-memory 3.875；D3 大缺口保护性收回后持续 90% 时间 8.2s→2.55s（rescue 收回后 1s，峰 0.9%）；D4 低 base（r2.0）闭环抖动 0/0.6/1.2 峰 +3.9%≤40／rise 0.6s≤1.5／maxCmd 7／两段收口；正常 base（r1.29）峰 15.4% 不动。整杯回放 4/4 完成（杯 13 flood 5→7）。
+- **APK 移植同步点**：D1 fallback 估计选择／D2 FF k 平台＋混带门／D3 大缺口参数（6/8 步、1000ms、救急角度豁免、±50% 包线）／D4 flood≥7 → full→hec 里程碑 shadow/arbiter 同口径移植（AGENTS §1.12）；D5 诊断字段 shadow 可镜像；D6 UX 不复用；改名 APK 当前无 holdingReference 镜像→本批无 APK 改动，hec 若镜像 bounded holding 用 sourceBucketId。见 HANDOFF §6。
+- **不碰**：硬包线／量化／上行压力门、单一写者、影子 sent、LUT、记忆数据、两段收口结构、灌水量律矢量（D4 只改 adaptive 冷启动下限值）、§22.18 杯间 manual 锚、full-off-hec 协议。
+
+
+ # 2.2.52 experimental

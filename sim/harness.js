@@ -106,6 +106,11 @@ function historyRecordings(fileText) {
     }
     if (!frames.length) return;
     const last = frames[frames.length - 1];
+    // 2.2.53: auto-release cups (2.2.45+) stay espresso through the 0-bar
+    // release/soak; ON-mode cups idle and restart (restart_wait). The replay
+    // state mapping and the plugin release mode must match the recorded style.
+    const phaseSet = new Set(frames.map(x => x.phase));
+    const autoRelease = phaseSet.has('soak') && !phaseSet.has('restart_wait');
     out.push({
       source: 'hyperex',
       title: (run.profileTitle || 'HyperEx 历史') + ' · ' + (run.runId || idxLabel || ''),
@@ -118,6 +123,7 @@ function historyRecordings(fileText) {
       weightEnd: last.w,
       frames,
       phaseDriven: true,
+      autoRelease,
     });
   };
   // Newer export shape: { shots:[...] } or { latestRun, history:{shots:[...]} }.
@@ -329,7 +335,7 @@ function applyState(env, p) {
     Stage1Flow: p.targets.s1, Stage2Flow: p.targets.s2, Stage3Flow: p.targets.s3,
     Stage1Weight: p.weights.s1, Stage2Weight: p.weights.s2, FinalWeight: p.weights.final,
     SoakSeconds: p.soakSeconds, LiveFlowTrimTest: p.liveTrim.enabled, LiveFlowTrimLevel: String(p.liveTrim.level),
-    ActiveRelease: p.mode === 'active', S2StartupAssist: p.refill.enabled, AdaptiveLearningLevel: p.policy,
+    ActiveRelease: p.release != null ? p.release : (p.mode === 'active'), S2StartupAssist: p.refill.enabled, AdaptiveLearningLevel: p.policy,
     Enabled: true, DirectDriverStartTest: false, MaxRunSeconds: p.maxSeconds,
     DumpFallbackSeconds: 2, DumpTimeoutSeconds: 6, DumpFlowThreshold: 0.35,
     HardPressureLimit: p.hardPressureLimit,
@@ -373,14 +379,21 @@ function applyState(env, p) {
   } else {
     s.testOverrides = null;
   }
-  s.s2RefillSettings = h.validatedS2RefillSettings({
-    basis: 'pump-command',
+  // 2.2.53: the bounded model (plugin default) only builds the two-step
+  // handoff on the cup-target basis; the legacy pump-command basis leaves
+  // bleedCommandMlS null and the refill watchdog aborts the shot. 'target'
+  // keeps the simulator-side refill experiment (startup assist disabled above).
+  const refillSettings = {
+    basis: p.refill.basis === 'target' ? 'pump-command' : 'cup-target',
+    floodMode: p.refill.floodMode === 'adaptive' ? 'adaptive' : 'fixed',
     startDelayMs: p.refill.startDelayMs,
     targetPercent: p.refill.targetPercent,
     cutoffPercent: p.refill.cutoffPercent,
     maxDurationMs: p.refill.maxDurationMs,
     approachMs: p.refill.approachMs,
-  });
+  };
+  if (Number.isFinite(Number(p.refill.floodMaxMlS))) refillSettings.floodMaxMlS = Number(p.refill.floodMaxMlS);
+  s.s2RefillSettings = h.validatedS2RefillSettings(refillSettings);
   s.s2RefillPrevious = null;
   s.uiLanguage = 'zh';
 }
@@ -440,6 +453,11 @@ async function runShot(params) {
   // real abort behaviour on a >8 bar recording).
   if (replay && p.hardPressureLimit == null) p.hardPressureLimit = 11;
 
+  // Replay review semantics: the plugin must run the same release style the
+  // recorded cup ran, or its weight-triggered sequence misaligns with the
+  // recorded idle/soak windows and aborts as an external stop.
+  if (replay && replay.phaseDriven && replay.autoRelease && p.release == null) p.release = 'auto';
+
   applyState(env, p);
   const h = env.h, s = h.state, m = env.machine;
 
@@ -469,6 +487,11 @@ async function runShot(params) {
   m.writeCommand = null;
   if (m.shotStartSec == null) m.shotStartSec = 0;
   let useReplay = !!replay;
+  // Recorded profileFrame values are the plugin's LOGICAL frames
+  // (state.lastFrame at record time); machine telemetry is physical. Auto
+  // release inserts a 0-bar release frame at physical 1, so logical S2=1 is
+  // physical 2 and the S3 subframes shift by +1.
+  const replayToPhysical = lf => (replay && replay.autoRelease) ? (lf <= 0 ? 0 : lf === 1 ? 2 : lf + 1) : lf;
   const replayLastT = useReplay ? replay.frames[replay.frames.length - 1].t : 0;
   let replayEnded = false;
   let handoffDone = false;
@@ -548,11 +571,15 @@ async function runShot(params) {
         // plugin the same state/substate the real machine showed so its active
         // release / soak / restart flow can follow it.
         const ph = rec.phase || 'stage1';
+        // The machine no longer answers the plugin in replay: its frame follows
+        // the recording, not the plugin's skipStep requests.
+        if (Number.isFinite(Number(rec.frame))) m.frame = replayToPhysical(Number(rec.frame));
         if (ph === 'stage1' || ph === 'stage2' || ph === 'stage3' || ph === 'preinfusion') {
           m.state = 'espresso';
           m.substate = ph === 'preinfusion' ? 'preinfusion' : 'pouring';
         } else if (ph === 'soak') {
-          m.state = 'idle'; m.substate = 'soak';
+          if (replay.autoRelease) { m.state = 'espresso'; m.substate = 'pouring'; }
+          else { m.state = 'idle'; m.substate = 'soak'; }
         } else if (ph === 'restart_wait') {
           m.state = 'idle'; m.substate = 'restart_wait';
         } else if (ph === 'finishing') {
@@ -574,7 +601,7 @@ async function runShot(params) {
         // hydraulic plant take over from the recorded state. The puck is already
         // wet by this point, so the resistance clock starts at its aged value
         // instead of restarting from rDry. Default 12 s = the rPeak point.
-        const handoffFrame = Number.isFinite(Number(rec.frame)) ? Number(rec.frame) : 1;
+        const handoffFrame = replayToPhysical(Number.isFinite(Number(rec.frame)) ? Number(rec.frame) : 1);
         const puckAgeSec = Math.max(0, Number.isFinite(Number(p.handoff.puckAgeSec)) ? Number(p.handoff.puckAgeSec) : 12);
         handoffDone = true;
         useReplay = false;

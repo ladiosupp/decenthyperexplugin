@@ -70,14 +70,27 @@ function nestedExport() {
   assert.ok(shaped.summary.stage3.commandFlowAvg > 0.6, 'shape average should include the early/late points');
   console.log('ok S3 shape override');
 
-  // 5. optional real-file handoff (local checkout only)
-  const real = 'C:/Users/ladios/Downloads/hyperex-history (7).json';
-  if (fs.existsSync(real)) {
+  // 5. optional real-file handoff (local checkout only). 2.2.53: prefer the
+  // newest local export and match the recorded release style — the 2.2.31-era
+  // Downloads file is ON-mode (idle soak), while 2.2.45+ cups are auto-release
+  // (espresso through the 0-bar soak); running the wrong style aborts as an
+  // external stop before stage2 (pre-existing baseline failure).
+  const candidates = [
+    'D:/vscode/HyperExController/.tools/__live-plugin-history-9.json',
+    'C:/Users/ladios/Downloads/hyperex-history (7).json',
+  ];
+  const real = candidates.find(f => fs.existsSync(f));
+  if (real) {
+    const recs = H.historyRecordings(fs.readFileSync(real, 'utf8'));
+    const index = recs.findIndex(r => r.frames.some(x => x.phase === 'stage2' && Number(x.frame) === 1));
+    assert.ok(index >= 0, 'real-file handoff needs a cup that reaches stage2 frame 1');
+    const rec = recs[index];
     const r = await H.runShot({
-      replay: { file: real, index: 2 },
+      replay: { file: real, index },
+      release: rec.autoRelease ? 'auto' : 'on',
       handoff: { phase: 'stage2', frame: 1 },
-      targets: { s1: 3, s2: 5, s3: 1.5 }, weights: { s1: 4, s2: 40, final: 100 },
-      commands: { enabled: true, s1: 1.938, s2: 4.313, s3: 0.625, shape: { earlyCommand: 0.938, earlySeconds: 8, midCommand: 0.625, midSeconds: 14, lateCommand: 0.75 } },
+      targets: { s1: 2, s2: 5, s3: 1.5 }, weights: { s1: 4, s2: 40, final: 100 },
+      commands: { enabled: true, s1: 0.719, s2: 4.313, s3: 0.625 },
       refill: { enabled: false }, plant: { paper: 'low', pump: 'realDe1' }, maxSeconds: 140, graphFromStage2: false,
     });
     assert.ok(r.replay, 'real-file replay metadata should survive the handoff');

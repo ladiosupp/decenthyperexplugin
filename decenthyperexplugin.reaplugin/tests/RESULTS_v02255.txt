@@ -897,5 +897,10 @@ PASS 2.2.54 O1 warm start feeds the FF k platform path when memory is absent
 PASS 2.2.54 O1 restoration is read-only: memory data and storage untouched
 PASS 2.2.54 O1 restoration only runs while idle and storage-verified
 PASS 2.2.54 O1 observation-off and unverified-profile shots are skipped
+PASS 2.2.55 Vd15 constants are the approved design (1.5/3/1.2/4)
+PASS 2.2.55 Vd15 normal closed loop never triggers the exception (peak < 1.5x target)
+PASS 2.2.55 Vd15 channeling: trigger fires, small steps <=2, dual exit, count <= cap
+PASS 2.2.55 Vd15 channeling: first down-write earlier than governance-only baseline
+PASS 2.2.55 Vd15 real cup-16 hot window crosses trigger then exit thresholds (history-11 cross)
 
-887/887 checks passed
+892/892 checks passed

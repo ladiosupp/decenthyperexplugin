@@ -204,6 +204,14 @@ const PLUGIN_VERSION = "2.2.55";
 // outruns the 0.75 s regression window (cup 16 peak +102.7%).
 const S2_REFILL_INSTANT_CROSS_FACTOR=1.1;
 const S2_REFILL_INSTANT_CROSS_SAMPLES=2;
+// 2.2.55 (Vd15, user-approved decay safety exception): severe sustained overshoot
+// after refill complete. FACTOR x target sustained SAMPLES fresh checks triggers;
+// EXIT_FACTOR hysteresis or MAX_WRITES cap exits. Small steps <=2 quanta; silence
+// 1200 ms preserved; Q2 smoothness-first otherwise unchanged.
+const S2_DECAY_EXCEPTION_FACTOR=1.5;
+const S2_DECAY_EXCEPTION_SAMPLES=3;
+const S2_DECAY_EXCEPTION_EXIT_FACTOR=1.2;
+const S2_DECAY_EXCEPTION_MAX_WRITES=4;
   // 2.2.46 (user 2026-11-14): after a refill return the cup flow overshoots and
   // then decays; the 1.5 s prediction extrapolates that decay too far and the
   // ordinary feedback chases it upward (field: 4.94->5.19->5.44->5.69 while the
@@ -9624,8 +9632,28 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         if(rescueActive)t.report.hecObserveRescue=(t.report.hecObserveRescue||0)+1;
         return;
       }
+      // 2.2.55 (Vd15): severe-overshoot decay exception state machine. Trigger on
+      // raw > target x FACTOR for SAMPLES consecutive fresh checks post-complete;
+      // dual exit: hysteresis (raw < target x EXIT_FACTOR) OR write-count cap.
+      // Bypasses handover-falling guard + settle/ramp governor below; small steps
+      // and silence are enforced elsewhere. Diagnostics recorded for calibration.
+      const decayTarget=t.run.config.stage2Flow;
+      if(state.phase==="stage2"&&t.startup&&t.startup.status==="complete"&&Number.isFinite(reg.slope)&&Number.isFinite(decayTarget)){
+        if(reg.slope>decayTarget*S2_DECAY_EXCEPTION_FACTOR){
+          t.hotStreak=(t.hotStreak||0)+1;
+          if(!t.decayException&&t.hotStreak>=S2_DECAY_EXCEPTION_SAMPLES&&(t.decayExceptionWrites||0)<S2_DECAY_EXCEPTION_MAX_WRITES){
+            t.decayException=true;
+            liveTrimRecord("decay-exception-trigger",{frame,rawGS:round(reg.slope,3),thresholdGS:round(decayTarget*S2_DECAY_EXCEPTION_FACTOR,3),streak:t.hotStreak});
+          }
+        }else{t.hotStreak=0;}
+        if(t.decayException&&reg.slope<decayTarget*S2_DECAY_EXCEPTION_EXIT_FACTOR){
+          liveTrimRecord("decay-exception-exit",{frame,reason:"hysteresis",rawGS:round(reg.slope,3),writes:t.decayExceptionWrites||0});
+          t.decayException=false;t.hotStreak=0;
+        }
+      }else{t.hotStreak=0;if(t.decayException)t.decayException=false;}
+      const decayException=!!t.decayException;
       if(!rescueActive){
-      if(handover&&reg.slope>target*1.02){
+      if(handover&&reg.slope>target*1.02&&!decayException){
         const fast=s2RefillFlowEstimate(t);
         if(!fast||fast.slope<=target*1.02||fast.predicted<=target*1.02){row.reason="S2 handover falling response; avoid an extra decrease";return;}
       }
@@ -9650,7 +9678,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         if(reg.fastSlope!==null&&reg.fastSlope!==undefined&&(reg.fastSlope>=target*.98||reg.predicted>=target)){row.reason="S3 rising response; hold upward correction";return;}
       }
       }
-      const governor=rescueActive?null:liveTrimGovernor(t,reg,frame,command,target,base);
+        const governor=(rescueActive||decayException)?null:liveTrimGovernor(t,reg,frame,command,target,base);
       if(governor&&governor.hold){row.reason=governor.reason;if(governor.trimMode)row.trimMode=governor.trimMode;return;}
       if(governor&&governor.ref!=null){t.refCommand=governor.ref;t.governorSteps=governor.steps;t.governorMode=governor.mode;row.governor=governor.mode;row.shortS2=!!(t.s2Recovery&&t.s2Recovery.short);}
       row.refCommand=t.refCommand;
@@ -9723,7 +9751,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
         // remain the fast paths.
         // 2.2.29: 6/8 quanta only after a confirmed 90-deg streak AND a predicted
         // error >15%. A 14% error with a 6-quantum write was the 22:56 14.3 s case.
-        const normalMax=normalTrimQuanta(state.phase,t.bigAngleStreak||0,predictedRel,!!t.largeGapS2);
+        const normalMax=decayException?Math.min(normalTrimQuanta(state.phase,t.bigAngleStreak||0,predictedRel,!!t.largeGapS2),2):normalTrimQuanta(state.phase,t.bigAngleStreak||0,predictedRel,!!t.largeGapS2);
         steps=t.governorSteps!=null?t.governorSteps:(rescueActive?predictiveStepQuanta(errGS,r,rescueMin,24):predictiveStepQuanta(errGS,r,1,normalMax));
         row.controlCenterMlS=round(controlCenter.commandMlS,3);row.controlSource=controlCenter.source;row.controlR=controlCenter.r;row.controlBucket=controlCenter.bucketId||null;row.stepQuanta=steps;
       }else{
@@ -9780,6 +9808,15 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       if(t.governorMode==="s3-mono"&&t.s3Mono){t.s3Mono.dir=Math.sign(candidate-command)||t.s3Mono.dir;t.s3Mono.out=0;t.s3Mono.holdUntil=0;}
       liveTrimRecord("write",{frame,commandMlS:candidate,previousMlS:command,retry:!!retry,rawGS:row.rawGS,predictedGS:row.predictedGS,targetGS:target,rescue:rescueActive,steps,intendedQuanta:steps,actualQuanta:Math.round(Math.abs(candidate-command)*16),controlCenterMlS:row.controlCenterMlS,controlSource:row.controlSource,controlR:row.controlR,controlBucket:row.controlBucket,largeGap:!!t.largeGapS2,commandGapPct:row.commandGapPct!=null?row.commandGapPct:null,shortS2:!!(t.s2Recovery&&t.s2Recovery.short),payload});
       row.decision="write";row.commandMlS=candidate;
+      // 2.2.55 (Vd15): account exception down-writes; dual exit on write-count cap.
+      if(decayException&&candidate<command){
+        t.decayExceptionWrites=(t.decayExceptionWrites||0)+1;
+        liveTrimRecord("decay-exception-write",{frame,commandMlS:candidate,previousMlS:command,quanta:Math.round(Math.abs(candidate-command)*16),count:t.decayExceptionWrites,rawGS:row.rawGS});
+        if(t.decayExceptionWrites>=S2_DECAY_EXCEPTION_MAX_WRITES){
+          liveTrimRecord("decay-exception-exit",{frame,reason:"max-writes",writes:t.decayExceptionWrites});
+          t.decayException=false;t.hotStreak=0;
+        }
+      }
       await host.transport.send(t.handle,{type:"text",data:JSON.stringify({type:"request",operation:"write",characteristicUUID:"A010",payload})});
     }finally{
       if(state.liveTrim===t){

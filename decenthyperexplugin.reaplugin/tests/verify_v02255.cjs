@@ -5766,3 +5766,97 @@ test('2.2.54 O1 observation-off and unverified-profile shots are skipped',()=>{
 });
 
 
+
+// ===== 2.2.55 Vd15 severe-overshoot decay safety exception (user-approved merge; hysteresis + write-cap dual exit, small steps <=2, silence preserved) =====
+function vdChannelLoop(X,{jitter=0,totalMs=14000}={}){
+  return (async()=>{
+    const e=await X.refillLoopEnv(1.29,{floodMode:'adaptive'});
+    const t=e.s.liveTrim,target=e.s.cfg.stage2Flow,startMs=t.run.startedAtMs;
+    e.s.cfg.liveTrimDecisionModel=true;t.report.decisionModel='predictive';
+    const limiter=Number(t.profile.steps[1].limiter.value),baseCmd=Number(t.profile.steps[1].flow);
+    const cmds=[];let mach=0,cup=0,weight=0,retained=0,broken=false,elapsed=0,step=0,seen=X.rawWrites(e).length,completeAt=null;
+    const scale=[],curve=[];
+    const plantR=cmd=>cmd<=4?1.23:cmd>=4.5?1:1.23-(cmd-4)*.46;
+    while(elapsed<totalMs){
+      const all=X.rawWrites(e);
+      for(let i=seen;i<all.length;i++){cmds.push({atMs:elapsed,cmd:parseInt(JSON.parse(all[i].payload.data).payload.slice(4,6),16)/16});X.trimAck(e);}
+      seen=all.length;
+      let goal=baseCmd;for(const w of cmds)if(elapsed-w.atMs>=350)goal=w.cmd;
+      mach+=(Math.max(0,goal)-mach)*Math.min(1,50/400);
+      if(!broken){retained+=mach*50/1000;if(retained>=25)broken=true;}else{retained+=(mach-cup)*50/1000;if(retained<0)retained=0;}
+      const release=broken?Math.min(retained/2.0,8):0;
+      cup+=((broken?plantR(mach)*mach+release:0)-cup)*Math.min(1,50/200);
+      weight+=(cup+(jitter?jitter*Math.sin(step*2.3):0))*50/1000;
+      e.advance(50);elapsed+=50;step++;
+      const tMs=e.now()-startMs;
+      scale.push({phase:'stage2',profileFrame:1,tMs,weightG:weight,scaleTimestampSeconds:100+tMs/1000,tareReset:false});
+      curve.push({tMs,cup});
+      e.s.lastPressure=Math.min(limiter*0.85,0.8+mach*(broken?0.15:0.22));
+      e.s.lastFlow=mach;e.s.lastMachineTelemetryValid=true;e.s.lastMachineState='espresso';e.s.lastSubstate='pouring';
+      e.s.lastFrame=1;e.s.lastMachineAtMs=e.now();e.s.latestScaleAtMs=e.now();e.s.cumulativeWeight=weight;
+      t.run.rawScaleSamples=scale.slice(-30);
+      e.h.observeLiveTrimMachine({machineState:'espresso',telemetryValid:true,profileFrame:1,targetFlow:goal,flow:mach,pressure:e.s.lastPressure,substate:'pouring'});
+      if(step%5===0)await X.trimTick(e);
+      if(t.startup.status==='complete'&&completeAt===null)completeAt=elapsed;
+      if(completeAt!==null&&elapsed>completeAt+9000)break;
+    }
+    return {t,curve,completeAt,target};
+  })();
+}
+test('2.2.55 Vd15 constants are the approved design (1.5/3/1.2/4)',()=>{
+  const s=fs.readFileSync(file,'utf8');
+  assert(s.includes('S2_DECAY_EXCEPTION_FACTOR=1.5;'));
+  assert(s.includes('S2_DECAY_EXCEPTION_SAMPLES=3;'));
+  assert(s.includes('S2_DECAY_EXCEPTION_EXIT_FACTOR=1.2;'));
+  assert(s.includes('S2_DECAY_EXCEPTION_MAX_WRITES=4;'));
+});
+test('2.2.55 Vd15 normal closed loop never triggers the exception (peak < 1.5x target)',async()=>{
+  for(const r of [1.29,2.0])for(const jitter of [0,0.6,1.2]){
+    const e=await refillLoopEnv(r,{floodMode:'adaptive'});
+    const R=await refillClosedLoop(e,{jitter});
+    assert(R.peakPct<=40,'normal peak <=40: '+R.peakPct);
+    assert.equal(R.status,'complete');
+    const trig=e.s.liveTrim.report.trace.filter(x=>x.kind==='decay-exception-trigger');
+    assert.equal(trig.length,0,'no exception on normal cup (r='+r+' jitter='+jitter+')');
+  }
+});
+test('2.2.55 Vd15 channeling: trigger fires, small steps <=2, dual exit, count <= cap',async()=>{
+  const X={refillLoopEnv,refillClosedLoop,trimTick,trimAck,rawWrites};
+  const {t}=await vdChannelLoop(X,{jitter:0});
+  const tr=t.report.trace;
+  const trig=tr.filter(x=>x.kind==='decay-exception-trigger');
+  const writes=tr.filter(x=>x.kind==='decay-exception-write');
+  const exits=tr.filter(x=>x.kind==='decay-exception-exit');
+  assert(trig.length>=1,'exception triggers on severe channeling decay');
+  assert.equal(trig[0].thresholdGS,7.5,'threshold = 5 x 1.5');
+  assert(writes.length>=1&&writes.length<=4,'exception writes within cap: '+writes.length);
+  assert(writes.every(w=>w.quanta<=2),'small steps <=2 quanta (skill 22.13): '+JSON.stringify(writes.map(w=>w.quanta)));
+  assert(exits.length>=1,'dual exit fires');
+  assert(exits.every(x=>x.reason==='hysteresis'||x.reason==='max-writes'),'exit reason recorded: '+JSON.stringify(exits.map(x=>x.reason)));
+});
+test('2.2.55 Vd15 channeling: first down-write earlier than governance-only baseline',async()=>{
+  const X={refillLoopEnv,refillClosedLoop,trimTick,trimAck,rawWrites};
+  const {t,completeAt}=await vdChannelLoop(X,{jitter:0});
+  const firstDown=t.report.trace.find(x=>x.kind==='write'&&!x.startupAction&&Number(x.frame)===1&&x.commandMlS<x.previousMlS);
+  assert(firstDown,'a down-write occurs');
+  assert(firstDown.tMs<=6500,'exception advances first down-write (baseline 6750): '+firstDown.tMs);
+  assert(firstDown.tMs>completeAt,'down-write is post-complete');
+});
+test('2.2.55 Vd15 real cup-16 hot window crosses trigger then exit thresholds (history-11 cross)',()=>{
+  const f='D:/vscode/HyperExController/.tools/__live-plugin-history-11.json';
+  if(!fs.existsSync(f)){console.log('   skip cup-16 cross: history-11 absent');return;}
+  const j=JSON.parse(fs.readFileSync(f,'utf8'));
+  const s=j.shots.find(x=>x.runId==='1795084966454-2');
+  const raw=((s.fullRecord||{}).rawScaleSamples||[]).filter(x=>x.phase==='stage2'&&Number(x.profileFrame)===1);
+  const slopeAt=(t0,t1)=>{const w=raw.filter(x=>Number(x.tMs)>=t0&&Number(x.tMs)<=t1);if(w.length<2)return null;const n=w.length;let sx=0,sy=0,sxx=0,sxy=0;for(const x of w){const xx=Number(x.tMs)/1000,yy=Number(x.weightG);sx+=xx;sy+=yy;sxx+=xx*xx;sxy+=xx*yy;}return (n*sxy-sx*sy)/(n*sxx-sx*sx);};
+  // reg.slope is the BACKWARD 1.6 s window at each check (matches plugin rawGS).
+  // hot checks 22323/22604/22872/23146 > 7.5 (3 consecutive -> trigger at 22872);
+  // hysteresis exit when raw < 6.0 at check 23963.
+  const hot=slopeAt(22872-1600,22872);
+  assert(hot!==null&&hot>7.5,'cup-16 hot check backward-window slope > 1.5x target: '+hot);
+  const hot2=slopeAt(23146-1600,23146);
+  assert(hot2!==null&&hot2>7.5,'cup-16 4th hot check still > 7.5: '+hot2);
+  const cold=slopeAt(23963-1600,23963);
+  assert(cold!==null&&cold<6.0,'cup-16 decay crosses exit threshold 1.2x target: '+cold);
+});
+

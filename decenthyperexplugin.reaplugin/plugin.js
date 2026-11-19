@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-const PLUGIN_VERSION = "2.2.54";
+const PLUGIN_VERSION = "2.2.55";
   // Generated profiles and profile binding share one fixed title prefix,
   // matching ProfileRecorder's ownership gate. Settings no longer rename them.
   const HYPEREX_TITLE_PREFIX = "HyperEx";
@@ -198,6 +198,12 @@ const PLUGIN_VERSION = "2.2.54";
   const S2_REFILL_CUTOFF_BACKSTOP=0.85;
   const S2_REFILL_ACCEL_HISTORY=4;
   const S2_REFILL_PREDICTED_CAP=1.6;
+// 2.2.55 (Vb3, d-path cup-16): instantaneous dw/dt cross-check during boost.
+// Two consecutive short-window slopes >= target x FACTOR fire an early cutoff
+// (noise guard; user-approved Q4 conservative margin). Channeling breakthrough
+// outruns the 0.75 s regression window (cup 16 peak +102.7%).
+const S2_REFILL_INSTANT_CROSS_FACTOR=1.1;
+const S2_REFILL_INSTANT_CROSS_SAMPLES=2;
   // 2.2.46 (user 2026-11-14): after a refill return the cup flow overshoots and
   // then decays; the 1.5 s prediction extrapolates that decay too far and the
   // ordinary feedback chases it upward (field: 4.94->5.19->5.44->5.69 while the
@@ -3322,6 +3328,12 @@ const PLUGIN_VERSION = "2.2.54";
     if(!fit||tail.length<6)return gate("tail-points",{tailPoints:tail.length});
     if(fit.r2<.90)return gate("r2",{r2:round(fit.r2,4)});
     if(fit.slope<0)return gate("slope",{slope:round(fit.slope,3)});
+    // 2.2.55 (Va, d-path cup-16): a perfectly flat window fits slope 0 with
+    // r2=1 — a degenerate estimate, not a valid zero-flow measurement. Reject it
+    // (keep the last valid estimate or null) so estHistory is not polluted by
+    // zeros and the acceleration median sees a clean history. Fixes the D5 gate
+    // gap (slope<0 only rejected negatives; slope 0 r2=1 slipped through).
+    if(fit.slope<=1e-6)return gate("slope-zero",{slope:round(fit.slope,3)});
     t.startup.lastEstimateGate=null;
     const previous=t.startup.lastEstimate,current={slope:fit.slope,stamp:tail[tail.length-1].x,r2:fit.r2};
     // 2.2.50: median-filter acceleration over a short history of slope estimates
@@ -3366,6 +3378,35 @@ const PLUGIN_VERSION = "2.2.54";
       if(Number.isFinite(pr)&&pr>=0){
         if(!p.blindPressure)p.blindPressure={firstAt:now,firstBar:pr};
         if(pr>=S2_REFILL_BLIND_PRESSURE_BAR&&now-p.blindPressure.firstAt>=500&&pr-p.blindPressure.firstBar>=S2_REFILL_BLIND_RISE_BAR)return "S2 refill blind-flood pressure climb (no cup outflow)";
+      }
+    }
+    // 2.2.55 (Vb3, d-path cup-16): instantaneous dw/dt cross-check during boost.
+    // The 0.75 s regression window lags a channeling breakthrough (cup 16: first
+    // valid estimate raw 5.402 already past the backstop, peak +102.7%). Two
+    // consecutive short-window instantaneous slopes >= target x FACTOR fire an
+    // early cutoff, taking precedence with the predicted main judgment. The
+    // FACTOR margin and SAMPLES requirement are the noise guard (user-approved
+    // Q4); normal breakthrough ramps cross this only ~0.25 s before the
+    // regression cutoff (benign, replay-verified cups 12/15). Trigger path only:
+    // flood vector law / backstop value / governance / silence unchanged.
+    if(p.status==="boosting"){
+      const rs=(t.run.rawScaleSamples||[]).filter(x=>x.phase==="stage2"&&Number(x.profileFrame)===1);
+      const need=S2_REFILL_INSTANT_CROSS_SAMPLES;
+      if(rs.length>=need+1){
+        const thr=target*S2_REFILL_INSTANT_CROSS_FACTOR;
+        let ok=true,inst=null;
+        for(let i=rs.length-need;i<rs.length;i++){
+          const a=rs[i-1],b=rs[i];
+          const dt=Number(b.scaleTimestampSeconds)-Number(a.scaleTimestampSeconds);
+          const s=dt>0.02?(Number(b.weightG)-Number(a.weightG))/dt:null;
+          if(s===null||s<thr){ok=false;break;}
+          inst=s;
+        }
+        if(ok&&inst!==null){
+          const bs=target*S2_REFILL_CUTOFF_BACKSTOP;
+          p.cutoff={rawGS:round(inst,3),predictedGS:round(inst,3),predictedRawGS:round(inst,3),decisionGS:round(inst,3),thresholdGS:round(threshold,3),backstopGS:round(bs,3),basis:"instantaneous-cross",estHistory:(t.startup.estHistory||[]).map(x=>({slope:round(x.slope,3),stamp:x.stamp,r2:x.r2!=null?round(x.r2,4):null})),margin:round(inst-bs,3),firingTickMs:Number(t.report.periodMs)||null,firingObservedGS:round(inst,3),instantCrossGS:round(inst,3),instantCrossFactor:S2_REFILL_INSTANT_CROSS_FACTOR,atMs:Date.now()};
+          return "S2 refill instantaneous slope cross-check (channeling breakthrough)";
+        }
       }
     }
     const observed=flow?Number(flow.slope):null,predicted=flow?Number(flow.predicted):null;

@@ -1,3 +1,16 @@
+# 2.2.55 experimental
+
+S2 补水估计稳健性加固（d 路径，杯 16 峰 102.7% 破绊线驱动；用户 11-19 批 Va+Vb3 改码批）。**估计/触发路径改动，控制律主体零改**；Q2 平滑度优先维持（coast/up-hold/治理链/死区/quanta/静默/ceiling 全不动）。见 [HANDOFF_v02255.md](HANDOFF_v02255.md)。
+
+- **Va 退化零斜率拒收**：s2RefillFlowEstimate slope 门加 fit.slope<=1e-6 → gate("slope-zero")，不更新 lastEstimate/estHistory（保持最后有效值或 null）。修 D5 门缺口——slope 0 r2=1 的完全平重退化拟合此前漏网（只拒负斜率），污染 estHistory。杯 16 突破前平重 1.4s 的零估计不再入历史。
+- **Vb3 瞬时 dw/dt 交叉核**：boost 期连续 S2_REFILL_INSTANT_CROSS_SAMPLES=2 个短窗瞬时斜率 ≥ target×S2_REFILL_INSTANT_CROSS_FACTOR=1.1（用户批 Q4 保守余量，噪声 guard）触发早 cutoff，与 predicted 主判取先；cutoff 记录 basis="instantaneous-cross"＋instantCrossGS/instantCrossFactor 诊断字段（D5 同款）。治通道突破快于 0.75s 回归窗（杯 16 首有效估计 raw 已 5.402>backstop）。
+- **用户裁定**：40% 绊线区分正常/通道事件（通道突破留存水释放涌流是物理，峰可超泵最大；正常杯绊线不变）。衰减期安全例外另派只读评估批（平滑优先前提下提高敏感度）。
+- **不碰**：coast 8%/up-hold/治理链/死区/quanta/静默/ceiling/LUT/manual 锚/硬包线 8/§22.11 灌水矢量律/backstop 值（0.85）/两段收口。
+- **测试**：tests/verify_v02255.cjs **887/887**（880 基线＋7 新增：Va 零斜率双向／Va 杯 16 平重真机 JSON 交叉／Vb3 触发＋噪声 guard／Vb3 杯 16 突破真机交叉／Vb3 正常不触发／通道＋正常闭环／常量）；node --check／manifest JSON 通过；sim-regression 5/5。
+- **回放（×1.1 生产码）**：通道植物峰 109.4→**102.6%**（−6.8pp，bleed 早 500ms，basis instantaneous-cross，Va 零估计清除）；正常闭环 r1.29/2.0×抖动 0/0.6/1.2 逐字不变（15.4%/3.9%，rise 0.6，maxCmd 7）；真机杯 12 bleed 早 0.25s 良性／杯 15/16 不变。
+- **APK 移植同步点**：Va slope-zero 门＋Vb3 瞬时交叉核 → shadow/arbiter 等价物，full→hec 里程碑（与 D1–D4/O1 债合并）。见 HANDOFF §5。
+- **技能补注**：§22.18 末「2.2.55 Va/Vb3」（只加不改，统筹审）。
+
 # 2.2.54 experimental
 
 估计载体暖机（O1，用户 11-19 批「暖机恢复 diagnosticLast，同意批」）。杯 15 取证评估驱动：升级 reload 后 diagnosticLast 空到首杯完成，平台/trim 中心/FF k 落 profile-base（冷 base 3.5 vs 学习值 ≈3.8，tail −6.91% 而 whole HIT）——gain memory 与证据行本就在盘上，缺的只是载体。**估计侧改动，控制律零改**；Q2 用户不批（「坚持平滑度优先」）——coast 8%／up-hold／治理链／死区全不动，§22.13 维持。见 [HANDOFF_v02254.md](HANDOFF_v02254.md)。

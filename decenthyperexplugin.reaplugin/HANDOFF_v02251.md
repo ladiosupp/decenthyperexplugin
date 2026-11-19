@@ -27,9 +27,15 @@
 - 平台 before→after（ml/s）：杯 6 3.875→3.875 / 杯 7 3.875→3.875 / 杯 8 4.375→4.25（门：>=5.0 n1→overall 1.1821）/ 杯 9 4.3125→4.3125 / 杯 10 4.3125→4.125（路由：4.0-5.0→3.0-4.0）/ **杯 11 5.25→3.875**（路由：g2 4.0-5.0 r0.9562 n2→3.0-4.0 r1.2802 n7；旧律 gain 0.9524/flood 8 与现场导出吻合）/ **杯 12 预测 4.375→4.125**（g3 >=5.0 r1.1401 n1→3.0-4.0 r1.2078 n4，降温）。
 - 注：回放用最终 gainMemory 快照，杯 10 绝对值与现场（装机 reload 后 diagnosticLast 空→profile-base 3.875）不同；before/after 同输入对比隔离 A 律变更。杯 11 before 与现场一致。
 
-## 4. 发版回执（待填，发版后补）
+## 4. 发版回执（2026-11-19，用户批准「修，合并一起发2.2.51」全 SOP）
 
-- 版本 2.2.51 / tag v2.2.51 / 代码 commit（待填）。zip 字节/SHA256（待填）。GitHub Release ID/asset（待填）。夸克 fileId（待填）。平板 Download/ ls 核（待填）。
+- 版本 2.2.51 / tag v2.2.51 / 代码 commit **a07dc30**（branch auto-hyperex，已推 origin；远端分支头与 tag 均 a07dc30，ls-remote 核过；自 e734f1e 快进）。
+- zip **516564 字节**，SHA256 **87A471D53B8D2CE3D29C6611FBD2729C82DDF1FA1B17919575839FE9E7F83A34**；git archive 自 tag 构建（干净基线，无他人 WIP）；包内回归 **846/846**。
+- GitHub Release **450771204** / asset **RA_kwDOVO5zXc4tpLJQ**：https://github.com/ladiosupp/decenthyperexplugin/releases/tag/v2.2.51
+- 夸克 fileId **dbd3d84950124c479e76f81b4bd1f3ca**（夸克网盘/来自：Codex，516564 字节；返回无 notice.text）。
+- 平板 **/sdcard/Download/HyperExPulseFilter_v2.2.51.zip** 已推并 ls 核 516564 字节（2026-11-19 09:37，mDNS adb）。**安装由用户在 Decaid 里做，不代装**。
+- 推送走 VPN 代理 127.0.0.1:57890（AGENTS 18）；gh token 走 git credential fill + HTTPS_PROXY（gh release create 上传成功，未用 curl 兜底）。
+- 装机后测杯 12（取证接力陪杯）：预期平台≈4.125（g3 base 带 r1.2078）；③ 入口可从 manual 选回 ADAPTIVE 立即应用学习值。
 
 ## 5. APK 移植同步点（同步债，full→hec 里程碑一次移植，AGENTS §1.12）
 

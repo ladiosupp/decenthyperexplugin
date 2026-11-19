@@ -1,3 +1,14 @@
+# 2.2.52 experimental
+
+诊断与编辑 UX 加固（非控制律小批）。杯 12 观察驱动＋用户实测反馈。**控制律全程不动**（s2RefillReturnReason/boundedRefillCommand/平台路由/成熟度门/baseBand/§22.18 杯间 manual 锚）。见 [HANDOFF_v02252.md](HANDOFF_v02252.md)。
+
+- **(c) cutoff 诊断字段**：cutoff 记录加 estHistory 快照/margin(rawGS−backstop)/firingTickMs/firingObservedGS；refill 期 check 行加 rawGS/predicted/predictedCapped/accel/backstopGS/startupStatus 序列。补取证导出缺口（tick 跳变 vs backstop 时序可区分）。additive 向后兼容，控制逻辑零改动。
+- **§22.18 文案澄清（技能文档层）**：backstop 触发实测界在 250ms tick 粒度下为近似（≤0.85×target＋一个 tick 离散裕量）；峰余量主因 retained-water 物理（§22.11），backstop 离散化贡献小（杯 12 核码实证）。
+- **③ UX 歧义修**：应用按钮改名 APPLY SELECTED MODES & COMMANDS／应用所选模式与指令；S1/S2 选 ADAPTIVE 时该阶段数字输入置灰＋草稿预览（最新合格学习值 X ml/s，或「无新建议（HOLD）→清回 LUT＋armed 学习」），按应用才生效。test-command-set mode=adaptive 应用语义不动。
+- **测试**：tests/verify_v02252.cjs **851/851**（846 基线 + 5 新增）；node --check / manifest JSON 通过。
+- **APK 移植同步点**：c 诊断字段 APK shadow 取证可镜像；③ UX 是插件诊断 UI，APK 走 external-flow 不复用。见 HANDOFF §4。
+
+
 # 2.2.51 experimental
 
 S2 平台估计器路由加固（A 批）＋诊断页回学习入口（③），合并同包。评估驱动：杯 11（1795046308506-2）红线全 PASS 但 S2 tail +18.9% 非 HIT——平台被污染 band r 0.9562 抬到 5.25。**灌水量律不动（§22.11 维持）**；修的是平台级 r 的估计路由（读取侧），面向 auto 主流。用户 11-19 裁定：manual 尊重不延伸杯内平台（§22.18 维持杯间建议侧）；偏好「立即应用最新学习值」。见 [HANDOFF_v02251.md](HANDOFF_v02251.md) 与 [杯 11 评估](../HANDOFF_2026-11-19-cup11-platform-estimator-eval.md)。

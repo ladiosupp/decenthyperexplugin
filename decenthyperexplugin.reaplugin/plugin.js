@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-const PLUGIN_VERSION = "2.2.56";
+const PLUGIN_VERSION = "2.2.57";
   // Generated profiles and profile binding share one fixed title prefix,
   // matching ProfileRecorder's ownership gate. Settings no longer rename them.
   const HYPEREX_TITLE_PREFIX = "HyperEx";
@@ -252,6 +252,15 @@ const S2_REFILL_HOLD_MS_MIN=2000;        // user 2026-11-20 watchdog band
 const S2_REFILL_HOLD_MS_MAX=7000;
 const S2_REFILL_HOLD_MARGIN_S=0.6;       // margin over the predicted need
 const S2_REFILL_BOOST_VOLUME_WARN_ML=32; // skill 22.11 water envelope
+// 2.2.57 (scaleSampleGate, user 2026-11-20 "过滤一个可以用的参数写进去"): ingestion
+// gate for the scale samples feeding the INSTANTANEOUS estimates only (oq tail
+// rolling regression / Vb3 instantCross / learning observedR via the oq tail).
+// The archive run.rawScaleSamples is never mutated; the soak pressure observation
+// and the whole-phase regression (diagnosticRawRegression) read the raw stream
+// untouched. minGapMs compresses scale-buffer flush (100Hz microclusters / dt=0)
+// back to <=16Hz while keeping the real 10Hz signal; monotonic rejects negative
+// weight increments during extraction. Clean 10Hz cups pass through byte-identical.
+const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
   // 2.2.46 (user 2026-11-14): after a refill return the cup flow overshoots and
   // then decays; the 1.5 s prediction extrapolates that decay too far and the
   // ordinary feedback chases it upward (field: 4.94->5.19->5.44->5.69 while the
@@ -2486,6 +2495,33 @@ const S2_REFILL_BOOST_VOLUME_WARN_ML=32; // skill 22.11 water envelope
     out.startMs=Number(complete.tMs)+settleMs;
     return out;
   }
+  // 2.2.57 scaleSampleGate: returns a gated COPY of the sample array for the
+  // instantaneous-estimate consumers (oq tail / Vb3 instantCross / learning
+  // observedR via the oq tail). The input array is never mutated, so the archive
+  // run.rawScaleSamples, the export and the soak pressure observation stay raw.
+  // Sequential accept: keep a sample only if its scale timestamp is >= minGapMs
+  // after the last ACCEPTED sample (compresses 100Hz buffer flush / dt=0 collisions
+  // back to <=16Hz, keeps the real 10Hz signal) and, with monotonic, its weight is
+  // not below the last accepted weight (rejects negative extraction glitches;
+  // physical cup weight only rises). tareReset clears the tracking baseline.
+  // Clean 10Hz cups pass through unchanged (byte-identical downstream).
+  function scaleSampleGate(samples){
+    if(!Array.isArray(samples))return samples;
+    const minGapS=(SCALE_SAMPLE_GATE.minGapMs||60)/1000;
+    const monotonic=SCALE_SAMPLE_GATE.monotonic===true;
+    const out=[];let lastStamp=null,lastWeight=null;
+    for(const x of samples){
+      if(x&&x.tareReset){lastStamp=null;lastWeight=null;}
+      const stamp=finiteOrNull(x&&x.scaleTimestampSeconds);
+      const weight=finiteOrNull(x&&x.weightG);
+      if(stamp!==null&&lastStamp!==null&&stamp-lastStamp<minGapS)continue;
+      if(monotonic&&weight!==null&&lastWeight!==null&&weight<lastWeight)continue;
+      out.push(x);
+      if(stamp!==null)lastStamp=stamp;
+      if(weight!==null)lastWeight=weight;
+    }
+    return out;
+  }
   function regressionForRawSamples(samples) {
     if (!Array.isArray(samples) || samples.length < 4) return null;
     const points = samples.map(s => ({ x: rawTimeSecondsForSample(s), y: Number(s.weightG) }));
@@ -3608,7 +3644,7 @@ const S2_REFILL_BOOST_VOLUME_WARN_ML=32; // skill 22.11 water envelope
     // regression cutoff (benign, replay-verified cups 12/15). Trigger path only:
     // flood vector law / backstop value / governance / silence unchanged.
     if(p.status==="boosting"){
-      const rs=(t.run.rawScaleSamples||[]).filter(x=>x.phase==="stage2"&&Number(x.profileFrame)===1);
+      const rs=scaleSampleGate((t.run.rawScaleSamples||[]).filter(x=>x.phase==="stage2"&&Number(x.profileFrame)===1));
       const need=S2_REFILL_INSTANT_CROSS_SAMPLES;
       if(rs.length>=need+1){
         const thr=target*S2_REFILL_INSTANT_CROSS_FACTOR;
@@ -8868,7 +8904,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     const plateauStart=phase==="stage2"?stage2PlateauStartMs(run):null;
     const cutoffMs=phase==="stage2"?(plateauStart!==null?plateauStart:(win&&Number.isFinite(win.startMs)?win.startMs:null)):(win&&Number.isFinite(win.startMs)?win.startMs:null);
     if(win&&win.refill&&!win.confirmed)return {available:false,reason:"refill-return-unconfirmed",windowSettleMs:win.settleMs,chainSettleMs:win.chainSettleMs}; // R-5
-    const all=phaseRawSamples(run,phase),raw=cutoffMs===null?all:all.filter(x=>Number(x.tMs)>=cutoffMs);
+    const all=scaleSampleGate(phaseRawSamples(run,phase)),raw=cutoffMs===null?all:all.filter(x=>Number(x.tMs)>=cutoffMs);
     const lastAt=all.length?Number(all[all.length-1].tMs):null;
     const plateauFallback=phase==="stage2"&&plateauStart!==null&&Number.isFinite(lastAt)&&plateauStart>=lastAt-1200-1;
     if(!target)return {available:false,reason:"no-target"};

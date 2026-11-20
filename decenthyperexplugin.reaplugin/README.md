@@ -1,3 +1,15 @@
+# 2.2.57 experimental
+
+S2 瞬时估计**秤样本摄入门滤波** scaleSampleGate={minGapMs:60,monotonic:true}（用户 11-20 裁 A：红线由「正常杯 oq 逐字不变」放宽为行为级「学习决策＋写序列＋HIT 不变」）。杯 23 秤遥测污染（100Hz 缓冲 flush 微簇/dt=0 碰撞/负增量）推高 oq tail＋18.53%、observedR 1.635、Vb3 疑噪点误触；门只护喂瞬时估计的摄入副本，压回 ≤16Hz 保真实 10Hz、萃取期负增量拒收。详见 [HANDOFF_2026-11-20-scale-filter-impl.md](HANDOFF_2026-11-20-scale-filter-impl.md) / 冲突裁决 [HANDOFF_2026-11-20-scale-filter-conflict.md](HANDOFF_2026-11-20-scale-filter-conflict.md)。
+
+- **scaleSampleGate**：顺序接受——与上一已接受样本 scaleTimestampSeconds 间隔 <60ms 丢弃（压 100Hz flush/dt=0 回 ≤16Hz，保真实 10Hz）；monotonic 拒收萃取期负重量增量（物理杯重单调增）；tareReset 清基线。返回**摄入副本**，输入数组不改。
+- **只作用两处摄入**：controlOutputQuality 的 tail 滚动回归输入 `all`（oq tail＋S2 学习 observedR 经 gainStageObservation 同源）＋ s2RefillReturnReason 的 Vb3 instantCross `rs`。**whole-phase 回归 diagnosticRawRegression／控制律 liveTrimRegression／s2RefillFlowEstimate 预测主判读未 gate 的原始流，零改**。
+- **行为级不变（真实杯全量 liveTrim 回放，喂真实录制样本含真实 scaleTimestampSeconds）**：近 4 杯（含 2.2.55 干净杯）写序列逐字相同、HIT 全不变；正常杯 21/22 oq 仅微移（tailErr −0.59→−0.66 / 0.77→0.88，observedR 1.3037→1.3026 / 1.3001→1.3017，远未出 HIT 带、无学习决策翻转）；杯 23 oq tail 去噪 18.53→7.71、tailMean 5.927→5.385、observedR 1.635→1.4855（部分去噪；~1.39 是取证 Hampel 内插口径，不作目标）。
+- **归档/soak 零影响**：rawScaleSamples 原始不改（取证/标定需原始噪点）；soakWettingObservation 压力另路不受影响（杯 21/22/23 soakRatio 0.5435/0.5747/0.6763 复算不变）；whole-phase 回归杯 23 stage2 仍 5.118（归档值）。
+- **红线**：控制律/硬包线 0.10–8.00 与 1/16/targets/LUT/gain memory 结构/manual 锚/sent 恒 false/单一写者零改；别人 WIP 不碰。
+- **测试**：tests/verify_v02257.cjs **912/912**（906 基线＋6 gate：100Hz 压缩 ≤16Hz/dt=0 拒收/负增量拒收恢复/clean 10Hz 按引用原样/输入不改/真实杯 soak＋whole-phase 不变＋噪杯 oq 去噪，禁镜像）；sim-regression 5/5；node --check 通过；manifest description 保持 275 短简介（§1.15）。
+- **APK 移植同步点**：scaleSampleGate（minGap60＋monotonic，摄入副本）→ shadow/arbiter 等价物，full→hec 里程碑（与 D1–D6/O1/Va/Vb3/Vd15/2.2.56 新律债合并）。
+
 # 2.2.56 experimental
 
 S2 补水**真自适应重设计**（技能 §22.19，用户 11-20 裁定全批：决策点迁 stage2 入口／riseTarget 0.80／删 1.8×plat／floor 导出式／flood[3.5,8] 冷启动 5／holdMs[2000,7000] 默认 4000 双向动态／预算不可行旗标＋UI／主信号 soakP2sRatio＋禁反号 S1 出流族／Vi 保守兜底 24.8）。**只改 boost 首笔幅度＋决策时序＋holdMs 动态＋旗标 UI＋早期信号估计**；Va/Vb3/Vd15/O1/cutoff predicted 主判/backstop 0.85/两段收口/Q2 平滑链/硬包线 0.10–8.00/sent 恒 false/LUT/单一写者全不动。评估依据 [HANDOFF_2026-11-20-adaptive-redesign-proposal.md](HANDOFF_2026-11-20-adaptive-redesign-proposal.md)，实施细节 [HANDOFF_2026-11-20-adaptive-impl.md](HANDOFF_2026-11-20-adaptive-impl.md) 与 [HANDOFF_v02256.md](HANDOFF_v02256.md)。

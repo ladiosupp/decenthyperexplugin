@@ -32,14 +32,15 @@ Va（slope-zero 拒收）／Vb3（瞬时交叉核）／Vd15（衰减例外）／
 
 soak 湿润观测（`soakP2sRatio` ＋6 拒收门）／自适应灌水律（F_rise、F_budget、clamp、冷启动 headroom）／holdMs 双向动态／`refill-budget-infeasible` 旗标与 UI → shadow/arbiter 等价物，与 D1–D6／O1／Va／Vb3／Vd15 债同批。**先确认 APK 侧有 soak 相段样本流**，否则等价物恒走冷启动分支。
 
-## 6. 待用户/统筹确认（阻塞项）
+## 6. 用户裁定记录（11-20，已落技能 §22.19 与代码）
 
-1. **`FC_FACTOR` 默认 0 与 §22.19 文中「fc=0.9×plat」不一致**——三条理由（3.5 下限在 fc=3.49 时数学不可达；§22.19 引用的 6.95s 与 24.8 都是 fc=0 口径；fc=0 拟合 rmse 0.289s vs 0.478s）见 impl §3.1。**建议改 §22.19 该行为「fc = FC_FACTOR × platform，默认 0，Vi 按 fc=0 口径标定」**。
-2. holdMs 动态**只作用于 adaptive 挡**（固定挡人工值不动，只记观测）；要延伸到固定挡须另批。
-3. 灌水量最坏 56ml（flood8×holdMs7000）**未做硬拦截**，只告警；要硬上限请另批常量。
-4. 发版／push／tag／装机：**均未做，等用户指令**。
+1. **`FC_FACTOR` 默认 0**——用户裁定，技能 §22.19 该行已改为「fc = FC_FACTOR × platform，默认 FC_FACTOR=0，Vi 按 fc=0 口径标定」。理由留档见 impl §3.1（3.5 下限在 fc=3.49 时数学不可达；§22.19 引用的 6.95s 与 24.8 本就是 fc=0 口径；fc=0 拟合 rmse 0.289s vs 0.478s）。
+2. **holdMs 动态只作用于 adaptive 挡**——用户确认「人工档不动」。固定挡人工值不动、只记观测，已按此实现。
+3. **灌水量不设硬上限**——用户确认「各自有安全包线即可」。最坏 56ml（flood8×holdMs7000）由压力门/ACK/硬包线/holdMs 上限兜底，维持超 32ml 告警、不拦截。
+4. **标定与闭环合并**——用户裁定「直接改码测第一杯作为标定」，取消不改码的固定挡标定轮（见 §7）。
+5. 发版／push／tag／装机：**均未做，等用户指令**。
 
 ## 7. 下一步（建议顺序）
 
-P2 固定挡标定试杯（6.0/6.5/7.0 各 ≥3 杯，同豆同研磨，取 `soak-wetting` 与实测 wetLat/b2b/峰/whole 重拟合 `VI_A/VI_B`，并顺带核 `FC_FACTOR`）→ 按标定结果决定是否调 `RISE_TARGET_S`／`HOLD_MARGIN_S` → P3 adaptive 挡闭环 ≥5 杯（验收：峰 ≤ 现中位 −10pp 且 ≤40%、rise ≤0.9s、零超时、whole 不劣化）→ P4 极端粉饼验上行侧与旗标。
+**直接跑 adaptive 挡真机杯，第一杯即标定点**（代码已带 `soak-wetting` 全证据链，标定与闭环一次完成；不再单设不改码的固定挡标定轮）。首杯对比预测 boostToBleed 与实测：吻合则 `VI_A/VI_B` 保持，偏则用本杯 (flood, wetLat) 反推 Vi=wetLat×flood 重拟合（当前系数对当前豆期偏保守约 0.57s，方向安全）；首杯风险由 clamp[3.5,8]＋冷启动兜底＋holdMs 自动抬＋压力门/ACK 兜住。→ 按标定结果决定是否调 `RISE_TARGET_S`／`HOLD_MARGIN_S` → adaptive 挡闭环 ≥5 杯（验收：峰 ≤ 现中位 −10pp 且 ≤40%、rise ≤0.9s、零超时、whole 不劣化）→ 极端粉饼验上行侧与旗标。
 

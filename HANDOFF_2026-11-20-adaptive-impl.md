@@ -2,7 +2,7 @@
 
 > 派单：统筹 01a1f6fa（原 01a1f631 已接力）11-20，用户裁定全批＋改码授权（**发版/push/tag/装机另问**）。口径依据＝技能 **§22.19**（现行，取代 §22.11 的「≥7 硬悬崖／灌水量静态上限只由安全包线／不降 flood」、D4 floor7 常量、1.8×plat 乘数）＋评估 [HANDOFF_2026-11-20-adaptive-redesign-proposal.md](HANDOFF_2026-11-20-adaptive-redesign-proposal.md)。基线 HEAD **19f43c3**（2.2.55）。
 >
-> 一句话现状：**§22.19 全条落地**，`verify_v02256` **906/906**、`sim-regression` **5/5**、25 杯真机决策级回放全过（选笔 6.000–8.000、零越界、零 infeasible、零 extrapolated）。**有 1 处实现层裁定与 §22.19 文中不一致（FC_FACTOR），见 §3，须用户/统筹确认。**
+> 一句话现状：**§22.19 全条落地**，`verify_v02256` **906/906**、`sim-regression` **5/5**、25 杯真机决策级回放全过（选笔 6.000–8.000、零越界、零 infeasible、零 extrapolated）。**用户 11-20 已裁定：FC_FACTOR=0 写入技能 §22.19、holdMs 动态只动自适应挡（人工档不动）、灌水量不设硬上限（各自安全包线兜底）；标定与闭环合并——直接跑自适应挡真机杯，第一杯即标定点（见 §6）。代码无需再改，均已按此实现。**
 
 ## 1. 改动清单（plugin.js +273/−24，manifest 1 行，README 置顶，tests 新增）
 
@@ -44,13 +44,13 @@ holdMs    = 可行时 min(设定值, clamp(ceil100((needed+0.6)*1000), 2000, 700
 
 trace 新增 4 类：`soak-wetting`（**两种挡都记**：available/reason/soakP0Bar/soakP2sRatio/soakTauES/samples/floodMode/applied/viMl/viSource/fcMlS/lawFloodMlS/lawHoldMs/lawBinding/currentFloodMlS/predictedBoostToBleedS/configuredHoldMs/fitsConfiguredHoldMs/budgetInfeasible）、`adaptive-replan`（changed/floodMlS/previousFloodMlS/holdMs/previousHoldMs/adaptive）、`adaptive-replan-skipped`、`refill-budget-infeasible`。
 
-## 3. 实现层裁定与冲突（**须用户/统筹确认**）
+## 3. 实现层裁定（**用户 11-20 已裁定，技能 §22.19 已同步**）
 
-1. **`FC_FACTOR` 默认 0，与 §22.19 文中「fc=0.9×plat」不一致。** 三条理由：①**数学不相容**——plat 3.875 时 fc=3.49，用户裁定的 3.5 绝对下限就压在渐近线上，`Vi/(flood−fc)` 会发散，3.5 永远取不到（§22.19 自己写的「有信号后按律可降到 3.5」无法成立）；②**§22.19 引用的数字本身是 fc=0 口径**——「flood3.5 → b2b 6.95s」＝20.7/3.5+4.59/3.5−0.274，「Vi 兜底 24.8」也是 fc=0 口径的批2 上界（fc=0.9plat 口径下对应值只有 15.7）；③**拟合更好**——同一 25 杯，fc=0 口径预测 wetLat 的 rmse **0.289s**（Vi R²=0.873），fc=0.9×plat 口径 **0.478s**（Vi R²=0.419）。`FC_FACTOR` 已做成常量可配（改回 0.9 需同时重标定 `VI_A/VI_B/VI_MIN/VI_MAX/VI_FALLBACK`，否则量纲错配）。**建议 §22.19 该行改为「fc = FC_FACTOR × platform，默认 FC_FACTOR=0（Vi 按 fc=0 口径标定）」。**
-2. **holdMs 动态只作用于 adaptive 挡**：固定挡（人工旋钮）`holdMs` 与 `floodMaxMlS` 一律不动，只记 `soak-wetting` 观测与 forecast（`applied:false`）。依据＝§22.11 v2.2.26「固定挡是人工折中，不代表算法策略」＋§22.19「只改 boost 首笔幅度＋决策点时序＋holdMs 动态＋旗标 UI」。**若用户要固定挡也动态调 holdMs，须另批**（那会覆盖用户手设值）。
+1. **`FC_FACTOR` 默认 0 —— 用户 11-20 已裁定，技能 §22.19 该行已改为「fc = FC_FACTOR × platform，默认 FC_FACTOR=0，Vi 按 fc=0 口径标定」。** 当初实现取 0 而非文中 0.9 的三条理由（留档）：①数学不相容——plat 3.875 时 fc=3.49，用户裁定的 3.5 绝对下限压在双曲渐近线上，`Vi/(flood−fc)` 发散，3.5 取不到；②§22.19 引用的「flood3.5→b2b6.95s」与「Vi 兜底 24.8」本就是 fc=0 口径的数（fc=0.9plat 口径下 Vi 上界只有 15.7）；③同 25 杯 fc=0 拟合更优（wetLat 预测 rmse 0.289s vs 0.478s、Vi R² 0.873 vs 0.419）。`FC_FACTOR` 为可配常量，改回 0.9 须同步重标定 `VI_A/VI_B/VI_MIN/VI_MAX/VI_FALLBACK`（量纲不同）。
+2. **holdMs 动态只作用于 adaptive 挡 —— 用户 11-20 确认「人工档不动」，就按此实现。** 固定挡（人工旋钮）`holdMs` 与 `floodMaxMlS` 一律不动，只记 `soak-wetting` 观测与 forecast（`applied:false`）。依据＝§22.11 v2.2.26「固定挡是人工折中，不代表算法策略」。
 3. **冷启动加了 headroom 守卫**（`flood = max(5, platform+1/16)`）：纯 5.0 在 platform≥4.94 时会触发 `stage2StartupPlan` 的「S2 refill has no command headroom」→ `enabled:false` → 整段补水被 skip（比灌水偏小更糟）。实测 r=0.8（platform 6.25）时冷启动值＝6.3125，测试已钉住。这是对用户「冷启动默认 5」的**安全补丁**，不改其本意（无信号时不跑律、不给高值）。
 4. **`viExtrapolated` 与 `budgetInfeasible` 是两个旗标**：Vi 被 clamp 到 [15,36] 后，`needed(flood=8)` 最大 ≈4.8s < 7.0s，所以 `budgetInfeasible` 在当前常量下**数学上不可达**（保留作常量变更后的安全网）；粉饼异常改由 `viExtrapolated`（soakP2sRatio 超出标定域 0.20–0.80）告警，UI 红字提示核对研磨/布粉。
-5. **灌水量与 stage2Weight**：`boostVolumeMl = flood × holdMs/1000` 已入 plan 与 UI，超过 §22.11 历史包线 32ml 时红字告警并显示 `s2WeightBudgetG`（=stage2Weight−stage1Weight）。最坏组合 flood8×holdMs7000＝56ml，**未做硬拦截**（用户已授权 [3.5,8]×[2000,7000] 区间）；如需硬上限请另批一个 `MAX_BOOST_VOLUME_ML`。
+5. **灌水量与 stage2Weight —— 用户 11-20 确认「不设硬上限，各自安全包线兜底即可」，维持告警不拦截。** `boostVolumeMl = flood × holdMs/1000` 已入 plan 与 UI，超过 §22.11 历史包线 32ml 时红字告警并显示 `s2WeightBudgetG`（=stage2Weight−stage1Weight）；最坏组合 flood8×holdMs7000＝56ml 由压力门/ACK/硬包线 0.10–8.00 与 holdMs 上限兜底，不再加 `MAX_BOOST_VOLUME_ML`。
 
 ## 4. 验证回执
 
@@ -70,11 +70,12 @@ trace 新增 4 类：`soak-wetting`（**两种挡都记**：available/reason/soa
 - **自适应范围**：批2 跨度 **1.31 ml/s**（6.000–7.313），固定挡跨度 0 → 满足「适应范围应大于固定档」。
 - **§22.19 引用的 −13.8pp 对应 riseTarget 0.8＋flood 6.00 的静态算法**；实施后按逐杯 Vi 得到的批2 中位是 6.375（−8.7pp），差额来自 Vi 截距对当前豆期偏保守（批2 预测 b2b 中位 3.88s vs 实测 3.31s，约 +0.57s）。**P2 标定后预计还能再让出 0.3–0.5 ml/s（约再 −4…−7pp）**，方向安全（偏保守＝偏不欠流）。
 
-## 6. 真机待验项（P2/P3，须用户陪杯）
+## 6. 真机待验项（标定与闭环合并，须用户陪杯）
 
-1. **P2 标定（不改码，固定挡旋钮）**：`floodMaxMlS` 取 6.0 / 6.5 / 7.0 各 ≥3 杯，同豆同研磨同布粉；每杯从导出 JSON 取 `soak-wetting` 的 `soakP2sRatio/soakTauES/soakP0Bar/viMl` 与实测 `wetLat/rise2080/boostToBleed/回归峰/whole`，重拟合 `VI_A/VI_B`（当前值来自 10-28→11-19 的 25 杯，跨两个 S1 指令期）。**验收**：新系数下批内 wetLat 预测 rmse ≤0.30s。
-2. **P2 附带核 `FC_FACTOR`**：同一批数据分别按 fc=0 与 fc=0.9×plat 拟合，比 wetLat rmse；若 0.9 更好则改常量并**同步重标定 Vi 五元组**（量纲不同，不能只改 FC_FACTOR）。
-3. **P3 改码闭环（另批）**：adaptive 挡 ≥5 杯，验收＝回归峰 ≤ 现中位 −10pp 且 ≤40% 绊线／`rise2080 ≤0.9s`／**零 holdMs 超时**／whole 不劣于现机制。
+> **用户 11-20 裁定：不再单设「不改码的固定挡标定轮」。** 2.2.56 代码已带 `soak-wetting` 全证据链，直接跑自适应挡真机杯，**第一杯即标定点**——标定与闭环一次完成。原 P2 三轮固定挡（6.0/6.5/7.0 各 ≥3 杯）取消。
+
+1. **首杯＝标定＋闭环**：adaptive 挡直接出杯。每杯从导出 JSON 取 `soak-wetting` 的 `soakP2sRatio/soakTauES/soakP0Bar/viMl/predictedBoostToBleedS` 与实测 `wetLat/rise2080/boostToBleed/回归峰/whole`，**对比预测 b2b 与实测**：吻合则 `VI_A/VI_B` 保持；偏则用本杯 (flood, wetLat) 反推 Vi=wetLat×flood 重拟合（当前系数来自 10-28→11-19 的 25 杯、跨两个 S1 指令期，对当前豆期偏保守约 0.57s，方向安全）。首杯风险由安全包线兜住：clamp[3.5,8]＋冷启动保守兜底 Vi24.8＋holdMs 自动抬防静默超时＋压力门/ACK/硬包线 0.10–8.00。**验收**：批内 wetLat 预测 rmse ≤0.30s。
+2. **闭环验收（adaptive 挡 ≥5 杯）**：回归峰 ≤ 现中位 −10pp 且 ≤40% 绊线／`rise2080 ≤0.9s`／**零 holdMs 超时**／whole 不劣于现机制。`FC_FACTOR` 已裁定为 0，无需再比 0.9（若后续真机数据强烈支持 0.9，改常量须同步重标定 Vi 五元组）。
 4. **P4 极端粉饼**：细研磨或布粉偏松做慢润湿，验收＝法则顶到 8.00、holdMs 抬到 5000+、`viExtrapolated` 在异常杯上亮、whole 优于同条件 fixed6.8125 基线（−3.4…−41.5%）。
 5. **冷启动/无 soak 场景**：确认 profile 无 soak 相段（或 soak<10 片、压力<0.05bar）时走 flood 5＋Vi24.8＋holdMs 抬高，且 UI 显示「冷启动默认（无 soak 信号：reason）」。
 6. **UI 实机核**：Decaid 页面补水折叠的 `#refilladaptive` 行中英双语显示、`data-no-i18n` 未被翻译器打散、红字告警可见（本批只做了源码级与 `buildGhcOverlayHtml` 级校验，未在 Decaid 里目视）。

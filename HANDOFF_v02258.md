@@ -51,3 +51,15 @@ scaleSampleGate（minGap60＋monotonic，摄入副本，顺序接受＋tareReset
 - 杯 23 回滚执行待用户授权＋机制定案；若执行用本端点（杯 22 快照 D:/vscode/.tools/__d16-rb-gm-cup22.json，excludeRunId=1795163773778-3，reason scale-or-cup-disturbance）。
 - Vi 重拟合待用户批（标定素材 3 杯含 23 去尖峰）。
 
+## 8. 发版回执（2026-11-20，用户批「走发版链吧，未推的也push」）
+
+- **基线**：50f64d0（2.2.57 scaleSampleGate）＋bf8abab（2.2.58 gain-memory-restore）两改码批＋包内交接 e3a6f6d（文档批，代码零改）。tag **v2.2.58**=e3a6f6df2daab648d31f3de6c99db809db4f3c64（lightweight）。
+- **push**：origin auto-hyperex 876f828..e3a6f6d（含 50f64d0/bf8abab/e3a6f6d）＋new tag v2.2.58（VPN 代理 127.0.0.1:57890）；ls-remote 核分支/tag 均=e3a6f6d。
+- **包**：release/HyperExPulseFilter_v2.2.58.zip **565808 字节**，SHA256 **40A54F64A84791D5AEA93149C6330C43A6841D891E05E95892E3C6409066CA5D**（git archive v2.2.58，9 条目同 v2256 布局，release/__build_v2258.ps1）。**包内复跑 926/926**＋node --check＋manifest version=2.2.58 descLen=275 核过。发版前复跑 verify_v02258 926/926＋sim-regression 5/5＋node --check 全过。
+- **GitHub Release**：**452619336**（tag v2.2.58，--latest，draft=false），asset HyperExPulseFilter_v2.2.58.zip（565808 字节，state=**uploaded**，asset id 771601274／node_id RA_kwDOVO5zXc4t_bN6）。gh token git credential fill 不回显＋HTTPS_PROXY=57890；Release body=release/notes-v2.2.58.md（覆盖两批，§1.15 短简介不动）。
+- **夸克**：「夸克网盘/来自：Codex」fileId **fa931a825a5f42bb82b28d350047a34e**（565808 字节，非秒传；官方 quarkclouddrive CLI 1.0.25，install 检查 success/updated=false，result 无 notice）。
+- **平板**：adb push /sdcard/Download/HyperExPulseFilter_v2.2.58.zip（192.168.31.15:44439，mDNS adb-haf6uwvcqcdujzin-trqoCZ），ls 核 **565808** 字节（2026-11-20 19:37）；**不代装，用户 Decaid 自装**。
+- **红线遵守**：发版批代码零改（仅本回执＋notes＋tag＋push）；只 add 本批（回执仅 HANDOFF_v02258.md）；gh/夸克/adb/push 均提权；装机不代做；别人 WIP（HANDOFF_2026-10-31.md M）不碰不代提交；真实仓写不做。
+- **发版后**：用户 Decaid 自装；杯 23 污染态保留（回滚暂缓、机制另议，回滚机制定案前不出杯）；装机后陪杯取证验滤噪（闭环验收用真实峰）；Vi 重拟合待用户批（标定素材 3 杯含 23 去尖峰）。APK 移植同步债见 §5。
+
+

@@ -1,3 +1,14 @@
+# 2.2.58 experimental
+
+增益记忆**回退维护端点** gain-memory-restore（用户 11-20 批：作为以后类似秤噪点污染情况的永久维护能力；杯23 回滚本身暂缓不执行、污染态保留；改码本批授权，发版/push/tag/装机押后「以后再一起发版」）。新增 guarded REST 端点，把增益记忆恢复到传入的历史快照并排除指定污染杯（标记不删），**只恢复状态，不改任何控制律**；下一杯 base 仍是律输出（随路径变，端点不强制特定数值）。设计依据 [HANDOFF_2026-11-20-cup23-memory-rollback.md](HANDOFF_2026-11-20-cup23-memory-rollback.md)，实施 [HANDOFF_2026-11-20-gain-memory-restore-impl.md](HANDOFF_2026-11-20-gain-memory-restore-impl.md)。
+
+- **端点 gain-memory-restore**（POST，仿 history-review 守卫）：body{gainMemory 快照, excludeRunId, excludeReason, fingerprintKey}，通用化不硬编码任何杯。守卫 idle＋storage verified＋!calibrationActive＋!curveApplyBusy＋autoApply 非 applying；校验 normalizeGainMemory 无 dropped＋excludeRunId 是当前某桶 s2 最新贡献者（lastRunId 匹配，确认撤的是该杯）＋指纹匹配当前校准＋basket coffee。
+- **原子动作**：①file.gainMemory=normalizeGainMemory(快照)②复用 setLearningHistoryReview 排除指定杯（learningReview.excluded＋log＋取消 scheduled apply）③persistHistoryFile 一次写入（快照＋排除）＋readback④restoreAdaptiveHistoryFromPersistentFile 重建证据；若 diagnosticLast 指向被排除杯则置 null 再 restoreDiagnosticLastFromPersistentFile 回到最新合格杯（O1 只读载体）。返回读回证据（各桶 s2/s3 r/n/dev/confidence＋指定杯 review＋diagnosticLast.runId）。
+- **为什么需要它**：增益记忆桶值由 updateGainMemoryFromRun 逐杯增量写入持久化对象，gainMemoryState 只 normalize 不从 shots 重建；history-review 排除杯只重建 adaptiveHistory 证据＋diagnosticLast，退不回桶值。故恢复桶值须此端点（无改码路径穷尽：平板未 root／ReaPrime 非 debuggable／无存储 REST／CDP 闭包私有）。
+- **红线**：只恢复传入快照＋排除指定杯；其余桶/LUT/manual 锚/硬包线 0.10–8.00/sent 恒 false/单一写者零改；杯保留不删（annotation）；三重守卫防误用；无控制律改动。
+- **测试**：tests/verify_v02258.cjs **926/926**（912 基线＋14 端点断言：恢复桶值到快照／指定杯 excluded 保留不删／diagnosticLast 回最新合格杯／它桶不动／原子持久化／守卫 idle·storage·reason·coffee·指纹·非最新贡献者·dropped 快照·空快照／不断言特定 base／HTTP 端点 200 无机器上传／409 不改态／manifest surface＋275，禁镜像）；sim-regression 5/5；离线真文件恢复回放 PASS（活态杯23 污染文件→恢复→g2 s2 r1.3213 n19 HIGH／s3 r1.9754 n17 HIGH／杯23 excluded 保留／diagnosticLast 回杯22）；node --check 通过；manifest description 保持 275（§1.15）。
+- **APK 移植同步点**：gain-memory-restore 属插件诊断/维护面，APK 学习中心只读不移植写操作（既有口径），无 APK 镜像债。
+
 # 2.2.57 experimental
 
 S2 瞬时估计**秤样本摄入门滤波** scaleSampleGate={minGapMs:60,monotonic:true}（用户 11-20 裁 A：红线由「正常杯 oq 逐字不变」放宽为行为级「学习决策＋写序列＋HIT 不变」）。杯 23 秤遥测污染（100Hz 缓冲 flush 微簇/dt=0 碰撞/负增量）推高 oq tail＋18.53%、observedR 1.635、Vb3 疑噪点误触；门只护喂瞬时估计的摄入副本，压回 ≤16Hz 保真实 10Hz、萃取期负增量拒收。详见 [HANDOFF_2026-11-20-scale-filter-impl.md](HANDOFF_2026-11-20-scale-filter-impl.md) / 冲突裁决 [HANDOFF_2026-11-20-scale-filter-conflict.md](HANDOFF_2026-11-20-scale-filter-conflict.md)。

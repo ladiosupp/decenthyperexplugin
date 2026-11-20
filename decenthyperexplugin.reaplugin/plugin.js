@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-const PLUGIN_VERSION = "2.2.57";
+const PLUGIN_VERSION = "2.2.58";
   // Generated profiles and profile binding share one fixed title prefix,
   // matching ProfileRecorder's ownership gate. Settings no longer rename them.
   const HYPEREX_TITLE_PREFIX = "HyperEx";
@@ -4265,6 +4265,55 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
     if(!persistHistoryFile())throw new Error("History exclusion applied in this session; persistent save unavailable");
     if(run)run.summary=diagnosticSummary(run);
     emitSkinChanged();return learningHistoryPayload();
+  }
+
+  // 2.2.58 gain-memory restore: permanent maintenance capability to undo a
+  // polluted cup's incremental gain-memory update. Restores a prior gainMemory
+  // snapshot and excludes the offending cup (annotation, never deletion). State
+  // restore only -- no control-law / LUT / hard-envelope / single-writer change;
+  // the next-shot base stays a law output and is deliberately not asserted here.
+  // Triple-guarded (idle + storage verified + fingerprint + latest-contributor).
+  function restoreGainMemoryFromSnapshot(body) {
+    if(state.phase!=="idle"||state.calibrationActive||state.curveApplyBusy||state.autoApplyLastStatus&&state.autoApplyLastStatus.status==="applying")throw new Error("Gain-memory restore requires idle state");
+    if(state.persistentHistoryAvailable!==true||!state.storageProbeVerified||!state.persistentHistoryLoaded)throw new Error("History storage is not verified");
+    if(!body||typeof body!=="object")throw new Error("Invalid restore body");
+    if(typeof body.excludeRunId!=="string"||!body.excludeRunId)throw new Error("excludeRunId required");
+    if(!["operator-mistake","plugin-fault","scale-or-cup-disturbance","other"].includes(body.excludeReason))throw new Error("Select an exclusion reason");
+    if(!state.cfg||state.cfg.basketContext!=="coffee")throw new Error("Gain-memory restore requires coffee basket context");
+    const fpKey=adaptiveHistoryFingerprintKey(adaptiveHistoryFingerprint());
+    if(!fpKey||typeof body.fingerprintKey!=="string"||body.fingerprintKey!==fpKey)throw new Error("Fingerprint mismatch; snapshot calibration context differs from current");
+    if(!body.gainMemory||typeof body.gainMemory!=="object"||!Array.isArray(body.gainMemory.buckets))throw new Error("gainMemory snapshot with buckets required");
+    const normalized=normalizeGainMemory(body.gainMemory);
+    if(Array.isArray(normalized.dropped)&&normalized.dropped.length)throw new Error("Snapshot rejected by normalizeGainMemory: "+JSON.stringify(normalized.dropped));
+    if(!normalized.buckets.length)throw new Error("Snapshot has no valid buckets");
+    const file=state.persistentHistoryFile;
+    const live=gainMemoryState(false);
+    if(!live||!Array.isArray(live.buckets))throw new Error("No live gain memory to restore");
+    const contributed=live.buckets.some(b=>b&&b.stages&&b.stages.s2&&b.stages.s2.lastRunId===body.excludeRunId);
+    if(!contributed)throw new Error("excludeRunId is not the latest s2 contributor of any bucket; nothing to undo");
+    const row=(file.shots||[]).find(x=>x&&x.runId===body.excludeRunId);
+    if(!row)throw new Error("History record not found for excludeRunId");
+    const before=gainMemoryRestoreSummary(live);
+    // Atomic: install the snapshot, then reuse the reviewed-exclusion path which
+    // rebuilds evidence and persists the whole file (snapshot + exclusion) in one
+    // write. The cup record is kept, only annotated excluded.
+    file.gainMemory=normalized;
+    setLearningHistoryReview({runId:body.excludeRunId,excluded:true,reason:body.excludeReason});
+    // The reviewed exclusion annotates diagnosticLast but does not replace it;
+    // refresh the estimate carrier to the latest eligible cup when it pointed at
+    // the excluded cup (read-only O1 restore, no memory/LUT/machine write).
+    if(state.diagnosticLast&&state.diagnosticLast.runId===body.excludeRunId){
+      state.diagnosticLast=null;
+      restoreDiagnosticLastFromPersistentFile();
+    }
+    const after=gainMemoryState(false);
+    const excludedRow=(file.shots||[]).find(x=>x&&x.runId===body.excludeRunId);
+    emitSkinChanged();
+    return {ok:true,restored:true,excludeRunId:body.excludeRunId,excludedReview:excludedRow?excludedRow.learningReview:null,diagnosticLastRunId:state.diagnosticLast?state.diagnosticLast.runId:null,before,after:gainMemoryRestoreSummary(after),persistedState:historyStatusPayload()};
+  }
+  function gainMemoryRestoreSummary(gm){
+    const stage=s=>s?{r:s.r,n:s.n,deviationPct:s.lastDeviation==null?null:round(s.lastDeviation*100,1),confidence:gainConfidence(s),lastRunId:s.lastRunId}:null;
+    return {seq:gm.seq,lastBucketId:gm.lastBucketId,updatedAt:gm.updatedAt,buckets:(gm.buckets||[]).map(b=>({id:b.id,center:b.center,radius:b.radius,s2:stage(b.stages&&b.stages.s2),s3:stage(b.stages&&b.stages.s3)}))};
   }
 
   function trustedAdaptiveRun(run) {
@@ -10611,6 +10660,10 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     async __httpRequestHandler(request) {
       if(request.endpoint === "history-review"){
         try{return pluginHttpJson(request,200,{history:setLearningHistoryReview(request.body),...calibrationStatusPayload()});}
+        catch(error){return pluginHttpJson(request,409,{error:String(error.message||error),...calibrationStatusPayload()});}
+      }
+      if(request.endpoint === "gain-memory-restore"){
+        try{return pluginHttpJson(request,200,{...restoreGainMemoryFromSnapshot(request.body),...calibrationStatusPayload()});}
         catch(error){return pluginHttpJson(request,409,{error:String(error.message||error),...calibrationStatusPayload()});}
       }
       if(request.endpoint === "language"){

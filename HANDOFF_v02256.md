@@ -44,3 +44,14 @@ soak 湿润观测（`soakP2sRatio` ＋6 拒收门）／自适应灌水律（F_ri
 
 **直接跑 adaptive 挡真机杯，第一杯即标定点**（代码已带 `soak-wetting` 全证据链，标定与闭环一次完成；不再单设不改码的固定挡标定轮）。首杯对比预测 boostToBleed 与实测：吻合则 `VI_A/VI_B` 保持，偏则用本杯 (flood, wetLat) 反推 Vi=wetLat×flood 重拟合（当前系数对当前豆期偏保守约 0.57s，方向安全）；首杯风险由 clamp[3.5,8]＋冷启动兜底＋holdMs 自动抬＋压力门/ACK 兜住。→ 按标定结果决定是否调 `RISE_TARGET_S`／`HOLD_MARGIN_S` → adaptive 挡闭环 ≥5 杯（验收：峰 ≤ 现中位 −10pp 且 ≤40%、rise ≤0.9s、零超时、whole 不劣化）→ 极端粉饼验上行侧与旗标。
 
+## 8. 发版回执（2026-11-20，用户批「走发版链」）
+
+- **基线**：48d9f4e（代码 eb43a9f＋裁定文档 48d9f4e；发版批不改码）。tag **v2.2.56**=48d9f4e6016eb68da22e72c914a7b4ef6056fad1（lightweight）。
+- **push**：origin auto-hyperex 19f43c3..48d9f4e＋new tag v2.2.56（VPN 代理 127.0.0.1:57890）。
+- **包**：release/HyperExPulseFilter_v2.2.56.zip **557906 字节**，SHA256 **D39AC8910C4E238B97725F38AE41A2F2FBFA279D792F70CC4917E43ABA3F4ECE**（git archive v2.2.56，9 条目同 v2255 布局，release/__build_v2256.ps1）。**包内复跑 906/906**＋node --check＋manifest version=2.2.56 descLen=275 核过。
+- **GitHub Release**：**452329480**（tag v2.2.56，--latest），asset HyperExPulseFilter_v2.2.56.zip（557906 字节，state=**uploaded**）。gh token git credential fill 不回显＋HTTPS_PROXY=57890；notes-v2.2.56.md（版本细节归 notes/Release body，§1.15 短简介不动）。
+- **夸克**：「夸克网盘/来自：Codex」fileId **cfc75fe1815c4844a6d0b33a244757fa**（557906 字节，非秒传）。注：quark-nd-mcp upload_file 连续 commit status 203，改用官方 quarkclouddrive CLI（quark-drive.cjs upload）成功。
+- **平板**：adb push /sdcard/Download/HyperExPulseFilter_v2.2.56.zip（192.168.31.15:44439，taiko），ls 核 **557906** 字节（2026-11-20 14:04）；**不代装，用户 Decaid 自装**，首杯即标定（对比预测 boostToBleed 与实测，偏则调 VI_A/VI_B）。
+- **红线遵守**：只 add 本批（回执仅 HANDOFF_v02256.md）；gh/夸克/adb/push 均提权；装机不代做；别人 WIP（HANDOFF_2026-10-31.md）不碰。
+- **发版后**：用户装机首杯即标定＋闭环验（峰 ≤ 现中位 −10pp 且 ≤40%、rise ≤0.9s、零超时、whole 不劣化）；预测 b2b 偏则调 VI_A/VI_B。APK 移植同步点见 §5。
+

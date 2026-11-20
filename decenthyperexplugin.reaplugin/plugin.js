@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-const PLUGIN_VERSION = "2.2.55";
+const PLUGIN_VERSION = "2.2.56";
   // Generated profiles and profile binding share one fixed title prefix,
   // matching ProfileRecorder's ownership gate. Settings no longer rename them.
   const HYPEREX_TITLE_PREFIX = "HyperEx";
@@ -149,7 +149,7 @@ const PLUGIN_VERSION = "2.2.55";
   // can still overshoot at 85 and even 70, because the taper start is what has
   // to move; 30% lets the shaping start sit at 0.3 x target without touching
   // any other parameter. See the three-way coupling note below.
-  const S2_REFILL_LIMITS=Object.freeze({startDelayMs:[0,1500,50],targetPercent:[100,160,1],cutoffPercent:[30,99,1],maxDurationMs:[500,4000,100],approachMs:[200,6000,100],floodMaxMlS:[1/16,8,1/16]});
+  const S2_REFILL_LIMITS=Object.freeze({startDelayMs:[0,1500,50],targetPercent:[100,160,1],cutoffPercent:[30,99,1],maxDurationMs:[2000,7000,100],approachMs:[200,6000,100],floodMaxMlS:[1/16,8,1/16]});
   // ---------------------------------------------------------------------
   // 补水段（S2 refill）所有权标记 — 2026-11-01 流量控制审查（三轮合并）
   // 口径：decentplugin 技能 §22.10 / §22.11 / §22.12（2026-11-01 用户定稿）
@@ -212,6 +212,46 @@ const S2_DECAY_EXCEPTION_FACTOR=1.5;
 const S2_DECAY_EXCEPTION_SAMPLES=3;
 const S2_DECAY_EXCEPTION_EXIT_FACTOR=1.2;
 const S2_DECAY_EXCEPTION_MAX_WRITES=4;
+// 2.2.56 (skill 22.19, user 2026-11-20): S2 refill TRUE-ADAPTIVE redesign.
+// The flood used to be frozen at shot start as max(7, ceil(target), 1.8 x
+// platform). Platform explains almost none of the wetting-latency variance on
+// the real machine (25 cups in two constant-flood batches: fixed 6.8125 and
+// adaptive 7.00 -> wetLat vs platform R2 = 0.000 / 0.079), while the SOAK
+// pressure-decay shape explains most of it (soakP2sRatio r = -0.80 / -0.80,
+// soakTauE -0.75 / -0.94). The flood is therefore decided from this shot own
+// soak signature at stage2 entry, once the evidence exists.
+// Calibration, 25 real cups across both batches:
+//   Vi [ml]       = VI_A + VI_B x soakP2sRatio   (R2 0.873, rmse 1.99 ml)
+//   wetLat [s]   ~= Vi / (flood - fc)           (rmse 0.289 s)
+//   rise2080 [s] ~= RR_MEDIAN / flood           (ln-ln slope -0.95, n=23)
+//   boostToBleed ~= wetLat + rise - CUTOFF_LEAD (median -0.274 s, n=23)
+// Vi is defined with FC_FACTOR = 0 (pure 1/flood). That is the convention the
+// 3.5 absolute floor and the flood-3.5 -> boostToBleed-6.95 s ruling are based
+// on, and it fits better than fc = 0.9 x platform (wetLat rmse 0.289 vs 0.478 s,
+// Vi R2 0.873 vs 0.419). With FC_FACTOR > 0 the Vi constants must be
+// recalibrated and the 3.5 floor becomes unreachable (fc is already ~3.5 at
+// platform 3.9).
+const S2_REFILL_RISE_TARGET_S=0.8;       // user 2026-11-20, relaxed from 0.7
+const S2_REFILL_RR_QUANTILE=4.8;         // p75 of rise2080 x flood (n=23)
+const S2_REFILL_RR_MEDIAN=4.59;          // p50, used for the predicted rise
+const S2_REFILL_CUTOFF_LEAD_S=0.274;     // cutoff is prediction-driven
+const S2_REFILL_FC_FACTOR=0;             // critical flow x platform
+const S2_REFILL_VI_A=40.929;             // ml
+const S2_REFILL_VI_B=-32.251;            // ml per unit soakP2sRatio
+const S2_REFILL_VI_MIN_ML=15;            // observed real range 15.1 .. 35.8
+const S2_REFILL_VI_MAX_ML=36;
+const S2_REFILL_VI_FALLBACK_ML=24.8;     // skill 22.19 conservative constant
+const S2_REFILL_VI_RATIO_MIN=0.2;        // calibrated soakP2sRatio support (25 cups)
+const S2_REFILL_VI_RATIO_MAX=0.8;
+const S2_REFILL_VI_WINDOW_S=2;           // p(soak+2 s) / p(soak start)
+const S2_REFILL_SOAK_MIN_SAMPLES=10;
+const S2_REFILL_SOAK_MIN_P0_BAR=0.05;
+const S2_REFILL_FLOOD_MIN_MLS=3.5;       // user 2026-11-20 absolute floor
+const S2_REFILL_FLOOD_COLD_MLS=5;        // user 2026-11-20 cold-start default
+const S2_REFILL_HOLD_MS_MIN=2000;        // user 2026-11-20 watchdog band
+const S2_REFILL_HOLD_MS_MAX=7000;
+const S2_REFILL_HOLD_MARGIN_S=0.6;       // margin over the predicted need
+const S2_REFILL_BOOST_VOLUME_WARN_ML=32; // skill 22.11 water envelope
   // 2.2.46 (user 2026-11-14): after a refill return the cup flow overshoots and
   // then decays; the 1.5 s prediction extrapolates that decay too far and the
   // ordinary feedback chases it upward (field: 4.94->5.19->5.44->5.69 while the
@@ -711,7 +751,7 @@ const S2_DECAY_EXCEPTION_MAX_WRITES=4;
       const t = state.liveTrim;
       t.algorithmIntervention = "full";
       if (t.startup && (t.startup.status === "armed" || t.startup.status === "disabled") && state.phase === "stage2") {
-        const plan = stage2StartupPlan("full");
+        const plan = stage2StartupPlan("full", run);
         t.startup.plan = plan;
         t.run.config.s2StartupPlan = plan;
         t.report.s2StartupPlan = plan;
@@ -3000,9 +3040,173 @@ const S2_DECAY_EXCEPTION_MAX_WRITES=4;
     return {runId:run.runId,startedAt:run.startedAt||null,available:true,settings:plan.settings?{...plan.settings}:null,
       basis:plan.settings&&plan.settings.basis||"legacy-cup-target",baseCommandMlS:plan.baseCommandMlS,
       plannedBoostMlS:plan.boostCommandMlS,plannedHoldingMlS:plan.returnCommandMlS==null?plan.baseCommandMlS:plan.returnCommandMlS,executedBoostMlS:write?write.commandMlS:null,
-      execution:run.liveFlowTrim&&run.liveFlowTrim.startupExecution||null,timeline:s2RefillTimeline(run)};
+      execution:run.liveFlowTrim&&run.liveFlowTrim.startupExecution||null,adaptive:plan.adaptiveFlood||null,timeline:s2RefillTimeline(run)};
   }
-  function refillFloodFloor(){const t=Number(state.cfg&&state.cfg.stage2Flow);return Number.isFinite(t)&&t>0?Math.min(8,Math.max(1/16,Math.ceil(t*16)/16)):1/16;}
+  // 2.2.56 (skill 22.19, user 2026-11-20): the absolute flood floor is a fixed
+  // envelope value (3.5 ml/s), no longer ceil(S2 target). The rise-target floor
+  // (RR_QUANTILE / riseTarget, ~6.0 at the default 0.8 s) is computed by the
+  // adaptive law below; this function is only the hard clamp shared by the manual
+  // knob, the adaptive law and the UI slider bounds (user band: flood [3.5, 8]).
+  function refillFloodFloor(){return Math.min(LIMITS.commandFlowMax,Math.max(LIMITS.commandFlowMin,Math.round(S2_REFILL_FLOOD_MIN_MLS*16)/16));}
+  // Soak pressure-decay signature. The pump is OFF during soak, so this is a
+  // passive puck measurement that does not depend on the S1 command level. That
+  // matters: the S1 outflow family (midFlowGS / activeFlowGS / s1EndDw / s1DurS /
+  // soakDrainG) flips sign between calibration eras (constant-flood batch-1
+  // -0.81..-0.92 vs batch-2 +0.45..+0.95) and is therefore BANNED as a flood
+  // input, while the dimensionless residual-pressure ratio kept its sign in both
+  // batches (-0.80 / -0.80). Nothing here reads machineFlow as a cup-flow truth
+  // (skill 19: it is a pump-model estimate).
+  function soakWettingObservation(run) {
+    const raw=run&&Array.isArray(run.rawScaleSamples)?run.rawScaleSamples:null;
+    if(!raw||!raw.length)return {available:false,reason:"no-samples"};
+    const soak=raw.filter(x=>x&&x.phase==="soak"&&Number.isFinite(Number(x.tMs)));
+    if(soak.length<S2_REFILL_SOAK_MIN_SAMPLES)return {available:false,reason:"soak-samples",samples:soak.length};
+    const t0=Number(soak[0].tMs);
+    const head=soak.slice(0,5).map(x=>Number(x.pressureBar)).filter(Number.isFinite);
+    if(head.length<3)return {available:false,reason:"soak-pressure-head",samples:soak.length};
+    const p0=median(head);
+    if(!(p0>S2_REFILL_SOAK_MIN_P0_BAR))return {available:false,reason:"soak-pressure-low",samples:soak.length,p0Bar:round(p0,3)};
+    const at=soak.find(x=>Number(x.tMs)-t0>=S2_REFILL_VI_WINDOW_S*1000);
+    if(!at)return {available:false,reason:"soak-window",samples:soak.length,p0Bar:round(p0,3)};
+    const p2=Number(at.pressureBar);
+    if(!Number.isFinite(p2))return {available:false,reason:"soak-pressure-window",samples:soak.length,p0Bar:round(p0,3)};
+    // Diagnostic only, not a law input: the 1/e decay time. Kept because the
+    // field calibration (P2 trials) compares both forms on the same cups.
+    const eTh=p0*Math.exp(-1);
+    const tau=soak.find(x=>Number.isFinite(Number(x.pressureBar))&&Number(x.pressureBar)<=eTh);
+    return {available:true,samples:soak.length,windowS:S2_REFILL_VI_WINDOW_S,
+      soakP0Bar:round(p0,3),soakP2sBar:round(p2,3),soakP2sRatio:round(p2/p0,4),
+      soakTauES:tau?round((Number(tau.tMs)-t0)/1000,3):null,
+      soakSeconds:round((Number(soak[soak.length-1].tMs)-t0)/1000,2)};
+  }
+  // The law (skill 22.19):
+  //   flood   = snap16(clamp(max(F_rise, F_budget), 3.5, 8.00))
+  //   F_rise  = RR_QUANTILE / riseTargetS                     (static: Rr is not
+  //             predictable per cup, R2 <= 0.238, previous-cup lag-1 r = 0.045)
+  //   F_budget= fc + Vi / (holdMs/1000 + CUTOFF_LEAD - riseTargetS)
+  //   Vi      = clamp(VI_A + VI_B x soakP2sRatio, 15, 36) ml, fallback 24.8
+  // Priority is the user's: no under-extraction first, overshoot second. So the
+  // two terms are a LOWER bound (max, never min): the rise target sets the slope
+  // floor and the holdMs budget sets the wetting floor. The peak is only reduced
+  // as a side effect of a smaller Vi, never chased per cup (peak vs the early
+  // signal is R2 = 0.016 in the current era; it tracks flood at 13.84 pp/(ml/s)).
+  function refillAdaptiveFloodDecision(run,platformMlS,settings,headroomMlS) {
+    const holdCfg=Number(settings&&settings.maxDurationMs)>0?Number(settings.maxDurationMs):S2_REFILL_DEFAULTS.maxDurationMs;
+    const riseTarget=S2_REFILL_RISE_TARGET_S;
+    const fRise=S2_REFILL_RR_QUANTILE/riseTarget;
+    const platform=Number.isFinite(Number(platformMlS))&&Number(platformMlS)>0?Number(platformMlS):null;
+    const fc=platform===null?0:S2_REFILL_FC_FACTOR*platform;
+    const obs=soakWettingObservation(run);
+    const signaled=!!(obs&&obs.available===true);
+    const vi=signaled
+      ?Math.min(S2_REFILL_VI_MAX_ML,Math.max(S2_REFILL_VI_MIN_ML,S2_REFILL_VI_A+S2_REFILL_VI_B*Number(obs.soakP2sRatio)))
+      :S2_REFILL_VI_FALLBACK_ML;
+    const budgetS=Math.max(0.3,holdCfg/1000+S2_REFILL_CUTOFF_LEAD_S-riseTarget);
+    const fBudget=fc+vi/budgetS;
+    const lo=refillFloodFloor(),hi=LIMITS.commandFlowMax;
+    const clampFlood=v=>{const s=snapCommandFlow(Math.min(hi,Math.max(lo,v)));return Number.isFinite(s)?s:snapCommandFlow(S2_REFILL_FLOOD_COLD_MLS);};
+    // Cold start (no soak reference at all): the user's fixed default, never the
+    // law. The watchdog still follows the predicted need so a slow puck is not
+    // silently truncated.
+    // The cold-start default still has to leave command headroom above the
+    // platform, otherwise stage2StartupPlan rejects the whole plan ("no command
+    // headroom") and the refill is skipped - worse than a modest flood.
+    const headroom=Number.isFinite(Number(headroomMlS))&&Number(headroomMlS)>0?Number(headroomMlS)+1/16:0;
+    let flood=signaled?clampFlood(Math.max(fRise,fBudget)):clampFlood(Math.max(S2_REFILL_FLOOD_COLD_MLS,headroom));
+    let binding=signaled?(fRise>=fBudget?"rise-target":"hold-budget"):"cold-start";
+    const needAt=f=>vi/Math.max(0.2,f-fc)+S2_REFILL_RR_MEDIAN/f-S2_REFILL_CUTOFF_LEAD_S;
+    let needed=needAt(flood);
+    const round100=s=>Math.min(S2_REFILL_HOLD_MS_MAX,Math.max(S2_REFILL_HOLD_MS_MIN,Math.ceil((s+S2_REFILL_HOLD_MARGIN_S)*10)*100));
+    let holdMs,holdAdjusted=null;
+    if(needed<=holdCfg/1000){
+      // Feasible: only ever SHRINK the watchdog toward the predicted need
+      // (user: large margin -> shorten, anti-over-extraction), never raise it
+      // above the configured value.
+      holdMs=Math.min(holdCfg,round100(needed));
+      if(holdMs!==holdCfg)holdAdjusted="shrunk";
+    }else{
+      // Infeasible: raise toward the top of the band (no under-extraction first).
+      holdMs=Math.max(holdCfg,round100(needed));
+      holdAdjusted="raised";
+      if(needed>S2_REFILL_HOLD_MS_MAX/1000){
+        flood=clampFlood(hi);binding="envelope-max";needed=needAt(flood);
+        holdMs=S2_REFILL_HOLD_MS_MAX;
+      }
+    }
+    const infeasible=needed>holdMs/1000;
+    const boostVolumeMl=round(flood*holdMs/1000,1);
+    const s2w=Number(state.cfg&&state.cfg.stage2Weight),s1w=Number(state.cfg&&state.cfg.stage1Weight);
+    const weightBudgetG=Number.isFinite(s2w)&&Number.isFinite(s1w)&&s2w>s1w?round(s2w-s1w,1):null;
+    return {floodMlS:flood,holdMs:holdMs,holdMsConfigured:holdCfg,holdAdjusted:holdAdjusted,
+      fRiseMlS:round(fRise,3),fBudgetMlS:round(fBudget,3),binding:binding,
+      riseTargetS:riseTarget,rrQuantile:S2_REFILL_RR_QUANTILE,rrMedian:S2_REFILL_RR_MEDIAN,
+      cutoffLeadS:S2_REFILL_CUTOFF_LEAD_S,fcFactor:S2_REFILL_FC_FACTOR,fcMlS:round(fc,3),platformMlS:platform,
+      viMl:round(vi,2),viSource:signaled?"soak-p2s-ratio":"cold-start-fallback",
+      viExtrapolated:signaled&&(Number(obs.soakP2sRatio)<S2_REFILL_VI_RATIO_MIN||Number(obs.soakP2sRatio)>S2_REFILL_VI_RATIO_MAX),
+      viRatioSupport:[S2_REFILL_VI_RATIO_MIN,S2_REFILL_VI_RATIO_MAX],
+      predictedWetLatencyS:round(Math.max(0,needed+S2_REFILL_CUTOFF_LEAD_S-S2_REFILL_RR_MEDIAN/flood),3),
+      predictedRiseS:round(S2_REFILL_RR_MEDIAN/flood,3),predictedBoostToBleedS:round(needed,3),
+      budgetInfeasible:infeasible,
+      budgetInfeasibleReason:infeasible?"predicted wetting + rise "+round(needed,2)+" s exceeds holdMs "+holdMs+" ms at flood "+flood.toFixed(3)+"; puck outside the calibrated range, needs a longer watchdog or a coarser grind":null,
+      boostVolumeMl:boostVolumeMl,boostVolumeWarnMl:S2_REFILL_BOOST_VOLUME_WARN_ML,
+      boostVolumeWarn:boostVolumeMl>S2_REFILL_BOOST_VOLUME_WARN_ML,
+      s2WeightBudgetG:weightBudgetG,observation:obs};
+  }
+  // Decision-point move (skill 22.19): the plan is first built in startDiagnostics
+  // at shot start, when no wetting evidence exists yet. Once stage2 is entered the
+  // soak signature is complete, so the plan is rebuilt ONCE per shot before the
+  // boost write - the same rebuild pattern hecLatchTakeover already uses. The
+  // boost amplitude and the watchdog are the only things that move; the estimate
+  // gates, taper, cutoff, backstop and the two-step handoff are untouched.
+  function adaptiveReplanAtStage2Entry(t) {
+    t.startup.adaptiveReplanAt=Date.now();
+    const before=t.startup.plan;
+    if(!before||before.strategy!=="refill-85")return;
+    const obs=soakWettingObservation(t.run);
+    const forecast=refillAdaptiveFloodDecision(t.run,Number(before.controlBaseMlS),before.settings||{},Number(before.refillPumpBaseMlS));
+    const curFlood=Number(before.floodCommandMlS)>0?Number(before.floodCommandMlS):forecast.floodMlS;
+    const curNeed=forecast.viMl/Math.max(0.2,curFlood-forecast.fcMlS)+S2_REFILL_RR_MEDIAN/Math.max(0.2,curFlood)-S2_REFILL_CUTOFF_LEAD_S;
+    // Recorded in BOTH flood modes: the P2 calibration trials run on the manual
+    // knob, so the fixed path has to emit the signature and the forecast too.
+    liveTrimRecord("soak-wetting",{available:!!(obs&&obs.available),reason:obs&&obs.reason||null,
+      soakP0Bar:obs&&obs.soakP0Bar!=null?obs.soakP0Bar:null,
+      soakP2sRatio:obs&&obs.soakP2sRatio!=null?obs.soakP2sRatio:null,
+      soakTauES:obs&&obs.soakTauES!=null?obs.soakTauES:null,
+      samples:obs&&obs.samples||0,floodMode:before.floodMode||null,applied:before.floodMode==="adaptive",
+      viMl:forecast.viMl,viSource:forecast.viSource,fcMlS:forecast.fcMlS,
+      lawFloodMlS:forecast.floodMlS,lawHoldMs:forecast.holdMs,lawBinding:forecast.binding,
+      currentFloodMlS:round(curFlood,4),predictedBoostToBleedS:round(curNeed,3),
+      configuredHoldMs:Number(before.holdMs)||null,
+      fitsConfiguredHoldMs:curNeed<=(Number(before.holdMs)||0)/1000,
+      budgetInfeasible:forecast.budgetInfeasible===true});
+    // Fixed mode keeps the user's knob and the user's holdMs exactly: a manual
+    // compromise is not an algorithm fault (skill 22.5, v2.2.26). Only the
+    // adaptive law re-decides the first write and its watchdog.
+    if(before.floodMode!=="adaptive")return;
+    const mode=t.algorithmIntervention||normalizeAlgorithmIntervention(state.algorithmIntervention);
+    const plan=stage2StartupPlan(mode,t.run);
+    if(!plan||plan.strategy!=="refill-85"||!plan.enabled){
+      // Never lose an armed refill because a rebuild degraded: keep the previous
+      // plan and say so.
+      liveTrimRecord("adaptive-replan-skipped",{reason:plan&&plan.reason||"rebuilt plan unavailable"});
+      return;
+    }
+    const changed=plan.floodCommandMlS!==before.floodCommandMlS||plan.holdMs!==before.holdMs;
+    t.startup.plan=plan;t.run.config.s2StartupPlan=plan;t.report.s2StartupPlan=plan;
+    t.report.startupExecution={status:"armed",reason:plan.reason};
+    liveTrimRecord("adaptive-replan",{changed:changed,
+      floodMlS:plan.floodCommandMlS,previousFloodMlS:before.floodCommandMlS,
+      holdMs:plan.holdMs,previousHoldMs:before.holdMs,
+      adaptive:plan.adaptiveFlood||null});
+    if(plan.adaptiveFlood&&plan.adaptiveFlood.budgetInfeasible===true){
+      liveTrimRecord("refill-budget-infeasible",{reason:plan.adaptiveFlood.budgetInfeasibleReason,
+        floodMlS:plan.floodCommandMlS,holdMs:plan.holdMs,
+        predictedBoostToBleedS:plan.adaptiveFlood.predictedBoostToBleedS,
+        viMl:plan.adaptiveFlood.viMl,viSource:plan.adaptiveFlood.viSource});
+      log("S2 refill budget infeasible: "+plan.adaptiveFlood.budgetInfeasibleReason);
+    }
+  }
+
   function currentS2RefillSettings(){let out;try{out=validatedS2RefillSettings(state.s2RefillSettings);}catch(_){out=validatedS2RefillSettings(null);}if(state.cfg&&state.cfg.s2RefillBoundedModel){out={...out};out.targetPercent=100;if(!state.s2RefillSettings||!S2_REFILL_BASES.includes(state.s2RefillSettings.basis))out.basis="cup-target";}
     if(out.floodMaxMlS<refillFloodFloor())out.floodMaxMlS=refillFloodFloor();
     // cutoffPercent is the RETURN NOISE FLOOR: s2RefillReturnReason needs
@@ -3211,7 +3415,7 @@ const S2_DECAY_EXCEPTION_MAX_WRITES=4;
     const base = Math.round(resolvedStageCommandFlow("stage2", state.cfg.stage2Flow) * 16) / 16;
     return { schema: 5, strategy: "none", enabled: false, reason, baseCommandMlS: base };
   }
-  function stage2StartupPlan(mode) {
+  function stage2StartupPlan(mode,run) {
     const intervention = normalizeAlgorithmIntervention(mode === undefined ? state.algorithmIntervention : mode);
     if (intervention === "off") return disabledS2StartupPlan("算法介入已关闭：仅检测，不执行补水或起步增强");
     if (intervention === "hec") return disabledS2StartupPlan("HEC：补水由 APK 负责；握手失败时插件接管重建本计划");
@@ -3234,18 +3438,24 @@ const S2_DECAY_EXCEPTION_MAX_WRITES=4;
     // and the write budget stay as the real limiters.
     const floodMode=bounded&&settings.floodMode==="adaptive"?"adaptive":"fixed";
     const floodFixedMlS=bounded?Math.max(refillFloodFloor(),Math.min(LIMITS.commandFlowMax,Math.round(settings.floodMaxMlS*16)/16)):null;
-    // Adaptive cold cap: before any cup-flow estimate the law's own value is
-    // platform + target/r = 2 x platform. Using it for the boost (instead of the
-    // envelope) is what makes the first write scale with the learned gain.
-    // 0.9 x the law's cold value (2 x platform): the law assumes no retained
-    // water at prediction 0, so leave a margin on the very first write.
-    // 2.2.53 (D4, §22.11): the adaptive cold flood never sits below 7.0 ml/s.
-    // The measured 0.7 s rise floor is only reached at >=7.0, independent of
-    // the platform/base (cup 13: base 2.5 -> cold 4.5 -> flood 5 wasted the
-    // refill on a flat cup). The fixed-mode manual knob (floodMaxMlS) is
-    // untouched; 8.00 stays the hard ceiling.
-    const adaptiveColdMlS=bounded&&control?Math.max(7,refillFloodFloor(),Math.min(LIMITS.commandFlowMax,Math.round(1.8*Number(control.commandMlS)*16)/16)):LIMITS.commandFlowMax;
+    // 2.2.56 (skill 22.19): the adaptive first write is decided from this shot's
+    // soak pressure-decay signature, not from 1.8 x platform and not from a hard
+    // 7.0 floor. `run` is null at shot start (startDiagnostics), so the plan
+    // carries a provisional cold-start value until adaptiveReplanAtStage2Entry()
+    // rebuilds it at stage2 entry with the real evidence. The fixed-mode manual
+    // knob stays untouched (a manual compromise is not an algorithm fault); it
+    // still gets the wetting observation for forensics and P2 calibration.
+    const wetting=bounded?refillAdaptiveFloodDecision(run,control?Number(control.commandMlS):NaN,settings,refillBase):null;
+    const applyAdaptive=!!(wetting&&floodMode==="adaptive");
+    if(wetting)wetting.applied=applyAdaptive;
+    const adaptiveColdMlS=bounded
+      ?(applyAdaptive?wetting.floodMlS:Math.max(refillFloodFloor(),Math.min(LIMITS.commandFlowMax,S2_REFILL_FLOOD_COLD_MLS)))
+      :LIMITS.commandFlowMax;
     const floodCommandMlS=bounded?(floodMode==="adaptive"?adaptiveColdMlS:floodFixedMlS):Math.min(LIMITS.commandFlowMax,Math.floor(refillBase*1.6*16)/16);
+    // 2.2.56: the watchdog follows the predicted wetting + rise need (band
+    // [2000, 7000], default 4000). Adaptive mode only; a manual holdMs in fixed
+    // mode stays exactly what the user set.
+    const holdMs=applyAdaptive?wetting.holdMs:settings.maxDurationMs;
     const plan={schema:5,strategy:"refill-85",enabled:false,reason:"S2 refill assist disabled",baseCommandMlS:base,
       refillPumpBaseMlS:round(refillBase,4),controlBaseMlS:round(controlBase,4),controlGain,controlSource,
       boundedModel:bounded,floodCommandMlS:round(floodCommandMlS,4),floodMode,floodMaxMlS:floodMode==="fixed"?round(floodFixedMlS,4):null,refillTargetFraction:settings.targetPercent/100,cutoffFraction:settings.cutoffPercent/100,
@@ -3253,7 +3463,7 @@ const S2_DECAY_EXCEPTION_MAX_WRITES=4;
       // BEFORE the 1200/800 ms predictive silence gate, so it could never permit
       // a write the stricter gate would block - a dead parameter that read like a
       // handover-specific cadence.
-      startDelayMs:settings.startDelayMs,predictionSeconds:1.5,holdMs:settings.maxDurationMs,dispatchWindowMs:settings.startDelayMs+4000,approachMs:settings.approachMs,settings:{...settings},
+      startDelayMs:settings.startDelayMs,predictionSeconds:1.5,holdMs:holdMs,adaptiveFlood:wetting,dispatchWindowMs:settings.startDelayMs+4000,approachMs:settings.approachMs,settings:{...settings},
       sourceRunIds:estimate?[estimate.sourceRunId]:[],learningLevel:learningPolicy().name};
     if(settings.basis==="cup-target"){plan.refillTargetGS=round(cupTarget,3);if(estimate)plan.referenceTailGS=estimate.referenceTailGS;plan.commandBasis=estimate?estimate.basis:"target-cup-flow base fallback (no observed tail)";}
     if(!state.cfg.s2StartupAssist||!state.cfg.liveFlowTrimTest)return plan;
@@ -3492,7 +3702,13 @@ const S2_DECAY_EXCEPTION_MAX_WRITES=4;
         const expectedBoost=p.plan.boundedModel===true
           ?Math.floor((Math.min(LIMITS.commandFlowMax,Number(p.plan.refillMaxCommandMlS||LIMITS.commandFlowMax))+1e-9)*16)/16
           :Math.floor((Math.min(LIMITS.commandFlowMax,planBase*limits.targetPercent/100)+1e-9)*16)/16;
-        if(p.plan.holdMs!==limits.maxDurationMs||p.plan.cutoffFraction!==limits.cutoffPercent/100||p.plan.approachMs!==limits.approachMs||p.plan.startDelayMs!==limits.startDelayMs||p.plan.refillTargetFraction!==limits.targetPercent/100||!Number.isFinite(planBase)||planBase<LIMITS.commandFlowMin||planBase>LIMITS.commandFlowMax||typeof p.plan.commandBasis!=="string"||!p.plan.commandBasis||p.plan.boostCommandMlS!==expectedBoost)return startupBlock(t,"S2 refill plan settings invalid");
+        if(!(p.plan.adaptiveFlood&&p.plan.adaptiveFlood.applied===true
+          // 2.2.56 (skill 22.19): holdMs is dynamic, so the plan/settings tie is checked
+          // through the adaptive decision (its own holdMs and the configured value it
+          // started from) instead of a literal equality. The guard still rejects a
+          // stale or tampered plan.
+          ?(p.plan.holdMs===p.plan.adaptiveFlood.holdMs&&p.plan.adaptiveFlood.holdMsConfigured===limits.maxDurationMs)
+          :p.plan.holdMs===limits.maxDurationMs)||p.plan.cutoffFraction!==limits.cutoffPercent/100||p.plan.approachMs!==limits.approachMs||p.plan.startDelayMs!==limits.startDelayMs||p.plan.refillTargetFraction!==limits.targetPercent/100||!Number.isFinite(planBase)||planBase<LIMITS.commandFlowMin||planBase>LIMITS.commandFlowMax||typeof p.plan.commandBasis!=="string"||!p.plan.commandBasis||p.plan.boostCommandMlS!==expectedBoost)return startupBlock(t,"S2 refill plan settings invalid");
         if(now-(Number.isFinite(p.frameConfirmedAt)?p.frameConfirmedAt:t.frameAt)<limits.startDelayMs)return startupBlock(t,"S2 refill start delay");
       }
       if(p.status!=="armed"||t.pending||t.retry||t.report.trace.some(x=>x.kind==="write"&&Number(x.frame)===1))return startupBlock(t,"S2 startup blocked by an existing pending or issued S2 command");
@@ -5935,6 +6151,34 @@ function renderRefillHistory(){
  else h+='<div class="m">上一杯补水参数尚未记录；不使用当前设置代替历史值。</div>';
  box.innerHTML=h;
 }
+function refillAdaptiveLine(ad,law){
+ if(!ad)return '';
+ const num=(v,d)=>Number.isFinite(Number(v))?Number(v).toFixed(d==null?2:d):'—';
+ const obs=ad.observation||{};
+ const src=ad.viSource==='cold-start-fallback'
+  ?'冷启动默认（无 soak 信号'+(obs.reason?'：'+esc(String(obs.reason)):'')+'）→ Vi '+num(ad.viMl,1)+' ml'
+  :'soak 残余压力比 '+num(obs.soakP2sRatio,3)+' → Vi '+num(ad.viMl,1)+' ml';
+ const band='区间 '+num(law&&law.floodMin,2)+'–8.00 ml/s · holdMs '+num(law&&law.holdMsMin,0)+'–'+num(law&&law.holdMsMax,0)+' ms';
+ if(ad.applied===false){
+  return '<b>上一杯润湿观测（固定挡 · 仅记录不介入）</b> '+src
+   +' · 若走自适应会给 '+num(ad.floodMlS,3)+' ml/s（'+band+'）'
+   +' · 预测 潜伏 '+num(ad.predictedWetLatencyS)+' s ＋ 上升 '+num(ad.predictedRiseS)+' s ＝ 断流 '+num(ad.predictedBoostToBleedS)+' s vs 设定 holdMs '+num(Number(ad.holdMsConfigured)/1000)+' s'
+   +(ad.budgetInfeasible===true?' · <span class="bad">按律预算不可行</span>':'');
+ }
+ const extra=ad.viExtrapolated===true?'<br><span class="bad">soak 残余压力比 '+num(obs.soakP2sRatio,3)+' 超出标定域 '+num((ad.viRatioSupport||[])[0],2)+'–'+num((ad.viRatioSupport||[])[1],2)+'，Vi 已按边界截断（'+num(ad.viMl,1)+' ml）；本杯粉饼异常，请核对研磨/布粉</span>':'';
+ const warn=ad.boostVolumeWarn===true?'<br><span class="bad">灌水量 '+num(ad.boostVolumeMl,1)+' ml 超过历史包线 '+num(ad.boostVolumeWarnMl,0)+' ml'+(ad.s2WeightBudgetG!=null?'（S2 重量预算 '+num(ad.s2WeightBudgetG,1)+' g）':'')+'，请核对粉量与杯量</span>':'';
+ if(ad.budgetInfeasible===true){
+  return '<span class="bad"><b>补水预算不可行</b> '+esc(String(ad.budgetInfeasibleReason||''))
+   +'（已顶满 flood '+num(ad.floodMlS,3)+' ml/s · holdMs '+num(ad.holdMs,0)+' ms）· '+src+'</span>'+extra+warn;
+ }
+ return '<b>上一杯自适应灌水</b> '+num(ad.floodMlS,3)+' ml/s · holdMs '+num(ad.holdMs,0)+' ms'
+  +(ad.holdAdjusted?'（'+(ad.holdAdjusted==='raised'?'由设定 '+num(Number(ad.holdMsConfigured)/1000,1)+' s 抬高':'由设定 '+num(Number(ad.holdMsConfigured)/1000,1)+' s 缩短')+'）':'')
+  +' · '+src+' · 绑定 '+esc(String(ad.binding||'—'))
+  +' · F_rise '+num(ad.fRiseMlS)+' / F_budget '+num(ad.fBudgetMlS)+'（上升目标 '+num(ad.riseTargetS)+' s）'
+  +' · 预测 潜伏 '+num(ad.predictedWetLatencyS)+' s ＋ 上升 '+num(ad.predictedRiseS)+' s ＝ 断流 '+num(ad.predictedBoostToBleedS)+' s'
+  +' · 灌水量 '+num(ad.boostVolumeMl,1)+' ml'+extra+warn;
+}
+
 function refillLearningLine(tl){
  const l=tl&&tl.learning;if(!l||!l.refill)return '';
  if(!l.confirmed)return '<br>学习窗口：补水收回未确认 → 本杯不学 S2 稳态';
@@ -5951,13 +6195,13 @@ function floodCapHtml(){
   +'<div id="refillvalue-floodMode" class="small" style="margin-top:8px"></div>'
   +'<div id="refillfloodfield" class="refillGrid" style="margin-top:10px"><div class="refillRow single"><div class="refillField">'
   +'<div class="refillLbl"><span>灌水上限</span><b id="refillvalue-floodMaxMlS"></b></div>'
-  +'<input type="range" data-refill-key="floodMaxMlS" min="5" max="8" step="0.0625" aria-label="灌水上限">'
+  +'<input type="range" data-refill-key="floodMaxMlS" min="3.5" max="8" step="0.0625" aria-label="灌水上限">'
   +'</div></div></div></div>';
 }
 function renderRefillEditor(){
  const box=$('curverefill');if(!box||!curveDraft||!curveDraft.refill||!curveLatest.refillLimits)return;
  if(!box.querySelector('[data-refill-key]')){
-  box.innerHTML='<div class="small">启动延时从确认进入S2后计；滑块只修改草稿；请点击保存补水参数，下一杯生效。</div>'+'<div class="m"><b>补水基准</b><div class="refillSeg"><label class="refillseg"><input type="radio" name="refill-basis" value="pump-command" data-refill-basis><span>基础泵倍率</span></label><label class="refillseg"><input type="radio" name="refill-basis" value="cup-target" data-refill-basis><span>目标折算</span></label></div><div id="refillvalue-basis" class="small" style="margin-top:8px"></div></div>'+floodCapHtml()+(()=>{const f=k=>{const x=refillControlFields.find(q=>q[0]===k),l=curveLatest.refillLimits[k];return '<div class="refillField"><div class="refillLbl"><span>'+x[1]+'</span><b id="refillvalue-'+k+'"></b></div><input type="range" data-refill-key="'+k+'" min="'+l[0]+'" max="'+l[1]+'" step="'+l[2]+'" aria-label="'+x[1]+'">'+(k==='cutoffPercent'?'<div id="refillderived" class="small" data-no-i18n></div>':'')+'</div>'},r=(keys,single)=>'<div class="refillRow'+(single?' single':'')+'">'+keys.map(f).join('')+'</div>';return '<div class="refillGrid">'+r(['startDelayMs','targetPercent'])+r(['cutoffPercent'],true)+r(['maxDurationMs','approachMs'])+'</div>'})()+'<div class="refillActions"><button id="refillsave" class="b p">保存补水参数</button><span id="refillsavestatus" class="small"></span><button id="refilldefaults" class="b s">恢复补水默认值</button></div><div id="refillnote" class="small"></div><div id="refillpreviewlabels" class="small" data-no-i18n style="margin-top:4px"></div><canvas id="refillpreview" class="chart" style="height:200px" aria-label="S2补水指令预览"></canvas><div id="refillsafety" class="small"></div><div id="refillnodes" class="m"></div><div id="refillprevious" class="manualPanel"></div>';
+  box.innerHTML='<div class="small">启动延时从确认进入S2后计；滑块只修改草稿；请点击保存补水参数，下一杯生效。</div>'+'<div class="m"><b>补水基准</b><div class="refillSeg"><label class="refillseg"><input type="radio" name="refill-basis" value="pump-command" data-refill-basis><span>基础泵倍率</span></label><label class="refillseg"><input type="radio" name="refill-basis" value="cup-target" data-refill-basis><span>目标折算</span></label></div><div id="refillvalue-basis" class="small" style="margin-top:8px"></div></div>'+floodCapHtml()+(()=>{const f=k=>{const x=refillControlFields.find(q=>q[0]===k),l=curveLatest.refillLimits[k];return '<div class="refillField"><div class="refillLbl"><span>'+x[1]+'</span><b id="refillvalue-'+k+'"></b></div><input type="range" data-refill-key="'+k+'" min="'+l[0]+'" max="'+l[1]+'" step="'+l[2]+'" aria-label="'+x[1]+'">'+(k==='cutoffPercent'?'<div id="refillderived" class="small" data-no-i18n></div>':'')+'</div>'},r=(keys,single)=>'<div class="refillRow'+(single?' single':'')+'">'+keys.map(f).join('')+'</div>';return '<div class="refillGrid">'+r(['startDelayMs','targetPercent'])+r(['cutoffPercent'],true)+r(['maxDurationMs','approachMs'])+'</div>'})()+'<div class="refillActions"><button id="refillsave" class="b p">保存补水参数</button><span id="refillsavestatus" class="small"></span><button id="refilldefaults" class="b s">恢复补水默认值</button></div><div id="refillnote" class="small"></div><div id="refillpreviewlabels" class="small" data-no-i18n style="margin-top:4px"></div><canvas id="refillpreview" class="chart" style="height:200px" aria-label="S2补水指令预览"></canvas><div id="refillsafety" class="small"></div><div id="refillnodes" class="m"></div><div id="refilladaptive" class="small" data-no-i18n style="margin-top:4px"></div><div id="refillprevious" class="manualPanel"></div>';
   box.querySelectorAll('[data-refill-key]').forEach(q=>q.oninput=()=>curveRefillChange(q.dataset.refillKey,q.value));
   box.querySelectorAll('[data-refill-basis]').forEach(q=>q.onchange=()=>curveRefillBasisChange(q.value));
   box.querySelectorAll('[data-refill-flood-mode]').forEach(q=>q.onchange=()=>curveRefillFloodModeChange(q.value));
@@ -5969,13 +6213,13 @@ function renderRefillEditor(){
  const boost=Math.max(refillBase,Math.floor((Math.min(upper,Math.max(refillBase,request))+1e-9)*16)/16);
  const holding=Math.floor((Math.min(boost,Math.max(0.1,Number(plan.returnCommandMlS)||baseCommand))+1e-9)*16)/16;
  for(const x of refillControlFields){const input=box.querySelector('[data-refill-key="'+x[0]+'"]');if(bounded&&x[0]==='targetPercent'){input.value=r[x[0]];input.disabled=true;$('refillvalue-'+x[0]).textContent='100% · 仅上限';continue;}input.value=r[x[0]];input.disabled=curveBusy||!curveLatest.canApply;const text=x[0]==='cutoffPercent'?(r[x[0]]+' %'):x[2]==='s'?(r[x[0]]/1000).toFixed(2)+' s':r[x[0]]+'%'+(x[0]==='targetPercent'?' · '+boost.toFixed(4)+' ml/s':'');$('refillvalue-'+x[0]).textContent=text;if(x[0]==='cutoffPercent'){const floorPct=Math.round(r.cutoffPercent*.6);$('refillderived').textContent='派生：实测 ≥ '+floorPct+'% 目标（≈ '+(Number.isFinite(goal)?(goal*floorPct/100).toFixed(2):'—')+' g/s）+ 预测 ≥ 目标（'+(Number.isFinite(goal)?goal.toFixed(2):'—')+' g/s）才收回；下调会同时提前离开满灌（可能拖慢 90° 上升）、降低补水跳过阈值、降低实测噪声底';}}
- const floodMode=r.floodMode==="adaptive"?"adaptive":"fixed",floodFloor=Number((curveLatest.refillLimits.floodMaxMlS||[1/16,8,1/16])[0])||1/16;
+ const floodMode=r.floodMode==="adaptive"?"adaptive":"fixed",floodFloor=Number((curveLatest.refillLimits.floodMaxMlS||[1/16,8,1/16])[0])||1/16,law=curveLatest.refillAdaptiveLaw||{};
  const floodInput=box.querySelector('[data-refill-key="floodMaxMlS"]');
  if(floodInput){floodInput.min=floodFloor;floodInput.max=8;floodInput.step=1/16;floodInput.value=r.floodMaxMlS;floodInput.disabled=curveBusy||!curveLatest.canApply||!bounded;}
  box.querySelectorAll('[data-refill-flood-mode]').forEach(q=>{q.checked=q.value===floodMode;q.disabled=curveBusy||!curveLatest.canApply||!bounded;});
  if($('refillvalue-floodMaxMlS'))$('refillvalue-floodMaxMlS').textContent=r.floodMaxMlS.toFixed(2)+' ml/s';
  const floodField=$('refillfloodfield');if(floodField&&floodField.style)floodField.style.display=floodMode==="adaptive"?"none":"";
- if($('refillvalue-floodMode'))$('refillvalue-floodMode').textContent=!bounded?'仅 bounded 模式可调':(floodMode==="adaptive"?'自适应 · 计划上限 '+(Number(plan.floodPlanMlS)||8).toFixed(2)+' ml/s · u = 平台 + (目标 − 预测) / r，只降不升':'固定 · 下限为曲线 S2 目标 '+floodFloor.toFixed(2)+' ml/s，上限 8.00');
+ if($('refillvalue-floodMode'))$('refillvalue-floodMode').textContent=!bounded?'仅 bounded 模式可调':(floodMode==="adaptive"?'自适应 · stage2 入口按 soak 泄压形状定灌水（上升目标 '+(Number.isFinite(Number(law.riseTargetS))?Number(law.riseTargetS).toFixed(2):'—')+' s · 绝对区间 '+floodFloor.toFixed(2)+'–8.00 ml/s · holdMs '+(law.holdMsMin||2000)+'–'+(law.holdMsMax||7000)+' ms 双向动态）· 出液后 u = 平台 + (目标 − 预测) / r，只降不升':'固定 · 下限 '+floodFloor.toFixed(2)+' ml/s，上限 8.00');
  box.querySelectorAll('[data-refill-basis]').forEach(q=>{q.checked=r.basis===q.value;q.disabled=curveBusy||!curveLatest.canApply;});
  const planBasis=plan.settings&&plan.settings.basis;
  const cupBase=Number.isFinite(planEstimate)?planEstimate:baseCommand;const pumpBase=baseCommand;const otherBasis=r.basis==="cup-target"?"pump-command":"cup-target";const otherBase=otherBasis==="cup-target"?cupBase:pumpBase;const otherUpper=Math.min(8,otherBase*1.6);const otherBoost=Math.max(otherBase,Math.floor((Math.min(otherUpper,Math.max(otherBase,otherBase*r.targetPercent/100))+1e-9)*16)/16);$('refillvalue-basis').textContent=(r.basis==="cup-target"?("目标折算 · 设置值 S2 "+(goal||"—")+" g/s → 估算基础 "+(Number.isFinite(planEstimate)?planEstimate.toFixed(4):(planBasis==="cup-target"?"无合格实测尾段，用 "+baseCommand.toFixed(4)+" ml/s":"保存后按实测尾段折算"))+" ml/s → "+(bounded?("补水目标 "+(goal||"—")+" g/s（收口：预测 ≥ 目标）· 泵基准 "+refillBase.toFixed(4)+" ml/s（r "+(Number(plan.controlGain)||0).toFixed(2)+" · "+String(plan.controlSource||"—")+"）· 灌水 "+boost.toFixed(4)+" ml/s（安全包线，可低于平台断流到 0.10）· 平台收回 "+holding.toFixed(4)+" ml/s"):("增强 "+boost.toFixed(4)+" ml/s · 另一基准 "+otherBoost.toFixed(4)+" ml/s"))):("基础泵倍率 · 当前指令 "+pumpBase.toFixed(4)+" ml/s → 增强 "+boost.toFixed(4)+" ml/s · 目标折算基准 "+(Number.isFinite(planEstimate)?"（可用）"+otherBoost.toFixed(4)+" ml/s":"（保存后可用）")));
@@ -5990,6 +6234,7 @@ function renderRefillEditor(){
  $('refillsafety').textContent='预览为估算；应用后以校验结果为准。机器指令上限 '+(Math.floor(upper*16)/16).toFixed(4)+' ml/s；原限压90%、数据新鲜度和驱动确认保护固定。'+(bounded?' 灌水在安全包线（设计值）。':(request>upper?' 已触及指令上限。':''));
  const tl=curveLatest.refillLastShot&&curveLatest.refillLastShot.timeline;
  if($('refillnodes'))$('refillnodes').innerHTML=tl&&tl.onsetMs!=null?('<b>上一杯补水节点</b><br>帧确认 0.00 s · onset '+((tl.relative&&tl.relative.onsetS)==null?'—':tl.relative.onsetS)+' s（S2 起点）'+(tl.cutoffAtMs!=null?' · 断流 '+((tl.relative&&tl.relative.cutoffS)==null?'—':tl.relative.cutoffS)+' s':'')+(tl.relative&&tl.relative.returnS!=null?' · 收回 '+esc(tl.relative.returnS)+' s':'')+(tl.relative&&tl.relative.completeS!=null?' · 确认 '+esc(tl.relative.completeS)+' s':'')+'<br>'+(tl.overlap?'S2 与补水重叠 '+esc(tl.overlap.seconds)+' s（onset → 收回）':'S2 与补水无重叠')+refillLearningLine(tl)):'';
+ if($('refilladaptive'))$('refilladaptive').innerHTML=typeof refillAdaptiveLine==='function'?refillAdaptiveLine(curveLatest.refillLastShot&&curveLatest.refillLastShot.adaptive,law):'';
  renderRefillHistory();
 }
 function drawCurveChart(cv,o){
@@ -7625,7 +7870,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     const c=commandFlowSummary(),q=c.s3Shape||{},v={stage1:c.stage1CommandMlS,stage2:c.stage2CommandMlS,early:q.enabled?q.earlyCommand:c.stage3FlatCommandMlS,mid:q.enabled?q.midCommand:c.stage3FlatCommandMlS,late:q.enabled?q.lateCommand:c.stage3FlatCommandMlS,earlySeconds:q.enabled?q.earlySeconds:8,midSeconds:q.enabled?q.midSeconds:14};
     const refillDefaults=validatedS2RefillSettings(null);if(state.cfg.s2RefillBoundedModel===true)refillDefaults.basis="cup-target";
     return {revision:curveEditorRevision(),values:v,shaped:!!q.enabled,refill:currentS2RefillSettings(),refillBoundedModel:state.cfg.s2RefillBoundedModel===true,refillLimits:{...S2_REFILL_LIMITS,floodMaxMlS:[refillFloodFloor(),8,1/16]},refillDefaults,
-      refillPreview:stage2StartupPlan(),refillActive:activeReleaseEnabled(state.cfg)&&state.cfg.liveFlowTrimTest&&state.cfg.s2StartupAssist,refillLoadWarning:state.s2RefillLoadWarning,refillPrevious:state.s2RefillPrevious?JSON.parse(JSON.stringify(state.s2RefillPrevious)):null,refillLastShot:refillLastShotSnapshot(),
+      refillPreview:stage2StartupPlan(),refillAdaptiveLaw:{riseTargetS:S2_REFILL_RISE_TARGET_S,rrQuantile:S2_REFILL_RR_QUANTILE,rrMedian:S2_REFILL_RR_MEDIAN,cutoffLeadS:S2_REFILL_CUTOFF_LEAD_S,fcFactor:S2_REFILL_FC_FACTOR,floodMin:refillFloodFloor(),floodMax:LIMITS.commandFlowMax,holdMsMin:S2_REFILL_HOLD_MS_MIN,holdMsMax:S2_REFILL_HOLD_MS_MAX,holdMarginS:S2_REFILL_HOLD_MARGIN_S,viFallbackMl:S2_REFILL_VI_FALLBACK_ML,coldFloodMlS:S2_REFILL_FLOOD_COLD_MLS,volumeWarnMl:S2_REFILL_BOOST_VOLUME_WARN_ML},refillActive:activeReleaseEnabled(state.cfg)&&state.cfg.liveFlowTrimTest&&state.cfg.s2StartupAssist,refillLoadWarning:state.s2RefillLoadWarning,refillPrevious:state.s2RefillPrevious?JSON.parse(JSON.stringify(state.s2RefillPrevious)):null,refillLastShot:refillLastShotSnapshot(),
       canApply:state.s2RefillStorageLoaded&&state.phase==="idle"&&!state.calibrationActive&&!state.curveApplyBusy&&!state.runtimeProfileRepairBusy&&!(state.autoApplyLastStatus&&state.autoApplyLastStatus.status==="applying")&&isHyperExProfileTitle(state.workflowTitle)&&state.runtimeProfileVerified&&state.calibrationMapUsable,
       source:state.testOverrides&&testOverrideStatus().valid&&!testOverrideStatus().baselinePrior?state.testOverrides.manualCurveSource||null:null,
       targetGS:{stage1:state.cfg.stage1Flow,stage2:state.cfg.stage2Flow,stage3:state.cfg.stage3Flow},
@@ -9460,6 +9705,10 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     try {
       if(t.startup&&t.startup.status==="armed"){
         const refill=t.startup.plan.strategy==="refill-85";
+        // 2.2.56 (skill 22.19): the soak/S1 wetting evidence only exists once
+        // stage2 has started, so the adaptive flood and its holdMs watchdog are
+        // decided here - once per shot, before the boost write, not at shot start.
+        if(refill&&t.startup.adaptiveReplanAt==null&&state.phase==="stage2")adaptiveReplanAtStage2Entry(t);
         if(refill&&state.phase==="stage2"&&!Number.isFinite(t.startup.enteredAt))t.startup.enteredAt=Date.now();
         const startupAge=Date.now()-(refill&&Number.isFinite(t.startup.enteredAt)?t.startup.enteredAt:t.frameAt);
         const early=state.phase==="stage2"&&Number(state.lastFrame)===1&&startupAge<=(t.startup.plan.dispatchWindowMs||2000);

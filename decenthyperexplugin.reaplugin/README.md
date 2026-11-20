@@ -1,3 +1,23 @@
+# 2.2.56 experimental
+
+S2 补水**真自适应重设计**（技能 §22.19，用户 11-20 裁定全批：决策点迁 stage2 入口／riseTarget 0.80／删 1.8×plat／floor 导出式／flood[3.5,8] 冷启动 5／holdMs[2000,7000] 默认 4000 双向动态／预算不可行旗标＋UI／主信号 soakP2sRatio＋禁反号 S1 出流族／Vi 保守兜底 24.8）。**只改 boost 首笔幅度＋决策时序＋holdMs 动态＋旗标 UI＋早期信号估计**；Va/Vb3/Vd15/O1/cutoff predicted 主判/backstop 0.85/两段收口/Q2 平滑链/硬包线 0.10–8.00/sent 恒 false/LUT/单一写者全不动。评估依据 [HANDOFF_2026-11-20-adaptive-redesign-proposal.md](HANDOFF_2026-11-20-adaptive-redesign-proposal.md)，实施细节 [HANDOFF_2026-11-20-adaptive-impl.md](HANDOFF_2026-11-20-adaptive-impl.md) 与 [HANDOFF_v02256.md](HANDOFF_v02256.md)。
+
+- **病根是时序不是常数**：`floodCommandMlS` 原在 `startDiagnostics()`（开萃取瞬间）冻结，而 S1 要到 boost 前 10.2s（当前机制）～22.4s（早期机制）才结束；`run.rawScaleSamples` 里整段润湿证据早就在，`s2RefillFlowEstimate` 只是把非 stage2 样本 continue 掉了。platform 对润湿潜伏的解释力实测 **R²=0.000（批1）/0.079（批2）**——旧自适应唯一的输入恰好是唯一不携带润湿信息的量。
+- **决策点迁移**：stage2 入口首个 tick、boost 派发之前重建 plan（复用 `hecLatchTakeover` 713–719 既有模式），每杯一次（`startup.adaptiveReplanAt` 上锁）。重建失败或降级时保留旧 plan 并记 `adaptive-replan-skipped`，绝不因重建丢掉已 armed 的补水。
+- **早期湿润 sensing**：`soakWettingObservation(run)` 只读 soak 段（泵关，与 S1 指令流量无关）→ `soakP2sRatio = p(soak+2s) / p(soak 起点前 5 片中位)`，附带 `soakP0Bar/soakP2sBar/soakTauES/soakSeconds` 供标定。**主信号 soakP2sRatio**（两批同号 −0.80/−0.80）；**禁用 S1 出流族**（midFlowGS/activeFlowGS/s1EndDw/s1DurS/soakDrainG 跨校准期反号：批1 −0.81…−0.92 → 批2 +0.45…+0.95，误用即致欠流），测试以源码级断言钉死。补水前 1–2s 是死窗（泵关、压力 0.08–0.12bar、dw 中位 0.00），不采瞬时点。
+- **律**：`flood = snap16(clamp(max(F_rise, F_budget), 3.5, 8.00))`；`F_rise = RR_QUANTILE(4.80)/riseTargetS(0.80) = 6.00`；`F_budget = fc + Vi/(holdMs/1000 + 0.274 − riseTargetS)`，`fc = FC_FACTOR(0)×platform`，`Vi = clamp(40.929 − 32.251×soakP2sRatio, 15, 36)` ml（25 杯真机标定，R²=0.873／rmse 1.99ml）。冷启动无 soak 信号 → flood 5，且保证 ≥ platform+1/16 的指令余量，避免整段补水被判「无余量」跳过。
+- **holdMs 双向动态 [2000,7000]**：`holdMs = clamp(ceil100((预测 wetLat+rise−0.274+0.6)×1000), 2000, 7000)`；预算够时只缩、且绝不涨过设定值（防过萃），不够时向 7000 抬（保不欠流），仍不够 → 顶满 flood 8 并记 `refill-budget-infeasible` 旗标＋`log()`＋UI 红字，**不静默超时**。
+- **不欠流硬约束**：`wetLat + rise ≤ holdMs/1000 + 0.274`（实测恒等式 `boostToBleed ≈ wetLat + rise − 0.274s`，n=23，中位 −0.274／IQR −0.511…−0.163）。
+- **退役**：`1.8×platform` 乘数（删除）、D4 `max(7,…)` 常量下限（改为导出式 `RR_QUANTILE/riseTargetS`）、`refillFloodFloor()=ceil(target)`（改为绝对下限 3.5，同时放开手动旋钮与 UI 滑块下限）。
+- **防篡改闸适配**：`dispatchS2Startup` 原有 `plan.holdMs !== settings.maxDurationMs` 一致性闸与动态 holdMs 冲突，改为经 `plan.adaptiveFlood` 校验（`holdMs === adaptiveFlood.holdMs && adaptiveFlood.holdMsConfigured === settings.maxDurationMs`），防陈旧/防篡改意图不变。
+- **诊断与取证**：trace 新增 `soak-wetting`（固定挡也记，供 P2 标定试杯）、`adaptive-replan`、`adaptive-replan-skipped`、`refill-budget-infeasible`；plan 新增 `adaptiveFlood{…}` 全证据链（Vi/viSource/binding/F_rise/F_budget/fc/predicted*/holdAdjusted/boostVolumeMl/viExtrapolated）；UI 补水折叠新增 `#refilladaptive` 行（上一杯决策／固定挡观测／预算不可行红字／灌水量超 32ml 历史包线告警／信号超标定域告警）。
+- **测试**：`tests/verify_v02256.cjs` **906/906**（892 基线：2 处版本钉＋5 处退役口径断言按 §22.19 重写＋4 处闭环夹具补 soak 签名；**14 新增**：常量／观测函数与拒收门／慢润湿更多灌水且 rise 目标是下界／全域 band 与 1/16 网格与不静默超时／冷启动 5／holdMs 双向／超标定域旗标／固定挡旋钮与 holdMs 不动但记录签名／stage2 入口每杯重建一次／1.8×plat 已删且平台不再驱动 flood／禁用信号族源码级断言／真机杯 20 soak 样本交叉（与离线探针 0.6803 一致、Vi 19.6±4）／闭环选笔即写入笔／**25 杯真机决策级回放**）；`node --check` 通过；`sim/tests/sim-regression.cjs` **5/5**。
+- **真机回放（开环，只验选笔/旗标/区间）**：25 杯（批1 fixed6.8125 13 杯＋批2 adaptive7 12 杯）→ 法则选笔 **6.000–8.000**（历史 6.813–7.000），全部落在 band 内、全部 `predictedBoostToBleed ≤ holdMs`、零 infeasible、零 extrapolated。分批：批1（历史 13 杯**全部 holdMs 超时**、whole −3.4…−41.5%）法则给 flood 中位 **8.000**（Δ+1.188）＋holdMs 中位 **4800**（Δ+1100ms），预测 b2b 4.15s vs 历史实测 wetLat 4.54s；批2（当前机制、历史正常收口）法则给 flood 中位 **6.375**、跨度 **6.000–7.313（1.31 ml/s，固定挡跨度 0）**，Δ−0.625 → 估算 **Δ峰 −8.7pp**（13.84 pp/(ml/s)，C 组未删失拟合，与匹配对 13.2–22.9 一致）。**rise/峰/wetLat/whole 闭环真值开环回放测不了，须 P2/P3 真机陪杯。**
+- **待真机标定（P2）**：Vi 截距对当前豆期偏高约 0.5s（批2 预测 b2b 中位 3.88s vs 实测 3.31s），偏保守即偏安全侧；标定后预计还能再让出 0.3–0.5 ml/s flood（约 −4…−7pp 峰）。eraB 仅 12 杯，`fc` 定不准（现 FC_FACTOR=0）。
+- **APK 移植同步点**：soak 湿润观测＋自适应灌水律＋动态 holdMs＋预算不可行旗标 → shadow/arbiter 等价物，full→hec 里程碑（与 D1–D6/O1/Va/Vb3/Vd15 债合并）。见 HANDOFF_v02256 §5。
+- **技能**：§22.19 为现行口径（统筹已写并加 §22.11 取代指针）；本批未改技能文本。**FC_FACTOR 默认 0 与 §22.19 文中 `fc=0.9×plat` 不一致，属实现层裁定，待用户/统筹确认**（理由见 HANDOFF_2026-11-20-adaptive-impl.md §3）。
+
+
 # 2.2.55 experimental
 
 S2 补水估计稳健性加固（d 路径，杯 16 峰 102.7% 破绊线驱动；用户 11-19 批 Va+Vb3 改码批＋Vd15 衰减例外并入）。**估计/触发路径＋严重过冲安全例外，控制律主体零改**；Q2 平滑度优先维持（coast/up-hold/治理链/死区/quanta/静默/ceiling 全不动）。见 [HANDOFF_v02255.md](HANDOFF_v02255.md)。

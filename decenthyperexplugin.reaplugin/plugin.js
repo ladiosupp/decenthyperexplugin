@@ -5689,6 +5689,11 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
     rememberAdaptiveEvidence(run);
     run.summary.stage2StartupNext=stage2StartupPlan();
     state.diagnosticCurrent = null;
+    // 2.2.60 D (user 11-21 批①): the cup-end data is final here (summary built,
+    // learning/memory evidence committed, diagnosticLast set). Expose the settled
+    // runId so the APK popup can fetch without guessing; persists until the next
+    // cup settles. Read-only derivation, no control path.
+    state.settled={runId:run.runId,at:new Date().toISOString()};
     state.diagnosticLastSampleAtMs = 0;
     const s2 = run.summary && run.summary.stage2;
     const s3 = run.summary && run.summary.stage3;
@@ -5947,7 +5952,10 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
       takeover: run && run.config && run.config.hecTakeover ? run.config.hecTakeover : null,
       runId: run ? run.runId : null,
       fpKey: fpKey || null,
-      numericFpKey: numericFpKey || null
+      numericFpKey: numericFpKey || null,
+      settledRunId: state.settled && state.settled.runId ? String(state.settled.runId) : null,
+      settlingBusy: !!(state.autoApplyTimer || state.runtimeProfileRepairBusy ||
+        (state.autoApplyLastStatus && ["scheduled", "applying"].indexOf(state.autoApplyLastStatus.status) >= 0))
     };
   }
   // 2.2.60 additive (user 11-21 batch ②, coordinator ruling ① plugin master + APK mirror):

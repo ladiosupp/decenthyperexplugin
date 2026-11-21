@@ -6930,5 +6930,69 @@ test('2.2.60 additive ext fields never enter the control write path (external-fl
  assert.equal(e.writes().length,before+(fj.ok?1:0),'write ledger only moves on accepted flow commands');
 });
 
+// ===== 2.2.60 D: cup-end settlement visibility (settledRunId + settlingBusy, user 11-21 batch ①) =====
+test('2.2.60 D settledRunId appears at finalize and matches diagnosticLast',async()=>{
+ const e=setup();
+ assert.equal(e.h.externalStatusPayload().settledRunId,null);
+ assert.equal(e.h.externalStatusPayload().settlingBusy,false);
+ const r=syntheticRun(e,'settle-d');e.s.diagnosticCurrent=r;
+ e.h.finalizeDiagnostics('completed at 100 g');
+ const p=e.h.externalStatusPayload();
+ assert.equal(p.settledRunId,e.s.diagnosticLast.runId);
+ assert.equal(p.settledRunId,'settle-d');
+ assert.equal(e.s.settled.runId,'settle-d');
+ const dg=await e.plugin.__httpRequestHandler({requestId:'settle-dg',endpoint:'diagnostics'});
+ assert.equal(JSON.parse(dg.body).run.runId,p.settledRunId,'diagnostics run and settledRunId stay consistent');
+});
+test('2.2.60 D settlingBusy derives from scheduled/applying/repair and drops on terminal states',()=>{
+ const e=setup();
+ const p=()=>e.h.externalStatusPayload().settlingBusy;
+ assert.equal(p(),false);
+ e.s.autoApplyLastStatus={status:'scheduled'};assert.equal(p(),true);
+ e.s.autoApplyLastStatus={status:'applying'};assert.equal(p(),true);
+ e.s.autoApplyLastStatus={status:'applied'};assert.equal(p(),false);
+ e.s.autoApplyLastStatus={status:'waiting'};assert.equal(p(),false);
+ e.s.autoApplyTimer={};assert.equal(p(),true);
+ e.s.autoApplyTimer=null;
+ e.s.runtimeProfileRepairBusy=true;assert.equal(p(),true);
+ e.s.runtimeProfileRepairBusy=false;
+ e.s.autoApplyLastStatus={status:'error',message:'profile upload failed'};
+ assert.equal(p(),false);
+ assert.equal(e.s.autoApplyLastStatus.message,'profile upload failed','failure diagnostics retained');
+});
+test('2.2.60 D settledRunId persists across polls until the next cup settles',()=>{
+ const e=setup();
+ const r1=syntheticRun(e,'settle-a');e.s.diagnosticCurrent=r1;e.h.finalizeDiagnostics('completed at 100 g');
+ assert.equal(e.h.externalStatusPayload().settledRunId,'settle-a');
+ const r2=syntheticRun(e,'settle-b');e.s.diagnosticCurrent=r2;
+ assert.equal(e.h.externalStatusPayload().settledRunId,'settle-a','no clear while the next cup is still running');
+ e.h.finalizeDiagnostics('completed at 100 g');
+ assert.equal(e.h.externalStatusPayload().settledRunId,'settle-b');
+});
+test('2.2.60 D additive fields keep the 21-field protocol contract and default types',()=>{
+ const e=setup();
+ const p=e.h.externalStatusPayload();
+ for(const k of ['pluginVersion','mode','phase','extracting','logicalFrame','physicalFrame','layout','targetGS','baseCommandMlS','lastCommandMlS','pending','pressureBar','limiterBar','machineAgeMs','scaleAgeMs','rawGS','writes','maxWrites','heartbeat','takeover','runId'])assert(k in p,'protocol field '+k);
+ assert(p.fpKey===null||typeof p.fpKey==='string');
+ assert.equal(p.settledRunId,null);assert.equal(typeof p.settlingBusy,'boolean');
+});
+test('2.2.60 D cup-end scoring data chain stays complete with settlement fields live',async()=>{
+ const e=setup();
+ const r=syntheticRun(e,'settle-chain');e.s.diagnosticCurrent=r;
+ e.h.finalizeDiagnostics('completed at 100 g');
+ const done=e.s.diagnosticLast;
+ assert(done&&done.summary);
+ for(const k of ['grindAdvice','learningEvidence','learningIntegrity','stage2','stage3','nextShotAdaptive'])assert(k in done.summary,'summary key '+k);
+ assert(done.summary.learningEvidence.stage2&&done.summary.learningEvidence.stage3,'stage learning evidence present');
+ const p=e.h.externalStatusPayload();
+ assert.equal(p.settledRunId,done.runId);
+ assert.equal(p.settlingBusy,false,'plain finalize leaves no busy state');
+ const dg=await e.plugin.__httpRequestHandler({requestId:'settle-chain-dg',endpoint:'diagnostics'});
+ const dj=JSON.parse(dg.body);
+ assert.equal(dj.summary.runId,p.settledRunId);
+ assert.equal(dj.summary.grindAdvice.status,done.summary.grindAdvice.status);
+});
+
+
 
 

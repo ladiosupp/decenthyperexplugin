@@ -975,5 +975,10 @@ PASS 2.2.60 gainMemory mirror is normalize-shaped and null without a persisted g
 PASS 2.2.60 cup-end scoring data chain does not regress: diagnostics summary and run sources intact
 PASS 2.2.60 hello mirror reflects live gainMemory updates without writing (pre-cup refresh source)
 PASS 2.2.60 additive ext fields never enter the control write path (external-flow unchanged)
+PASS 2.2.60 D settledRunId appears at finalize and matches diagnosticLast
+PASS 2.2.60 D settlingBusy derives from scheduled/applying/repair and drops on terminal states
+PASS 2.2.60 D settledRunId persists across polls until the next cup settles
+PASS 2.2.60 D additive fields keep the 21-field protocol contract and default types
+PASS 2.2.60 D cup-end scoring data chain stays complete with settlement fields live
 
-963/963 checks passed
+968/968 checks passed

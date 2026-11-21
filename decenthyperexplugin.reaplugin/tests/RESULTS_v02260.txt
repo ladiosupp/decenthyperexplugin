@@ -946,6 +946,8 @@ PASS 2.2.56 the flood is re-decided once at stage2 entry, after the wetting evid
 PASS 2.2.56 the retired 1.8 x platform multiplier is gone and the platform no longer drives the flood
 PASS 2.2.56 the banned S1-outflow family never feeds the flood (sign flips across calibration eras)
 PASS 2.2.56 real cup-20 soak samples reproduce the offline probe signature (history-15 cross)
+   2.2.59 Vi refit cross (5-cup calibration subset): rmse 0.831 -> 0.086 s (gate 0.30), mean err 0.013 s, per-cup 0.063/-0.060/-0.115/0.098/0.081
+PASS 2.2.59 Vi refit crosses the 5-cup calibration material (wetLat rmse gate <= 0.30 s, user 11-21)
 PASS 2.2.56 closed loop: the law-selected flood is what reaches the driver, inside the envelope
    2.2.59 replay: 25 real cups (batch1 13 / batch2 12), law flood 6.000..8.000 vs historical 6.813..7.000; mean estimated peak delta -3.1pp (13.84 pp per ml/s, closed-loop truth needs the machine); extrapolated 0; infeasible 0
 PASS 2.2.59 decision-level replay over the 25 calibrated real cups (selection + flags only)
@@ -974,4 +976,4 @@ PASS 2.2.60 cup-end scoring data chain does not regress: diagnostics summary and
 PASS 2.2.60 hello mirror reflects live gainMemory updates without writing (pre-cup refresh source)
 PASS 2.2.60 additive ext fields never enter the control write path (external-flow unchanged)
 
-962/963 checks passed
+963/963 checks passed

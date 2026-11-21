@@ -6515,7 +6515,14 @@ test('2.2.59 Vi refit crosses the 5-cup calibration material (wetLat rmse gate <
  e.s.cfg.liveFlowTrimTest=true;e.s.cfg.s2RefillBoundedModel=true;e.s.runtimeProfileVerified=true;
  e.s.s2RefillSettings={basis:'cup-target',startDelayMs:0,targetPercent:100,cutoffPercent:85,maxDurationMs:4000,approachMs:800,floodMode:'adaptive',floodMaxMlS:7};
  let se2=0,seOld=0,bias=0;const errs=[];
- for(const m of mat.samples){
+ // 2.2.60 coordinator ruling (relay-9, 11-21): pin to the 5-cup b-fit calibration subset.
+ // vi-refit-material.json was externally extended with cups 26-29 (post-refit live
+ // validation samples; viPlanMl = clamped current-law plan, a different caliber that
+ // cannot invert through the 2.2.56-coefficient formula). Restores the test's named
+ // scope; the inverse formula and the original 5-cup material are untouched.
+ const cal5=mat.samples.filter(m=>['1795156969813-1','1795162247267-2','1795163773778-3','1795176353006-1','1795217090021-2'].includes(m.runId));
+ assert.equal(cal5.length,5,'5-cup calibration subset present in material');
+ for(const m of cal5){
   const sh=s18.find(x=>x.runId===m.runId)||sa.find(x=>x.runId===m.runId);
   assert(sh&&sh.fullRecord&&sh.fullRecord.rawScaleSamples,'material cup present with full samples: '+m.runId);
   const run={runId:m.runId,rawScaleSamples:sh.fullRecord.rawScaleSamples};
@@ -6532,11 +6539,11 @@ test('2.2.59 Vi refit crosses the 5-cup calibration material (wetLat rmse gate <
   se2+=err*err;seOld+=Math.pow(oldVi/m.floodMlS-m.wetLatS,2);bias+=err;errs.push(err);
   assert(Math.abs(err)<=0.30,'per-cup wetLat error inside the gate: cup'+m.cup+' '+err.toFixed(3)+' s');
  }
- const rmse=Math.sqrt(se2/mat.samples.length),rmseOld=Math.sqrt(seOld/mat.samples.length);
+ const rmse=Math.sqrt(se2/cal5.length),rmseOld=Math.sqrt(seOld/cal5.length);
  assert(rmse<=0.30,'USER GATE: 5-cup wetLat rmse <= 0.30 s, got '+rmse.toFixed(4)+' s');
  assert(rmse<rmseOld,'the refit beats the superseded 2.2.56 fit ('+rmse.toFixed(4)+' vs '+rmseOld.toFixed(4)+' s)');
- assert(Math.abs(bias/mat.samples.length)<0.15,'systematic conservatism removed: mean err '+(bias/mat.samples.length).toFixed(3)+' s');
- console.log('   2.2.59 Vi refit cross: rmse '+rmseOld.toFixed(3)+' -> '+rmse.toFixed(3)+' s (gate 0.30), mean err '+(bias/mat.samples.length).toFixed(3)+' s, per-cup '+errs.map(x=>x.toFixed(3)).join('/'));
+ assert(Math.abs(bias/cal5.length)<0.15,'systematic conservatism removed: mean err '+(bias/cal5.length).toFixed(3)+' s');
+ console.log('   2.2.59 Vi refit cross (5-cup calibration subset): rmse '+rmseOld.toFixed(3)+' -> '+rmse.toFixed(3)+' s (gate 0.30), mean err '+(bias/cal5.length).toFixed(3)+' s, per-cup '+errs.map(x=>x.toFixed(3)).join('/'));
 });
 test('2.2.56 closed loop: the law-selected flood is what reaches the driver, inside the envelope',async()=>{
  const e=await refillLoopEnv(1.29,{floodMode:'adaptive'});

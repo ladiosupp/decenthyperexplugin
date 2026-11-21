@@ -22,7 +22,7 @@
 
 ## 4. 验证
 
-- **verify_v02260 962/963**（954 基线＋9 新；唯一 FAIL 见 §5 数据漂移）。新测试：fpKey/numericFpKey 与 hook 同源＋21 协议字段契约＋ext-status 无镜像／fp null（flowMultiplierCurrent=1.2 超容差）／LUT 点变更 fpKey 失效／温度语义（cfg.temperature+1→fpKey 变 numericFpKey 不变）／hello 端到端（__httpRequestHandler POST external-hello：ok＋fpKey＋镜像 normalize 格式 dropped 行剔除＋文件只读 JSON 全同；ext-status 无镜像同 key）／镜像 null 态＋deepEqual normalize／杯末数据链（syntheticRun→finalizeDiagnostics→summary 10 键＋diagnostics endpoint {summary,run} runId 一致）／镜像实时读主本／external-flow 写入面 ledger 语义不变。
+- **verify_v02260 963/963**（954 基线＋9 新；素材交叉按统筹裁钉原 5 杯后全绿，见 §5）。新测试：fpKey/numericFpKey 与 hook 同源＋21 协议字段契约＋ext-status 无镜像／fp null（flowMultiplierCurrent=1.2 超容差）／LUT 点变更 fpKey 失效／温度语义（cfg.temperature+1→fpKey 变 numericFpKey 不变）／hello 端到端（__httpRequestHandler POST external-hello：ok＋fpKey＋镜像 normalize 格式 dropped 行剔除＋文件只读 JSON 全同；ext-status 无镜像同 key）／镜像 null 态＋deepEqual normalize／杯末数据链（syntheticRun→finalizeDiagnostics→summary 10 键＋diagnostics endpoint {summary,run} runId 一致）／镜像实时读主本／external-flow 写入面 ledger 语义不变。
 - **成对写序列回放**（__d18-writeseq.cjs 双跑：base=3cd2cd8 plugin vs 新 plugin，history-18 近 4 杯含 2.2.55 干净杯＋杯21/22/23）：**WRITESEQ_VERBATIM=true**（writes 逐字＋status complete＋oqTailErr −7.71/−0.66/0.88/7.71 全同）→加性字段不进控制实证。取证 .tools/__fp-ws-base.json／__fp-ws-new.json。
 - sim-regression 5/5；node --check plugin.js/verify 通过；manifest 2.2.60/descLen397。
 
@@ -30,13 +30,13 @@
 
 - **现象**：verify「2.2.59 Vi refit crosses the 5-cup calibration material」FAIL（v02260 与 v02259 基线复跑同红）。
 - **诊断**（探针 .tools/__fp-matdiag.cjs）：vi-refit-material.json mtime **2026-11-21T07:24:38Z（15:24 本地）**被外部从 5 杯扩到 **9 杯**（新 runId 1795232484374-1/1795235159794-2/1795238671071-3/1795245280005-4＝杯26–29，history-all 07:22 并档）；原 5 杯 obs vs (40.929−viPlanMl)/32.251 反推 diff≤0.0001 全过；新 4 杯 diff −0.1335/−0.2131/−0.1051/−0.2130（新行 viPlanMl 疑为 clamp 后值或他批口径，反推式失效）。
-- **处置**：本批不静默改测试/素材（红线：冲突先问）。呈统筹裁：①素材属主批（Vi 学习/取证）修正新行 viPlanMl 编码或另立新口径交叉；②或批测试范围钉原 5 杯（测试名即 5-cup）。裁定前 verify 该项红属已知外部漂移。
+- **处置（统筹 relay-9 裁定 b，11-21，已执行）**：测试钉回原 5 杯标定子集（cal5 filter＋cal5.length 归一＋子集存在断言），反推式/原 5 杯素材不动；杯26–29 属 refit 后活体验证另一口径（活体 rmse 0.104 统筹已独立核），素材属主取证另注记（子集标记＋viLawRawMl，统筹已通知）。修毕 963/963 全绿。
 - v02259 基线复跑另 2 红（version pin/heartbeat pluginVersion）为 2.2.60 版本钉预期差，v02260 已更新绿。
 
 ## 6. 待办
 
 - 发版另问（改码＋统筹核过后呈用户批发版链）；本批不发版不 push 不 tag 不装机。
-- 素材漂移裁定（§5）——发版波前须绿。
+- 素材漂移已裁已修（§5），verify 全绿；发版波条件满足，待用户批。
 - APK 消费（hec 里程碑）：fpKey→O1 暖机指纹匹配＋Vi 完整指纹门；numericFpKey→D2 证据 live 门；gainMemory 镜像→pre-cup 刷新（hello）；新字段展示/消费记同步债。
 - 杯末评分取不到值排查另批 01a1ebd1（本批数据链回归绿，非 ext payload 引起）。
 

@@ -2,7 +2,7 @@
 
 **ext/hello fpKey 加性暴露（用户 11-21 批②，hec 里程碑 C 后半/D 波硬依赖；改码本批授权，发版另问）**：externalStatusPayload 加性暴露 `fpKey`（adaptiveHistoryFingerprintKey 完整指纹 key，与 O1/viBuckets fpKeyMatch 同款：校准身份＋LUT 点＋targets＋weights/limits＋release＋温度）＋`numericFpKey`（numericLearningFingerprintKey，r 证据 numeric 指纹，温度/targets/LUT 点不敏感），校准上下文不可用时 null；external-hello 加性暴露 `gainMemory` 只读镜像（normalizeGainMemory 纯函数同格式，buckets＋viBuckets＋meta；**仅 hello，不进 ext-status 轮询 payload**——payload 大小考虑；服务统筹裁①插件主本＋APK 镜像 pre-cup 刷新）。控制律零改（律结构/r/Vi/门/写入面全不动），加性字段不进控制（base 3cd2cd8 成对写序列回放 4 杯逐字 WRITESEQ_VERBATIM=true）；杯末评分取值链不回退（diagnostics {summary,run} 源不变，取不到值排查另批 01a1ebd1）。
 
-- **验证**：verify_v02260 **962/963**（954 基线版本钉更新＋9 加性新测试：fpKey/numericFpKey 同源＋协议字段契约／fp null／LUT 点变更失效／温度语义（full 敏感 numeric 不敏感）／hello 端到端镜像＋normalize 格式＋只读不写／ext-status 无镜像／杯末数据链回归／镜像实时读／external-flow 写入面不变，禁镜像）。**唯一 FAIL 为外部数据漂移非本批回归**：vi-refit-material.json 11-21 15:24 被外部从 5 杯扩到 9 杯（新杯 26–29 的 viPlanMl 与测试 2.2.56 系数反推式不合，原 5 杯 diff≤0.0001 全过；v02259 基线复跑同条亦红），呈统筹裁（素材属主批修编码或批测试范围钉原 5 杯），不静默改。sim 5/5；node --check；manifest 2.2.60/descLen397（≤400，description 不动）。
+- **验证**：verify_v02260 **963/963**（954 基线版本钉更新＋9 加性新测试：fpKey/numericFpKey 同源＋协议字段契约／fp null／LUT 点变更失效／温度语义（full 敏感 numeric 不敏感）／hello 端到端镜像＋normalize 格式＋只读不写／ext-status 无镜像／杯末数据链回归／镜像实时读／external-flow 写入面不变，禁镜像）。素材交叉按统筹 relay-9 裁定钉回原 5 杯标定子集（vi-refit-material.json 11-21 15:24 被外部扩到 9 杯，杯26–29 为 refit 后活体验证样本、viPlanMl=clamp 后 plan 值另一口径，不属标定反推测试；反推式/原 5 杯素材不动，rmse 0.086s/mean err 0.013s 恢复，全绿）。sim 5/5；node --check；manifest 2.2.60/descLen397（≤400，description 不动）。
 - **APK 消费点**：fpKey→hec C 后半 O1 暖机指纹匹配＋D 波 Vi 完整指纹门；numericFpKey→D2 证据历史 live 门；gainMemory 镜像→pre-cup 刷新（hello 触发，§0 杯内不新增请求）。详见 [HANDOFF_2026-11-21-ext-fpkey-impl.md](HANDOFF_2026-11-21-ext-fpkey-impl.md)。
 
 

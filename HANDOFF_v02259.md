@@ -50,3 +50,15 @@ VI_A/VI_B 新系数＋viBuckets ratio 带＋七门＋微簇＋非对称 EWMA＋�
 - TDS 联合判定真验需用户 APK 侧录≥5 杯；R6 多杯确认需连续两杯同向近带（随缘攒不压杯数）；通道杯机遇验 A/B 分类不变。
 - 二期候选：pq 趋势 EWMA（触记忆须另批）／grindInput 漂移（APK 本地）／异常重跑杯 S1 识别。
 
+## 8. 发版回执（2026-11-21，用户预授权「等在途做完一起发」发版波）
+
+- **基线**：三改码批 09f8b43（b 约束拟合）／9749813＋e4283df（d-B 键＋消费地板）／188daf0（研磨 P0+R7）＋小改码批 **443ffaf**（description 长度口径放宽 ≤400＋落统筹核可新稿 397，用户 11-21 裁「===275 没必要，≤400 都可以」；verify 断言改 typeof string＋>0＋≤400）＋发版批 **1345ce8**（notes＋本交接，代码零改）。tag **v2.2.59**=1345ce871c73e54157c097e8810cd953b0c3b6f3（lightweight）。
+- **push**：origin auto-hyperex **ef4f490..1345ce8**（8 commit：a6ae73c/09f8b43/3adafd7/9749813/e4283df/188daf0/443ffaf/1345ce8）＋new tag v2.2.59（VPN 57890）；ls-remote 核分支/tag 均=1345ce8。
+- **包**：release/HyperExPulseFilter_v2.2.59.zip **590993 字节**，SHA256 **1BB417B2371872D0BDE5403164A4C320E18A9433B5A5A75876457848E8B9B5FE**（git archive v2.2.59，9 条目同 v2258 布局，release/__build_v2259.ps1）。**包内复跑 954/954**＋node --check＋manifest version=2.2.59 descLen=397（≤400）核过。发版前复跑 954/954＋sim 5/5＋node --check 全过。
+- **GitHub Release**：**453412518**（tag v2.2.59，make_latest=true，draft=false），asset HyperExPulseFilter_v2.2.59.zip（590993 字节，state=**uploaded**，asset id **774287859**／node_id RA_kwDOVO5zXc4uJrHz）。REST POST releases＋uploads 直传（curl -H Expect: --data-binary 耐慢传），token git credential fill 不回显＋代理 57890；Release body=release/notes-v2.2.59.md（本波随发版 commit 入库）。
+- **夸克**：「夸克网盘/来自：Codex」fileId **c57dfd40673e4e3a831ad2097dfd48dc**（590993 字节，非秒传；官方 quarkclouddrive CLI 1.0.25，install success/updated=false，result 无 notice；session-input「等在途做完一起发」）。
+- **平板**：adb mDNS（adb-haf6uwvcqcdujzin-trqoCZ；旧 IP:port transport 失效，以 mDNS 服务名直推）/sdcard/Download/HyperExPulseFilter_v2.2.59.zip，ls 核 **590993** 字节（2026-11-21 11:28）；**不代装，用户 Decaid 自装**。
+- **红线遵守**：发版批代码零改（小改码批 443ffaf 用户授权单独 commit）；只 add 本批（发版 commit=notes＋本交接；回执仅本交接 §8）；别人 WIP HANDOFF_2026-10-31.md M 不碰不提交；批交接 MD（vi-refit/vi-learning-B/floor/grind-review/grind-impl）保持 untracked 不代提交；gh/夸克/adb/push 均提权；真实仓写不做。技能 decentplugin 无 275 硬钉（仅 runId 时间戳含子串）无需改；旧交接 275 提及保留为历史口径记录；HEC AGENTS §1.15 统筹已更 ≤400。
+- **发版后**：用户 Decaid 自装；adaptive 挡第一杯即标定点（偏则调 VI_A/VI_B 须另批）；Vi 学习随缘攒杯；TDS 联合判定真验需 APK 侧≥5 杯；R6 多杯确认随缘攒。APK 同步债见 §6。
+
+

@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-const PLUGIN_VERSION = "2.2.61";
+const PLUGIN_VERSION = "2.2.62";
   // Generated profiles and profile binding share one fixed title prefix,
   // matching ProfileRecorder's ownership gate. Settings no longer rename them.
   const HYPEREX_TITLE_PREFIX = "HyperEx";
@@ -598,6 +598,7 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
     uiLanguageEdited:false,
     curveApplyBusy: false,
     autoApplyTimer: null,
+    cupVerificationRunId: null,
     pendingRefillSave: null
   };
 
@@ -5452,6 +5453,10 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
   // busy at expiry, keep "scheduled" and re-check shortly; profile writes stay
   // guarded by profileSyncIsIdle inside syncHyperExProfile. A plugin-driven new
   // shot still cancels the pending timer in startSequence (existing guard).
+  // 2.2.62: the cup-end profile verification moves behind this flow (see
+  // resetSequence) so its 3-6 s sync chain no longer occupies the host bridge
+  // inside the APK's 8.5 s settled-data window. It runs once, after the apply
+  // settles (applied or error); an early autoApply return still verifies.
   function scheduleAutoApplyGrace(run, delayMs) {
     state.autoApplyTimer = setTimeout(() => {
       state.autoApplyTimer = null;
@@ -5459,7 +5464,13 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
         scheduleAutoApplyGrace(run, AUTO_APPLY_DEFER_MS);
         return;
       }
-      return autoApplyNextShotIfEligible(run);
+      const pending = autoApplyNextShotIfEligible(run);
+      if (state.cupVerificationRunId !== run.runId) return pending;
+      return Promise.resolve(pending).finally(() => {
+        if (state.cupVerificationRunId !== run.runId) return;
+        state.cupVerificationRunId = null;
+        scheduleProfileVerification('post-cup verification');
+      });
     }, delayMs);
   }
 
@@ -8905,8 +8916,13 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     state.lastPhysicalFrame = null;
     emitSkinChanged();
     if (reason) log(`Sequence reset (${previous} -> idle): ${reason}`);
-    if (reason && isHyperExProfileTitle(state.workflowTitle)) scheduleProfileVerification('sequence reset');
-    if (completedDiagnosticRun && /^completed at /i.test(String(reason || "")) && state.autoApplyNextShot) {
+    // 2.2.62: a completed cup that queued the grace autoApply defers the
+    // cup-end profile verification until that flow settles, so the bridge is
+    // free for the APK's 8.5 s settled-data fetch. Everything else verifies now.
+    const cupCompletion = !!(completedDiagnosticRun && /^completed at /i.test(String(reason || "")) && state.autoApplyNextShot);
+    if (reason && isHyperExProfileTitle(state.workflowTitle) && !cupCompletion) scheduleProfileVerification('sequence reset');
+    if (cupCompletion) {
+      state.cupVerificationRunId = completedDiagnosticRun.runId;
       state.autoApplyLastStatus = {runId:completedDiagnosticRun.runId,status:"scheduled",at:new Date().toISOString(),message:"Completed shot queued for next-shot evaluation"};
       scheduleAutoApplyGrace(completedDiagnosticRun, AUTO_APPLY_GRACE_MS);
     }
@@ -8931,7 +8947,10 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
 
   function startSequence(rawWeight) {
     refreshLearningStage();
-    if (state.autoApplyTimer !== null) state.autoApplyLastStatus = {status:"cancelled",at:new Date().toISOString(),message:"New shot started before pending adaptation; current shot commands retained"};
+    if (state.autoApplyTimer !== null) {
+      state.autoApplyLastStatus = {status:"cancelled",at:new Date().toISOString(),message:"New shot started before pending adaptation; current shot commands retained"};
+      state.cupVerificationRunId = null;
+    }
     clearAllTimers();
     state.phase = "stage1";
     state.directStartTestEnabledForRun = isRestartRelease(state.cfg) && !!state.cfg.directDriverStartTest;

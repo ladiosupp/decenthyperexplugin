@@ -23,7 +23,8 @@ const injection=`globalThis.hooks={controlQualityGood,recoveryTimeEstimate,norma
  beginSoak,beginAutoRelease,finishAutoSoak,beginDirectStartTest,restartPourConfirmed,startRestartPoll,manualRearmSecondStage,directStartTestPayload,advancedSettingsFromCfg,uiStatusPayload,releaseMode,normalizeReleaseMode,profileLayoutForMode,profileLayoutForProfile,logicalFrameForPhysical,physicalFrameForLogical,runProfileLayout,profileTitleForMode,isHyperExProfileTitle,profileCommandSummaryFromProfile,
  enterHyperExScopedMultiplier,restoreHyperExScopedMultiplier,gainStageObservation,soakWettingObservation,scaleSampleGate,viConfidence,viBandFor,viMemorySuggestion,viObservation,updateViMemoryFromRun,restoreManualApplySchedule,setApi(fn){api=fn;}};\n`;
  const token='  return {\n    id: ID,';assert(source.includes(token));
- vm.runInContext(source.replace(token,injection+token),context);plugin=context.createPlugin(host);h=context.hooks;
+const d1Hooks='globalThis.hooks.s2FinalSignatureClaimsRun=s2FinalSignatureClaimsRun;globalThis.hooks.liveTrimMemoryCandidate=liveTrimMemoryCandidate;\n';
+vm.runInContext(source.replace(token,injection+d1Hooks+token),context);plugin=context.createPlugin(host);h=context.hooks;
  const s=h.state;const initialLanguage=s.uiLanguage;s.uiLanguage=options.uiLanguage||"en";s.cfg=h.loadConfig({ActiveRelease:options.releaseMode||"on",AdaptiveLearningLevel:"保守",LiveFlowTrimTest:false,LiveFlowTrimLevel:1});s.cfg.liveTrimDecisionModel=false;s.cfg.s3DriftModel=false;s.cfg.s2RefillBoundedModel=false;s.cfg.basketContext='empty';s.scopeMode='off';s.calibrationStorageLoaded=true;s.overrideStorageLoaded=true;s.scopeStorageLoaded=true;s.scopedOriginalStorageLoaded=true;
  s.calibrationMap={schema:3,valid:true,createdAt:'fixture-cal',baseFlowMultiplier:1,algorithm:'test',points:[{actualFlow:1.5,commandFlow:.569},{actualFlow:2,commandFlow:.719},{actualFlow:5,commandFlow:2.507}]};
  s.flowMultiplierCurrent=1;h.recomputeCalibrationUsability();
@@ -7115,4 +7116,122 @@ test('2.2.61 restore: manual rollback reschedules pending apply with the grace w
  e.s.diagnosticLast=r;e.s.autoApplyNextShot=true;e.s.phase='idle';
  e.h.restoreManualApplySchedule({status:'scheduled',runId:'grace-restore'});
  assert(e.s.autoApplyTimer);assert.equal(e.timers.get(e.s.autoApplyTimer).ms,7000);
+});
+// ===== 2.2.61 d1 (user 11-21 batch): a′ narrow S2 current-cup-first + c S2 normal ceiling x1.25 =====
+function d1Memory(){
+ return {schema:1,seq:2,lastBucketId:'g2',buckets:[
+  {id:'g2',center:.3971,radius:.12,stages:{s2:{r:1.2655,n:6,lastObservedR:1.2655,commandMlS:3.9375}}},
+  {id:'g9',center:.6897,radius:.12,stages:{s2:{r:1.1729,n:3,lastObservedR:1.1729,commandMlS:4.25}}}]};
+}
+// A stage-2 run whose pressure/flow ratio is constant except (optionally) inside
+// the refill return +2..4 s window; the late 60% therefore carries lateRatio.
+function d1Run(id,{lateRatio=.3971,returnAtMs=null,windowRatio=null}={}){
+ const samples=[];
+ for(let i=0;i<=100;i++){
+  const t=i*100;let ratio=lateRatio;
+  if(returnAtMs!==null&&windowRatio!==null&&t>=returnAtMs+2000&&t<=returnAtMs+4000)ratio=windowRatio;
+  samples.push({phase:'stage2',tMs:t,pressureBar:ratio*2,machineFlowMlS:2,machineTelemetryValid:true,machineAgeMs:0});
+ }
+ return {runId:id,config:{stage2Flow:5,stage2LutCommandMlS:2.507,stage2CommandMlS:3.9375,basketContext:'coffee',profileTruthVerified:true,profileTruthSchema:3},
+  samples,liveFlowTrim:{trace:returnAtMs===null?[]:[{kind:'write',startupAction:'return',frame:1,tMs:returnAtMs}]}};
+}
+test('2.2.61 d1 a′: an S2 rising-transient signature never leads the current cup even when it matches a bucket',()=>{
+ const e=setup();e.s.persistentHistoryFile={schema:2,shots:[],gainMemory:d1Memory()};
+ e.s.diagnosticLast=d1Run('d1-prev',{lateRatio:.3971});
+ const cur=d1Run('d1-transient',{lateRatio:.6897});
+ const reg=e.h.gainRegimeForRun(cur);
+ assert.equal(reg.basis,'S2 late 60% pressure / machine flow');
+ assert(Math.abs(reg.signature-.6897)<1e-6,JSON.stringify(reg));
+ assert.equal(e.h.s2FinalSignatureClaimsRun(cur),false,'a late-60% signature is not final');
+ assert.equal(e.h.liveTrimMemoryCandidate('stage2',cur).bucketId,'g2','the previous cup still leads');
+});
+test('2.2.61 d1 a′: a FINAL refill-return signature that a bucket claims puts the current cup first in S2',()=>{
+ const e=setup();e.s.persistentHistoryFile={schema:2,shots:[],gainMemory:d1Memory()};
+ e.s.diagnosticLast=d1Run('d1-prev',{lateRatio:.3971});
+ const cur=d1Run('d1-final',{returnAtMs:0,windowRatio:.6897});
+ const reg=e.h.gainRegimeForRun(cur);
+ assert.equal(reg.basis,'S2 refill return +2–4 s pressure / machine flow');
+ assert(reg.samples>=10,JSON.stringify(reg));
+ assert.equal(e.h.s2FinalSignatureClaimsRun(cur),true);
+ const q=e.h.liveTrimMemoryCandidate('stage2',cur);
+ assert.equal(q.bucketId,'g9');assert.equal(q.commandMlS,4.25);
+ const c=e.h.liveTrimControlCenter('stage2',3.9375,cur);
+ assert.equal(c.bucketId,'g9');assert.equal(c.commandMlS,4.25);
+});
+test('2.2.61 d1 a′: a final signature that no bucket claims keeps diagnosticLast first (no pick-up on miss)',()=>{
+ const e=setup();
+ e.s.persistentHistoryFile={schema:2,shots:[],gainMemory:{schema:1,seq:1,lastBucketId:'g2',buckets:d1Memory().buckets.slice(0,1)}};
+ e.s.diagnosticLast=d1Run('d1-prev',{lateRatio:.3971});
+ const cur=d1Run('d1-miss',{returnAtMs:0,windowRatio:.9263});
+ const reg=e.h.gainRegimeForRun(cur);
+ assert.equal(reg.basis,'S2 refill return +2–4 s pressure / machine flow');
+ const sel=e.h.selectGainBucket(e.h.gainMemoryState(false),reg.signature);
+ assert.equal(sel.bucket,null);assert.equal(sel.absorb,null,'outside the radius is a new regime, not absorb');
+ assert.equal(e.h.s2FinalSignatureClaimsRun(cur),false);
+ assert.equal(e.h.liveTrimMemoryCandidate('stage2',cur).bucketId,'g2');
+});
+test('2.2.61 d1 a′: absorb is not a hit -- a near-duplicate signature keeps the previous cup first',()=>{
+ const e=setup();
+ const mem={schema:1,seq:3,lastBucketId:'a',buckets:[
+  {id:'a',center:.60,radius:.12,stages:{s2:{r:1.2,n:4,lastObservedR:1.2}}},
+  {id:'b',center:.65,radius:.12,stages:{s2:{r:1.18,n:3,lastObservedR:1.18,commandMlS:4.25}}},
+  {id:'c',center:1.20,radius:.12,stages:{s2:{r:1.05,n:3,lastObservedR:1.05}}}]};
+ e.s.persistentHistoryFile={schema:2,shots:[],gainMemory:mem};
+ e.s.diagnosticLast=d1Run('d1-prev',{lateRatio:.60});
+ const cur=d1Run('d1-absorb',{returnAtMs:0,windowRatio:.68});
+ const sel=e.h.selectGainBucket(e.h.gainMemoryState(false),e.h.gainRegimeForRun(cur).signature);
+ assert.equal(sel.bucket,null);assert(sel.absorb&&sel.absorb.id==='b',JSON.stringify(sel));
+ assert.equal(e.h.s2FinalSignatureClaimsRun(cur),false);
+ assert.equal(e.h.liveTrimMemoryCandidate('stage2',cur).bucketId,'a');
+});
+test('2.2.61 d1 a′: no gain memory or no run never throws and never leads with the current cup',()=>{
+ const e=setup();
+ assert.equal(e.h.s2FinalSignatureClaimsRun(null),false);
+ assert.equal(e.h.s2FinalSignatureClaimsRun(d1Run('d1-nomem',{returnAtMs:0,windowRatio:.6897})),false);
+ assert.equal(e.h.liveTrimMemoryCandidate('stage2',d1Run('d1-nomem2',{})),null);
+});
+test('2.2.61 d1 a′: the S2 gate does not touch the 2.2.28 S3 current-cup-first contract',()=>{
+ const e=setup();e.s.persistentHistoryFile={schema:2,shots:[],gainMemory:{schema:1,seq:2,lastBucketId:'g2',buckets:[
+  {id:'g2',center:.3971,radius:.12,stages:{s2:{r:1.2655,n:6},s3:{r:2.2,n:4,commandMlS:.72}}},
+  {id:'g9',center:.6897,radius:.12,stages:{s2:{r:1.1729,n:3},s3:{r:1.5,n:2,commandMlS:.9375}}}]}};
+ e.s.diagnosticLast=d1Run('d1-prev',{lateRatio:.3971});
+ const cur=d1Run('d1-s3',{lateRatio:.6897});
+ cur.config.stage3Flow=1.5;cur.config.stage3LutCommandMlS=.569;
+ assert.equal(e.h.s2FinalSignatureClaimsRun(cur),false);
+ assert.equal(e.h.liveTrimMemoryCandidate('stage3',cur).bucketId,'g9','S3 still leads with the current cup');
+});
+test('2.2.61 d1 c: the S2 normal ceiling is center x1.25 while S3 normal, rescue and the lo side stay put',()=>{
+ const e=setup();
+ const s2=e.h.commandCeilingFor('stage2','normal',{center:3.9375,mapped:2.507,command:4.625});
+ assert.equal(s2.hi,4.875);
+ assert.equal(s2.lo,Math.max(.1,Math.ceil(Math.min(3.9375*.8,2.507)*16)/16));
+ const s3=e.h.commandCeilingFor('stage3','normal',{center:.752,mapped:.72,command:.75});
+ assert.equal(s3.hi,.875,'S3 normal keeps x1.2 (x1.25 would be .9375)');
+ const res=e.h.commandCeilingFor('stage2','rescue',{center:3.9375,mapped:2.507,command:4.625});
+ assert.equal(res.hi,5,'rescue still max(normal,mapped*2)');
+});
+test('2.2.61 d1 c: the three archived S2 up-writes clamped at x1.2 are reachable at x1.25 (history-all)',()=>{
+ const f='D:/vscode/.tools/hx-data/hyperex-history-all.json';
+ if(!fs.existsSync(f)){console.log('   skip archived clamp cross: history-all absent');return;}
+ const j=JSON.parse(fs.readFileSync(f,'utf8'));const shots=Array.isArray(j)?j:j.shots;
+ const e=setup();const clamped=[];
+ for(const s of shots){
+  const tr=((s.fullRecord||{}).liveFlowTrim||{}).trace||[];
+  for(const w of tr){
+   if(w.kind!=='write'||w.startupAction)continue;
+   if(!(Number(w.targetGS)>=3))continue;
+   if(Number(w.actualQuanta)<Number(w.steps))clamped.push({s,w});
+  }
+ }
+ assert.equal(clamped.length,3,'archive has exactly three clamped non-startup S2 writes');
+ const ids=clamped.map(x=>x.s.runId);
+ assert(ids.some(x=>x.endsWith('829401-1'))&&ids.some(x=>x.endsWith('524643-2'))&&ids.some(x=>x==='1795245280005-4'),ids.join(','));
+ for(const {s,w} of clamped){
+  const center=Number(w.controlCenterMlS),prev=Number(w.previousMlS),steps=Number(w.steps);
+  const oldHi=Math.max(.1,Math.min(8,Math.floor(center*1.2*16)/16));
+  assert.equal(oldHi,Number(w.commandMlS),'the recorded clamp sat on the x1.2 anchor: '+s.runId);
+  const neu=e.h.commandCeilingFor('stage2','normal',{center,mapped:0,command:prev});
+  assert(neu.hi>oldHi,s.runId+' ceiling must grow');
+  assert(neu.hi>=prev+steps/16-1e-9,'the intended write now fits: '+s.runId);
+ }
 });

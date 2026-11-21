@@ -338,6 +338,14 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
   const GAIN_R_MAX=3;
   const GAIN_MEMORY_MIN_SAMPLES=10;
   const GAIN_MEMORY_MAX_BUCKETS=12;
+  // 2.2.61 d1: the S2 normal command ceiling was center x1.2. In the 134-cup
+  // archive that clamped exactly three non-startup S2 writes, all upward on
+  // under-flowing cups (9401-1 / 4643-2 / cup29). x1.25 releases those without
+  // touching S3, the rescue ceiling or the +/-0.35 absolute band.
+  const S2_NORMAL_CEILING_RATIO=1.25;
+  // The final S2 signature window produced by gainRegimeForRun. 2.2.61 d1 keys
+  // the current-cup-first order for S2 on this exact basis.
+  const S2_FINAL_SIGNATURE_BASIS="S2 refill return +2–4 s pressure / machine flow";
   const STORAGE_AUTO_APPLY = "autoApplyNextShot";
   const STORAGE_ADAPTIVE_HISTORY = "adaptiveHistoryV1"; // legacy migration source
   const STORAGE_HISTORY_FILE = "adaptiveHistoryFileV2";
@@ -9638,6 +9646,17 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     const kept=sorted.slice(trim,sorted.length-trim);
     return kept.length>=4?linearRegression(kept):linearRegression(sorted);
   }
+  // 2.2.61 d1: S2 may lead with the current cup only when its signature is
+  // the FINAL refill return +2-4 s window AND a bucket claims it. Absorb does
+  // not count -- it only widens a neighbouring bucket, it is not a hit.
+  function s2FinalSignatureClaimsRun(run) {
+    if(!run)return false;
+    const regime=gainRegimeForRun(run);
+    if(!regime||regime.basis!==S2_FINAL_SIGNATURE_BASIS)return false;
+    const memory=gainMemoryState(false);
+    if(!memory||!Array.isArray(memory.buckets)||!memory.buckets.length)return false;
+    return !!selectGainBucket(memory,regime.signature).bucket;
+  }
   function liveTrimMemoryCandidate(phase,run) {
     const stageKey=phase==="stage2"?"s2":phase==="stage3"?"s3":null;
     if(!stageKey)return null;
@@ -9646,7 +9665,13 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     // (the previous shot), which made the 2.2.27 23:06 S3 run use g3 r=2.33
     // while the current run had just learned g2 r=1.265; the 0.875 center then
     // held 114 command-bound-vector checks for the whole stage.
-    const candidates=stageKey==="s3"?[run,state.diagnosticLast,state.diagnosticCurrent]:[state.diagnosticLast,run,state.diagnosticCurrent];
+    // 2.2.61 d1 (user 11-21): S2 leads with the current cup only once its
+    // signature is FINAL -- the refill return +2-4 s window that a bucket
+    // actually claims. Earlier in the cup the same window is the rising
+    // transient (cup29: 0.4137 -> 0.6998 -> 0.9263); switching on it routed to
+    // g9 and then fell back to the previous bucket mid-stage (4.25 -> 3.94).
+    const currentFirst=stageKey==="s3"||(stageKey==="s2"&&s2FinalSignatureClaimsRun(run));
+    const candidates=currentFirst?[run,state.diagnosticLast,state.diagnosticCurrent]:[state.diagnosticLast,run,state.diagnosticCurrent];
     for(const candidate of candidates){
       if(!candidate)continue;
       const gm=gainMemorySuggestion(candidate,stageKey);
@@ -9740,8 +9765,9 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     return Math.max(min,Math.min(max,Math.round(Math.abs(errGS)/r*16)));
   }
   // §22.4 / T-5,T-6,L-8: the ONLY place that decides how far a trim write may
-  // reach. Normal = center ±20%, always inside the driver range and always
-  // containing the command that is actually live (otherwise no state can move).
+  // reach. Normal = center ±20% (±25% for S2 normal, 2.2.61 d1), always inside
+  // the driver range and always containing the command that is actually live
+  // (otherwise no state can move).
   // Rescue = at least the normal ceiling and up to min(8, LUT×2), so entering
   // rescue can never shrink the reachable set.
   function commandCeilingFor(phase,mode,ctx) {
@@ -9750,7 +9776,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     const command=num(ctx&&ctx.command),center=num(ctx&&ctx.center),mapped=num(ctx&&ctx.mapped);
     const anchor=Number.isFinite(center)?center:Number.isFinite(mapped)?mapped:command;
     let lo=Math.min(anchor*.8,Number.isFinite(mapped)?mapped:anchor);
-    let hi=Math.max(anchor*1.2,Number.isFinite(mapped)?mapped:anchor);
+    let hi=Math.max(anchor*(phase==="stage2"&&mode==="normal"?S2_NORMAL_CEILING_RATIO:1.2),Number.isFinite(mapped)?mapped:anchor);
     if(mode==="rescue"){lo=min;hi=Math.min(max,Math.max(hi,Number.isFinite(mapped)?mapped*2:anchor*2));}
     if(Number.isFinite(command)){lo=Math.min(lo,command);hi=Math.max(hi,command);}
     lo=Math.max(min,Math.min(max,Math.ceil(lo*16)/16));

@@ -42,3 +42,15 @@ verify_v02260 **968/968**（954 基线＋9 fpKey＋5 D；素材 5 杯交叉 rmse
 - 用户 Decaid 自装；APK 消费点见 §3；杯末 8.5s 窗的 HTTP 可响应性由 2.2.61 grace 窗批（宿主只读探针→方案 a：250ms→6–8s＋非 idle 顺延＋settlingBusy 语义修正＋结算时序契约）解决。
 - APK 同步债：新字段展示/消费记 hec 里程碑。
 
+## 8. 发版回执（2026-11-21，用户批次序 D→2.2.60）
+
+- **基线**：61693ef（fpKey 批）＋4922e7a（素材交叉钉 5 杯）＋d1a9de3（D 批）＋发版批 **98a9f1f**（notes＋本交接，代码零改）。tag **v2.2.60**=98a9f1f59c87e3e2d8cbbe2113d23909ce26a066（lightweight）。
+- **push**：origin auto-hyperex **3cd2cd8..98a9f1f**（4 commit）＋new tag v2.2.60（VPN 57890）；ls-remote 核分支/tag 均=98a9f1f。
+- **包**：release/HyperExPulseFilter_v2.2.60.zip **593698 字节**，SHA256 **461F3C292FFB4E2D9A5B5F909708F974C4D82A3B52673595CF2BF352E460AE13**（git archive v2.2.60，9 条目同 v2259 布局，__build_v2260.ps1）。**包内复跑 968/968**＋node --check＋manifest version=2.2.60 descLen=397 核过。
+- **GitHub Release**：**453533794**（tag v2.2.60，make_latest=true，draft=false），asset HyperExPulseFilter_v2.2.60.zip（593698 字节，state=**uploaded**，asset id **774866132**／node_id RA_kwDOVO5zXc4uL4TU）。REST POST releases＋uploads 直传（curl -H Expect: --data-binary），token credential fill 不回显＋代理 57890；body=release/notes-v2.2.60.md。
+- **夸克**：「夸克网盘/来自：Codex」fileId **c3068b07568640248b7d4079b3e46f52**（593698 字节，非秒传；官方 CLI 1.0.25，install success/updated=false，result 无 notice；session-input「1，2，3，push都同意」）。
+- **平板**：adb mDNS adb-haf6uwvcqcdujzin-trqoCZ 推 /sdcard/Download/HyperExPulseFilter_v2.2.60.zip，ls 核 **593698** 字节（2026-11-21 15:59）；**不代装，用户 Decaid 自装**。
+- **红线**：发版批代码零改；push 仅 auto-hyperex＋tag 经 VPN；别人 WIP HANDOFF_2026-10-31.md M 不碰不提交。
+- **发版后**：用户 Decaid 自装；APK 消费点见 §3；按派单进入阶段 2 grace（2.2.61：宿主只读探针→方案 a＋settlingBusy 语义修正＋结算时序契约＋杯29 类实证）。
+
+

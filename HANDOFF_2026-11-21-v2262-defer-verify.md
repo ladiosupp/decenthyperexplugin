@@ -35,13 +35,14 @@
 - `node decenthyperexplugin.reaplugin/tests/verify_v02262.cjs` → **995/995 EXIT0**（986 基线＋9）。新增覆盖：杯末无立即 sync（profileSyncBusy 0、无 GET /workflow）／grace 窗桥空闲＋ext-status settled 可取／apply 后校验**恰好一次**（verificationCounter 计 1，且校验链 0 写）／autoApply off 立即／非 completed 立即／observation-only 早退仍校验／apply 失败仍校验（`verification failed`）／startSequence 取消后无 7000 定时器、无 GET /workflow、欠账清空／顺延期间不校验、idle 后 applied＋校验。
 - 两条 2.2.61 旧断言按新时序重编码：「idle 到期单次应用」不再在 apply 后立即断言 settlingBusy=false（改为等校验收敛＋runtimeProfileStatus 含 post-cup verification）；「失败路径」同样等校验收敛，并补 `runtimeProfileVerified=false`＋`verification failed`。
 - **成对写序列回放**：base `git show b982d79:…/plugin.js`（.tools/__v2262-plugin-base.js）vs 新，`__d18-writeseq.cjs` history-18 近 4 杯：6/6、6/6、5/5、3/3 笔 writes/status/oqTail/oqTailErr/observedR **逐字**，`V2262_WRITESEQ_VERBATIM=true`（.tools/__v2262-ws-{base,new}.json）。
-- **串行桥实证**（.tools/__v2262-empirical.cjs，复用 2.2.61 探针机制；applying 11 腿 × 1909ms＝21s，杯末校验 8 腿 × 750ms＝6.0s 取实测上限）：base 2.2.61 **fetch 6217ms**（链 0–6.0s 全占桥、settlingBusy true，窗内轮询被逐腿挡住）；new 2.2.62 **fetch 774ms**（grace 窗空闲，取数前最大间隙 778ms≈轮询周期），apply 28.2s 仍 applied。`GRACE_VERIFY_PASS=true`（.tools/__v2262-empirical.json）。
+- **串行桥实证**（.tools/__v2262-empirical.cjs，复用 2.2.61 探针机制；applying 11 腿 × 1909ms＝21s，杯末校验 8 腿 × 750ms＝6.0s 取实测上限）：base 2.2.61 fetch **6217ms**（链 0–6.0s 全占桥、settlingBusy true，窗内轮询被逐腿挡住）；new 2.2.62 fetch **774ms**（grace 窗空闲，取数前最大间隙 778ms≈轮询周期），apply 28.2s 仍 applied。`GRACE_VERIFY_PASS=true`（.tools/__v2262-empirical.json）。
+  - **该模型分辨力有限，别把「base 也落窗内」当实证结论**：统筹独立复跑同脚本得 base 6935ms／new 781ms／窗内 gap 793ms／applied 28221ms（与本地 6217/774/778/28233 同量级但漂移数百 ms，取决于 poller 与忙期对齐）。base 的首次可取落在 **6.2–6.9s**、仍在 8.5s 窗内；**真正证明阻塞的是真机杯 30**（endedAt→applied 18.43s、APK 自动取分失败、手刷 87 分）。本批的可证部分是「new 在 grace 窗内无任何出站链、首次可取 <1s，且 apply 后校验只跑一次」。
 - `node sim/tests/sim-regression.cjs` 5/5 EXIT0；`node --check` plugin.js／verify_v02262 均通过；manifest 2.2.62 descLen 397。
 
 ## 5. 局限（如实）
 
 - 实证是本地模拟（宿主串行机制取自 2.2.61 真机探针 INBOUND_STARVED_DURING_OUTBOUND），**平板仍装旧版、装机属发版流程未授权**，真机陪杯待装 2.2.62 后另做。
-- 6.0s 校验链在模拟里结束于 6.2s，仍落 8.5s 窗内；真机杯 30 的失败是「校验链 3–6s」与「7s 后 21s apply」首尾相连。本批把校验整体挪到 apply 之后，窗内不再有这两段出站链。
+- 6.0s 校验链在模拟里结束于 6.2–6.9s，仍落 8.5s 窗内（本地模型分辨力有限，见 §4）；真机杯 30 的失败是「校验链 3–6s」与「7s 后 21s apply」首尾相连。本批把校验整体挪到 apply 之后，窗内不再有这两段出站链；真机复测才算验收。
 - 未改 scheduleProfileVerification 的重试节流：若 apply 结束时恰有别的校验挂在 3s 节流窗内，本次 'post-cup verification' 会被既有语义吞掉（此时 profile 真值由 apply 的 sync 保证，'machine idle'/'workflowUpdated' 仍有兜底）。属既有语义，未扩。
 
 ## 6. 复跑索引

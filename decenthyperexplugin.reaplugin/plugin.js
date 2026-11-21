@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-const PLUGIN_VERSION = "2.2.59";
+const PLUGIN_VERSION = "2.2.60";
   // Generated profiles and profile binding share one fixed title prefix,
   // matching ProfileRecorder's ownership gate. Settings no longer rename them.
   const HYPEREX_TITLE_PREFIX = "HyperEx";
@@ -5918,6 +5918,12 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
     const baseCommandMlS = step && step.pump === "flow" ? Math.floor(Number(step.flow) * 16 + 0.5) / 16 : null;
     const lastCommandMlS = t && frame !== null && Number.isFinite(t.commands[frame]) ? t.commands[frame] : baseCommandMlS;
     const reg = t && t.active ? liveTrimRegression(t) : null;
+    // 2.2.60 additive (user 11-21 batch ②): full + numeric fingerprint keys for the
+    // APK hec O1 warm-up / Vi full-fingerprint gate / D2 evidence live gate. Read-only;
+    // null when the calibration context is unavailable (same gate as O1/viBuckets fpKeyMatch).
+    const fp = adaptiveHistoryFingerprint();
+    const fpKey = fp ? adaptiveHistoryFingerprintKey(fp) : "";
+    const numericFpKey = fp ? numericLearningFingerprintKey(fp) : "";
     return {
       pluginVersion: PLUGIN_VERSION,
       mode: run ? algorithmInterventionForRun(run) : normalizeAlgorithmIntervention(state.algorithmIntervention),
@@ -5939,8 +5945,19 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
       maxWrites: t ? t.report.maxWrites : 0,
       heartbeat: hecStatusPayload(),
       takeover: run && run.config && run.config.hecTakeover ? run.config.hecTakeover : null,
-      runId: run ? run.runId : null
+      runId: run ? run.runId : null,
+      fpKey: fpKey || null,
+      numericFpKey: numericFpKey || null
     };
+  }
+  // 2.2.60 additive (user 11-21 batch ②, coordinator ruling ① plugin master + APK mirror):
+  // read-only gainMemory mirror for the APK pre-cup refresh. hello only -- never in the
+  // polled external-status payload (size). normalizeGainMemory is pure; the persisted
+  // file is never written here.
+  function gainMemoryMirrorPayload() {
+    const file = state.persistentHistoryFile;
+    if (!file || !file.gainMemory) return null;
+    return normalizeGainMemory(file.gainMemory);
   }
   // The single external write path. Validates exactly like the internal trim
   // gates (bounds, frame, budget, upward pressure, telemetry) and reuses the
@@ -10993,7 +11010,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
       if (request.endpoint === "external-hello") {
         if (String(request.method || "GET").toUpperCase() !== "POST") return pluginHttpJson(request, 405, { ok: false, reason: "method-not-allowed" });
         hecTouchContact(request.body && typeof request.body === "object" ? request.body : null);
-        return pluginHttpJson(request, 200, { ok: true, ...externalStatusPayload() });
+        return pluginHttpJson(request, 200, { ok: true, ...externalStatusPayload(), gainMemory: gainMemoryMirrorPayload() });
       }
       if (request.endpoint === "external-status") {
         hecTouchContact(null);

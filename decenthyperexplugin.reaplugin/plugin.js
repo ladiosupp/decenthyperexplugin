@@ -3345,9 +3345,10 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
     const viLaw=signaled
       ?Math.min(S2_REFILL_VI_MAX_ML,Math.max(S2_REFILL_VI_MIN_ML,S2_REFILL_VI_A+S2_REFILL_VI_B*Number(obs.soakP2sRatio)))
       :S2_REFILL_VI_FALLBACK_ML;
-    // 2.2.59 d (Q3/Q4/Q7): learned residual consumption -- HIGH full, MEDIUM
-    // half-blend, LOW law; fpKey mismatch -> law; clamp [15,40] never below the
-    // law floor. No soak / extrapolated -> law only, learned value not consumed.
+    // 2.2.59 d (Q3/Q4/Q7) + d-floor (user 2026-11-21 Q3 variant): learned
+    // residual consumption -- HIGH full, MEDIUM half-blend, LOW law; fpKey
+    // mismatch -> law; then vi_used = max(lawVi, blended) (floor: only up vs
+    // law, never down), clamp [15,40]. No soak / extrapolated -> law only.
     // The law structure below is unchanged; vi is the only input that moves.
     let vi=viLaw,viLearning=null,viUsedSource=signaled?"law":"cold-start-fallback";
     if(signaled&&!viExtrapolated){
@@ -3355,9 +3356,15 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
       if(sug){
         viLearning={bandLo:sug.bandLo,bandHi:sug.bandHi,routedBy:sug.routedBy,viLearnedMl:sug.vi,n:sug.n,
           confidence:sug.confidence,fpKeyMatch:sug.fpKeyMatch,deviationPct:sug.deviationPct,
-          censoredN:sug.censoredN,lastRunId:sug.lastRunId,blend:0};
-        if(sug.fpKeyMatch&&sug.confidence==="HIGH"){vi=sug.vi;viUsedSource="learned-high";viLearning.blend=1;}
-        else if(sug.fpKeyMatch&&sug.confidence==="MEDIUM"){vi=0.5*sug.vi+0.5*viLaw;viUsedSource="learned-medium-blend";viLearning.blend=0.5;}
+          censoredN:sug.censoredN,lastRunId:sug.lastRunId,blend:0,floored:false};
+        let blended=viLaw;
+        if(sug.fpKeyMatch&&sug.confidence==="HIGH"){blended=sug.vi;viUsedSource="learned-high";viLearning.blend=1;}
+        else if(sug.fpKeyMatch&&sug.confidence==="MEDIUM"){blended=0.5*sug.vi+0.5*viLaw;viUsedSource="learned-medium-blend";viLearning.blend=0.5;}
+        // d-floor: vi_used = max(lawVi, blended). The band learned value still
+        // EWMA-downdates; the floor only blocks consuming below law (no-under-
+        // extraction > no-overshoot). floored source note for forensics.
+        vi=Math.max(viLaw,blended);
+        if(blended<viLaw){viLearning.floored=true;viUsedSource=viUsedSource+"-floored";}
         vi=Math.min(S2_VI_LEARN_USED_MAX,Math.max(S2_VI_LEARN_USED_MIN,vi));
       }
     }

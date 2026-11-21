@@ -2774,7 +2774,7 @@ test('2.2.36 short S2 (<4 s left) starts the ramp at 0.5 s with a 2-quantum cap'
   assert(w.commandMlS<2.5,JSON.stringify(w));
 });
 function grindRun(s2P=.9,m2=4.5,s2Flow=5.2,s3Flow=1.7,s3P=1.0,s3M=.6){
- const run={runId:'grind-test',config:{stage2Flow:5,stage3Flow:1.5,stage2LutCommandMlS:2.507,stage3LutCommandMlS:.569,adaptiveLearningLevel:'正常',basketContext:'coffee'},samples:[],rawScaleSamples:[],liveFlowTrim:{trace:[]}};
+ const run={runId:'grind-test',result:'completed at 100 g',config:{stage2Flow:5,stage3Flow:1.5,stage2LutCommandMlS:2.507,stage3LutCommandMlS:.569,adaptiveLearningLevel:'正常',basketContext:'coffee'},samples:[],rawScaleSamples:[],liveFlowTrim:{trace:[]}};
  for(let i=0;i<40;i++){const t=10000+i*100;run.samples.push({phase:'stage2',tMs:t,pressureBar:s2P,machineFlowMlS:m2,machineTelemetryValid:true,machineAgeMs:0});run.rawScaleSamples.push({phase:'stage2',profileFrame:1,tMs:t,scaleTimestampSeconds:100+t/1000,weightG:(t-10000)/1000*s2Flow,tareReset:false});}
  for(let i=0;i<60;i++){const t=20000+i*100;run.samples.push({phase:'stage3',tMs:t,pressureBar:s3P,machineFlowMlS:s3M,machineTelemetryValid:true,machineAgeMs:0});run.rawScaleSamples.push({phase:'stage3',profileFrame:2,tMs:t,scaleTimestampSeconds:200+t/1000,weightG:(t-20000)/1000*s3Flow,tareReset:false});}
  return run;
@@ -6638,4 +6638,173 @@ test('2.2.59 decision-level replay over the 25 calibrated real cups (selection +
   +'; mean estimated peak delta '+dPeak.toFixed(1)+'pp (13.84 pp per ml/s, closed-loop truth needs the machine)'
   +'; extrapolated '+rows.filter(x=>x.extrapolated).length+'; infeasible '+rows.filter(x=>x.infeasible).length);
 });
+
+// ===== 2.2.59 grind advice P0+R7（user 11-21 Q1–Q7 全按推荐；status 词表＋阈值冻结，加性字段 evidence/subtype/suggestedDirection/confirmation）=====
+function gaSetup(center,n,dev,localR){
+ const e=setup();
+ const s2={r:1.2,n,lastDeviation:dev,lastObservedR:1.2};
+ if(localR!=null)s2.lastLocalR=localR;
+ e.s.persistentHistoryFile={schema:2,shots:[],gainMemory:{schema:1,seq:1,lastBucketId:'g1',buckets:[{id:'g1',center,radius:.12,stages:{s2,s3:{r:2,n:3,lastDeviation:0,lastObservedR:2}}}]}};
+ return e;
+}
+function gaRunS3(earlySlope,lateSlope,s2P,m2,s2Flow){
+ const r=grindRun(s2P,m2,s2Flow,1.5);
+ r.samples=r.samples.filter(x=>x.phase!=='stage3');
+ r.rawScaleSamples=r.rawScaleSamples.filter(x=>x.phase!=='stage3');
+ for(let i=0;i<140;i++){
+  const t=20000+i*100,u=i/10;
+  const w=u<=5?earlySlope*Math.max(0,u-2):(u<=11?earlySlope*3+lateSlope*(u-5):earlySlope*3+lateSlope*6+lateSlope*(u-11));
+  r.samples.push({phase:'stage3',tMs:t,pressureBar:1.0,machineFlowMlS:.6,machineTelemetryValid:true,machineAgeMs:0});
+  r.rawScaleSamples.push({phase:'stage3',profileFrame:2,tMs:t,scaleTimestampSeconds:200+t/1000,weightG:w,tareReset:false});
+ }
+ return r;
+}
+test('2.2.59 grind R2 near-band high side keeps flow-high and adds a half-step hint',()=>{
+ const e=gaSetup(.2,5,0);
+ const ga=e.h.grindAdvisory(grindRun(1.1,5,5.2,1.5));
+ assert.equal(ga.status,'flow-high');assert.equal(ga.direction,'hold');
+ assert.equal(ga.suggestedDirection,'coarser');
+ assert.match(ga.label,/接近 12% 阈值/);assert.match(ga.label,/再调粗半档/);
+ assert.match(ga.detail,/TDS 联合判定见 HEC 总结页/);
+ assert.equal(ga.subtype,null);assert.equal(ga.confirmation,null);
+ assert.match(ga.evidence,/桶 g1 n5 HIGH · 单杯/);
+});
+test('2.2.59 grind R2 near-band low side keeps flow-low and hints finer',()=>{
+ const e=gaSetup(.22,5,0);
+ const ga=e.h.grindAdvisory(grindRun(.9,4.5,4.7,1.5));
+ assert.equal(ga.status,'flow-low');assert.equal(ga.suggestedDirection,'finer');
+ assert.match(ga.label,/阻力略低/);assert.match(ga.label,/再调细半档/);
+});
+test('2.2.59 grind R2 below 8% stays generic with no suggestedDirection',()=>{
+ const e=gaSetup(.205,5,0);
+ const ga=e.h.grindAdvisory(grindRun(1.1,5,5.2,1.5));
+ assert.equal(ga.status,'flow-high');assert.equal(ga.suggestedDirection,null);
+ assert.match(ga.label,/不急于改研磨/);
+});
+test('2.2.59 grind R7 S3-only deviation is flow-low with phase triage, not fine',()=>{
+ const e=gaSetup(.31,5,0);
+ const ga=e.h.grindAdvisory(grindRun(1.6,4.2,5.0,1.35));
+ assert.equal(ga.status,'flow-low');assert.equal(ga.direction,'hold');
+ assert.match(ga.detail,/先查 S3 形状\/指令，研磨嫌疑低/);
+ assert.equal(ga.confidence,'MEDIUM');
+});
+test('2.2.59 grind R3 local deviation triage attributes flow to base and drops confidence',()=>{
+ const e=gaSetup(.2,5,.2,1.4);
+ const ga=e.h.grindAdvisory(grindRun(1.1,5,5.2,1.5));
+ assert.match(ga.detail,/指令偏离学习中心 20%（base 纠正中）/);
+ assert.equal(ga.confidence,'LOW');
+ assert.match(ga.evidence,/local dev20%/);
+});
+test('2.2.59 grind R3/R4 extreme rel warns regime and drops confidence',()=>{
+ const e=gaSetup(.1,5,0);
+ const ga=e.h.grindAdvisory(grindRun(.9,4.5,5.2,1.7));
+ assert.equal(ga.status,'flow-high');
+ assert.match(ga.detail,/先核 regime/);assert.match(ga.detail,/rel 100%/);
+ assert.equal(ga.confidence,'LOW');
+});
+test('2.2.59 grind R3 in-band uneven evidence annotates without upgrading status',()=>{
+ const e=gaSetup(.31,5,0);
+ const ga=e.h.grindAdvisory(gaRunS3(2,1,.9,4.5,5.0));
+ assert.equal(ga.status,'flow-low');
+ assert(ga.s3LateToEarlyRatio<0.80,'late/early '+ga.s3LateToEarlyRatio);
+ assert.match(ga.detail,/布粉可能不均/);
+});
+test('2.2.59 grind R0 uneven outranks coarse and keeps the coarse subtype annotation',()=>{
+ const e=gaSetup(.31,5,0);
+ const ga=e.h.grindAdvisory(gaRunS3(4,2.5,.9,4.5,5.2));
+ assert.equal(ga.status,'uneven');assert.equal(ga.direction,'hold');
+ assert.equal(ga.subtype,'coarse-uneven');
+ assert.equal(ga.confidence,'LOW');
+ assert.match(ga.detail,/偏粗且不均匀/);
+});
+test('2.2.59 grind R5 magnitude bands map rel to half/one step or regime check',()=>{
+ const half=gaSetup(.235,5,0).h.grindAdvisory(grindRun(.9,4.5,5.2,1.7));
+ assert.equal(half.status,'coarse');assert.match(half.label,/调细约半档/);
+ const one=gaSetup(.26,5,0).h.grindAdvisory(grindRun(.9,4.5,5.2,1.7));
+ assert.equal(one.status,'coarse');assert.match(one.label,/调细约 1 档/);
+ const big=gaSetup(.31,5,0).h.grindAdvisory(grindRun(.9,4.5,5.2,1.7));
+ assert.equal(big.status,'coarse');assert.match(big.label,/阻力偏差过大/);assert.doesNotMatch(big.label,/约.*档/);
+ const fineHalf=gaSetup(.33,5,0).h.grindAdvisory(grindRun(1.6,4.2,4.7,1.35));
+ assert.equal(fineHalf.status,'fine');assert.match(fineHalf.label,/调粗约半档/);
+});
+test('2.2.59 grind R1 non-completed cup gets incomplete gate, aborted keeps priority',()=>{
+ const e=gaSetup(.31,5,0);
+ const r=grindRun(1.6,4.2,4.7,1.35);r.result='ended';
+ const ga=e.h.grindAdvisory(r);
+ assert.equal(ga.available,false);assert.equal(ga.status,'incomplete');assert.equal(ga.direction,'hold');
+ assert.equal(ga.confidence,'LOW');assert.match(ga.label,/本杯未完成/);
+ const r2=grindRun(1.6,4.2,4.7,1.35);r2.result='Pressure > 8.00 bar for 3 samples';
+ r2.events=[{name:'learning_fault',phase:'stage2',data:{reason:'Pressure > 8.00 bar for 3 samples'}}];
+ const ga2=e.h.grindAdvisory(r2);
+ assert.equal(ga2.status,'aborted');
+});
+test('2.2.59 grind R6 two-cup same-direction confirmation upgrades HIGH and never writes memory',()=>{
+ const e=gaSetup(.2,8,0);
+ e.s.persistentHistoryFile.shots=[{runId:'prev-cup',result:'completed at 100 g',grindAdvice:{available:true,status:'flow-high',direction:'hold',relPct:9.5},s2:{status:'HIT'},learningIntegrity:{eligible:true},adaptiveDecision:{s2:{gainMemory:{bucketId:'g1',stale:false,fallback:null}}}}];
+ const memSnap=m=>JSON.stringify((m.buckets||[]).map(b=>({id:b.id,center:b.center,radius:b.radius,s2:b.stages&&b.stages.s2?{r:b.stages.s2.r,n:b.stages.s2.n,dev:b.stages.s2.lastDeviation,obs:b.stages.s2.lastObservedR,run:b.stages.s2.lastRunId??null}:null})));
+ const beforeShots=JSON.stringify(e.s.persistentHistoryFile.shots),beforeMem=memSnap(e.s.persistentHistoryFile.gainMemory);
+ const ga=e.h.grindAdvisory(grindRun(1.1,5,5.2,1.5));
+ assert.equal(ga.status,'flow-high');
+ assert(ga.confirmation&&ga.confirmation.confirmed===true,JSON.stringify(ga.confirmation));
+ assert.equal(ga.confirmation.prevRunId,'prev-cup');
+ assert.match(ga.label,/连续两杯同向（9.5%→10%，桶 g1）/);
+ assert.equal(ga.confidence,'HIGH');
+ assert.match(ga.evidence,/两杯确认/);
+ assert.equal(JSON.stringify(e.s.persistentHistoryFile.shots),beforeShots,'R6 must not write history shots');
+ assert.equal(memSnap(e.s.persistentHistoryFile.gainMemory),beforeMem,'R6 must not change learned bucket values');
+});
+test('2.2.59 grind R6 guards reject MISS/uneven/other-bucket/extreme/stale previous cups',()=>{
+ const mk=mut=>{
+  const e=gaSetup(.2,8,0);
+  const prev={runId:'prev-cup',result:'completed at 100 g',grindAdvice:{available:true,status:'flow-high',direction:'hold',relPct:9.5},s2:{status:'HIT'},learningIntegrity:{eligible:true},adaptiveDecision:{s2:{gainMemory:{bucketId:'g1',stale:false,fallback:null}}}};
+  mut(prev);
+  e.s.persistentHistoryFile.shots=[prev];
+  return e.h.grindAdvisory(grindRun(1.1,5,5.2,1.5));
+ };
+ const variants=[
+  p=>{p.s2.status='MISS';},
+  p=>{p.grindAdvice.status='uneven';},
+  p=>{p.adaptiveDecision.s2.gainMemory.bucketId='g9';},
+  p=>{p.grindAdvice.relPct=40;},
+  p=>{p.adaptiveDecision.s2.gainMemory.stale=true;},
+  p=>{p.learningIntegrity.eligible=false;},
+  p=>{p.grindAdvice.available=false;p.grindAdvice.status='incomplete';}
+ ];
+ for(const mut of variants){
+  const ga=mk(mut);
+  assert.equal(ga.confirmation,null,'guard must reject');
+  assert.doesNotMatch(ga.label,/连续两杯同向（/);
+  assert.notEqual(ga.confidence,'HIGH');
+ }
+});
+test('2.2.59 grind R4 immature bucket drops confidence with evidence string',()=>{
+ const e=gaSetup(.2,2,0);
+ const ga=e.h.grindAdvisory(grindRun(1.1,5,5.2,1.5));
+ assert.equal(ga.status,'flow-high');assert.equal(ga.confidence,'LOW');
+ assert.match(ga.evidence,/桶 g1 n2/);
+});
+test('2.2.59 grind unavailable path carries frozen no-usable vocabulary',()=>{
+ const e=gaSetup(.31,5,0);
+ const r=grindRun(1.6,4.2,4.7,1.35);r.samples=r.samples.filter(x=>x.phase!=='stage2');
+ const ga=e.h.grindAdvisory(r);
+ assert.equal(ga.available,false);assert.equal(ga.status,'no-usable');
+});
+test('2.2.59 grind P0 real-cup cross recomputes cup16 uneven / cup21 hold / cup24 near-band from fullRecord (history-all)',()=>{
+ const f='D:/vscode/.tools/hx-data/hyperex-history-all.json';
+ if(!fs.existsSync(f)){console.log('   skip real-cup grind cross: history-all absent');return;}
+ const j=JSON.parse(fs.readFileSync(f,'utf8'));const shots=Array.isArray(j)?j:j.shots;
+ const cases=[{i:120,status:'uneven'},{i:121,status:'flow-high'},{i:123,status:'flow-high'},{i:125,status:'hold'},{i:126,status:'flow-high'},{i:127,status:'flow-high'},{i:128,status:'flow-low'},{i:129,status:'flow-high'}];
+ for(const c of cases){
+  const s=shots[c.i],fr=s.fullRecord,gm=s.adaptiveDecision&&s.adaptiveDecision.s2&&s.adaptiveDecision.s2.gainMemory;
+  assert(fr&&gm,'fixture cup '+(c.i+1)+' has fullRecord and gainMemory');
+  const e=setup();
+  e.s.persistentHistoryFile={schema:2,shots:[],gainMemory:{schema:1,seq:1,lastBucketId:gm.bucketId,buckets:[{id:gm.bucketId,center:gm.center,radius:gm.radius||.1,stages:{s2:{r:gm.smoothedR||gm.r,n:gm.bucketSamples,lastDeviation:(gm.deviationPct||0)/100,lastObservedR:gm.observedR||gm.r},s3:{r:2,n:3,lastDeviation:0,lastObservedR:2}}}]}};
+  const run={runId:s.runId,result:s.result,gainMemoryBucketId:gm.bucketId,config:{stage2Flow:5,stage3Flow:1.5,stage2LutCommandMlS:2.507,stage3LutCommandMlS:.569,adaptiveLearningLevel:'正常',basketContext:'coffee',stage2CommandMlS:3.8,stage2CommandMode:'auto'},samples:fr.samples,rawScaleSamples:fr.rawScaleSamples,events:fr.events||[],liveFlowTrim:fr.liveFlowTrim||{trace:[]}};
+  const ga=e.h.grindAdvisory(run);
+  assert.equal(ga.available,true,'cup '+(c.i+1)+' available');
+  assert.equal(ga.status,c.status,'cup '+(c.i+1)+' '+s.runId+' status');
+  assert(Math.abs(ga.relPct-s.grindAdvice.relPct)<=0.15,'cup '+(c.i+1)+' relPct cross '+ga.relPct+' vs '+s.grindAdvice.relPct);
+ }
+});
+
 

@@ -951,5 +951,20 @@ PASS 2.2.59 Vi refit crosses the 5-cup calibration material (wetLat rmse gate <=
 PASS 2.2.56 closed loop: the law-selected flood is what reaches the driver, inside the envelope
    2.2.59 replay: 25 real cups (batch1 13 / batch2 12), law flood 6.000..8.000 vs historical 6.813..7.000; mean estimated peak delta -3.1pp (13.84 pp per ml/s, closed-loop truth needs the machine); extrapolated 0; infeasible 0
 PASS 2.2.59 decision-level replay over the 25 calibrated real cups (selection + flags only)
+PASS 2.2.59 grind R2 near-band high side keeps flow-high and adds a half-step hint
+PASS 2.2.59 grind R2 near-band low side keeps flow-low and hints finer
+PASS 2.2.59 grind R2 below 8% stays generic with no suggestedDirection
+PASS 2.2.59 grind R7 S3-only deviation is flow-low with phase triage, not fine
+PASS 2.2.59 grind R3 local deviation triage attributes flow to base and drops confidence
+PASS 2.2.59 grind R3/R4 extreme rel warns regime and drops confidence
+PASS 2.2.59 grind R3 in-band uneven evidence annotates without upgrading status
+PASS 2.2.59 grind R0 uneven outranks coarse and keeps the coarse subtype annotation
+PASS 2.2.59 grind R5 magnitude bands map rel to half/one step or regime check
+PASS 2.2.59 grind R1 non-completed cup gets incomplete gate, aborted keeps priority
+PASS 2.2.59 grind R6 two-cup same-direction confirmation upgrades HIGH and never writes memory
+PASS 2.2.59 grind R6 guards reject MISS/uneven/other-bucket/extreme/stale previous cups
+PASS 2.2.59 grind R4 immature bucket drops confidence with evidence string
+PASS 2.2.59 grind unavailable path carries frozen no-usable vocabulary
+PASS 2.2.59 grind P0 real-cup cross recomputes cup16 uneven / cup21 hold / cup24 near-band from fullRecord (history-all)
 
-939/939 checks passed
+954/954 checks passed

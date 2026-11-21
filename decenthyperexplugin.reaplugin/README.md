@@ -1415,3 +1415,9 @@ Full browser visual/touch rendering was unavailable (Chromium/Firefox and SVG ra
 
 Run node --check plugin.js and node tests/verify_v0174.cjs. Current HANDOFF_v0174.md and tests/RESULTS_v0174.txt accompany this package. LICENSE and original calibration JSON are unchanged. Delivered older ZIPs remain immutable; old remote files retained for history.
  # 2.2.52 experimental
+**研磨建议 P0＋R7 细化（同批 2.2.59，用户 11-21 裁 Q1–Q7 全按统筹推荐）**：status 词表＋阈值冻结，加性字段 evidence/subtype/suggestedDirection/confirmation。R0 uneven&&high 置顶（coarse-uneven 并入子型，字符串退役）／R1 非完成杯 incomplete 门／R2 近带 8–12% 双侧微建议（滞回不做）／R3 原因分诊（base 偏离／阶段归因／regime 警告／带内 uneven 注记／TDS 文案）／R4 证据驱动置信（HIGH 本期闲置）／R5 幅度带（半档／一档／>35% 先核 regime，仅文案）／R6 两杯确认严格守卫（读历史不写记忆，归档 0 触发 inert）／R7 coarse/fine 须 S2 尾参与（S3-only→flow-high/low）。uneven 签名语义冻结（A/B 子形不变）；纯建议，控制律/记忆/写入零消费。130 杯回放：可用杯状态零迁移（仅故障门 2 杯＋no-usable 3 杯→incomplete），uneven 集合 [83,105,121] 逐字不变，R7 fine 4 杯→flow-low，置信 LOW42/MED12→MED31/LOW26。详见 [HANDOFF_2026-11-21-grind-advice-impl.md](HANDOFF_2026-11-21-grind-advice-impl.md)。
+
+- **验证**：verify_v02259 **954/954**（939 基线＋15 P0/R7 测试：近带双侧／分诊／阶段／regime／带内 uneven 注记／置信证据串／幅度带／confirmation＋7 守卫拒／incomplete 门／uneven 优先级／R7 S3-only／8 杯真杯交叉杯 16/17/19/21/22/23/24/25 fullRecord 复算，禁镜像）；sim 5/5；node --check；manifest 零改（2.2.59/275）。
+- **APK 同步债**：新字段（evidence/subtype/suggestedDirection/confirmation）显示＋R6 confirmation 消费→hec 里程碑；TDS 联合层为 APK 原生（a27d2d6），无插件对应物。
+
+# 2.2.58 experimental

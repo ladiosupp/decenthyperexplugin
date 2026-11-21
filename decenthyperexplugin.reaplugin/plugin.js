@@ -5547,6 +5547,10 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
     if(fault){
       return {available:false,status:"aborted",direction:"hold",reason:"shot-aborted",label:"本杯压力异常中止：先查滤纸/粉层是否堵塞，再谈研磨",detail:fault.detail?String(fault.detail):"本杯未完成，研磨建议不适用",confidence:"LOW"};
     }
+    // 2.2.59 R1 (user 11-21 Q1): any non-completed cup gets no grind advice.
+    if(!/^completed at /i.test(String(run&&run.result||""))){
+      return {available:false,status:"incomplete",direction:"hold",reason:"shot-incomplete",label:"本杯未完成：研磨建议不适用，先查执行/压力/通道",detail:"result="+String(run&&run.result||"无")+"，非完成杯不给研磨建议",confidence:"LOW"};
+    }
     const q2=controlOutputQuality(run,"stage2"),q3=controlOutputQuality(run,"stage3");
     const samples=(run.samples||[]).filter(x=>x.phase==="stage2"&&x.machineTelemetryValid!==false&&Number(x.machineFlowMlS)>0);
     const tail=samples.slice(Math.floor(samples.length*.6));
@@ -5558,21 +5562,75 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
     const s2Cv=q2&&q2.available&&Number.isFinite(q2.tailRippleCVPct)?Number(q2.tailRippleCVPct):null;
     const s3Err=q3&&q3.available&&Number.isFinite(q3.tailErrorPct)?Number(q3.tailErrorPct):null;
     const s3=stage3StabilityDiagnostics(run)||{},lateRatio=Number(s3.lateToEarlyRatio);
-    if(!pq||!center)return {available:false,reason:"no usable S2 pressure/flow or gain reference"};
+    if(!pq||!center)return {available:false,status:"no-usable",reason:"no usable S2 pressure/flow or gain reference"};
     const rel=(pq/center-1)*100;
     const high=(s2Err!=null&&s2Err>=4)||(s3Err!=null&&s3Err>=5);
     const low=(s2Err!=null&&s2Err<=-4)||(s3Err!=null&&s3Err<=-5);
     const uneven=(s2Cv!=null&&s2Cv>=15)||(Number.isFinite(lateRatio)&&lateRatio<.80);
-    let status="hold",direction="hold",label="接近合适：先保持",confidence="MEDIUM";
-    if(rel<=-12&&high){status="coarse";direction="finer";label="研磨偏粗：建议调细约 1 档";}
-    else if(rel>=12&&low){status="fine";direction="coarser";label="研磨偏细：建议调粗约 1 档";}
-    else if(rel<=-8&&high&&uneven){status="coarse-uneven";direction="finer";label="偏粗且不均匀：先调细约半档，并检查布粉";confidence="LOW";}
-    else if(uneven&&high){status="uneven";label="粉饼不均匀/通道：先检查布粉；连续两杯仍高再调细半档";confidence="LOW";}
-    else if(high){status="flow-high";label="流量偏高但阻力接近参考：先查粉量/指令，不急于改研磨";confidence="LOW";}
-    else if(low){status="flow-low";label="流量偏低但阻力接近参考：先查粉量/指令，不急于改研磨";confidence="LOW";}
-    else if(Math.abs(rel)>=12){status="resistance-shift";direction=rel<0?"finer":"coarser";label=rel<0?"阻力偏低、流量还在带内：先保持，连续两杯再调细":"阻力偏高、流量还在带内：先保持，连续两杯再调粗";confidence="LOW";}
-    const detail="S2尾 p/q "+round(pq,3)+" vs 桶中心 "+round(center,3)+"（"+(rel<0?"低":"高")+round(Math.abs(rel),1)+"%）；S2尾偏差 "+(s2Err==null?"—":round(s2Err,1))+"%，S2尾CV "+(s2Cv==null?"—":round(s2Cv,1))+"%，S3偏差 "+(s3Err==null?"—":round(s3Err,1))+"%"+(Number.isFinite(lateRatio)?"，S3 late/early "+round(lateRatio,3):"")+"。";
-    return {available:true,status,direction,label,confidence,s2Pq:round(pq,3),referencePq:round(center,3),relPct:round(rel,1),s2TailErrorPct:s2Err,s2TailCvPct:s2Cv,s3TailErrorPct:s3Err,s3LateToEarlyRatio:Number.isFinite(lateRatio)?round(lateRatio,3):null,detail,basis:"S2 tail pressure / machine flow vs active gain-memory bucket centre; S2/S3 tail errors; S2 tail CV; S3 late/early"};
+    // 2.2.59 P0+R7 (user 11-21 Q1-Q7 all as recommended): status vocabulary and
+    // thresholds frozen; evidence/subtype/suggestedDirection/confirmation are additive.
+    const s2HitHigh=s2Err!=null&&s2Err>=4,s2HitLow=s2Err!=null&&s2Err<=-4;
+    const hint=rel<0?"finer":"coarser";
+    const near=Math.abs(rel)>=8&&Math.abs(rel)<12;
+    let status="hold",direction="hold",label="接近合适：先保持",subtype=null,suggestedDirection=null;
+    // R0: uneven&&high outranks coarse/fine so a channel signature is never swallowed;
+    // the retired coarse-uneven string survives only as a subtype annotation.
+    if(uneven&&high){status="uneven";label="粉饼不均匀/通道：先检查布粉；连续两杯仍高再调细半档";if(rel<=-8)subtype="coarse-uneven";}
+    else if(rel<=-12&&high&&s2HitHigh){status="coarse";direction="finer";label=Math.abs(rel)<=20?"研磨偏粗：建议调细约半档":(Math.abs(rel)<=35?"研磨偏粗：建议调细约 1 档":"阻力偏差过大：先确认纸/豆/桶匹配，再谈研磨");}
+    else if(rel>=12&&low&&s2HitLow){status="fine";direction="coarser";label=rel<=20?"研磨偏细：建议调粗约半档":(rel<=35?"研磨偏细：建议调粗约 1 档":"阻力偏差过大：先确认纸/豆/桶匹配，再谈研磨");}
+    else if(high){status="flow-high";label=near?"流量偏高，阻力"+(rel<0?"略低":"略高")+"（"+round(rel,1)+"%，接近 12% 阈值）：先查粉量/指令；连续两杯同向再调"+(hint==="finer"?"细":"粗")+"半档":"流量偏高但阻力接近参考：先查粉量/指令，不急于改研磨";}
+    else if(low){status="flow-low";label=near?"流量偏低，阻力"+(rel<0?"略低":"略高")+"（"+round(rel,1)+"%，接近 12% 阈值）：先查粉量/指令；连续两杯同向再调"+(hint==="finer"?"细":"粗")+"半档":"流量偏低但阻力接近参考：先查粉量/指令，不急于改研磨";}
+    else if(Math.abs(rel)>=12){status="resistance-shift";direction=hint;label=rel<0?"阻力偏低、流量还在带内：先保持，连续两杯再调细":"阻力偏高、流量还在带内：先保持，连续两杯再调粗";}
+    if(near&&(status==="flow-high"||status==="flow-low"))suggestedDirection=hint;
+    // R4 evidence-driven confidence: bucket maturity / regime / extreme / local deviation.
+    const gmN=gm&&gm.bucketSamples!=null?Number(gm.bucketSamples):null;
+    const gconf=gm?gm.confidence:null;
+    const immature=!gm||(gmN!=null&&gmN<3)||gconf==="LOW";
+    const regimeBad=!!(gm&&(gm.stale||gm.fallback));
+    const extreme=Math.abs(rel)>50;
+    const localDev=!!(gm&&gm.local&&Number(gm.deviationPct)>=15);
+    let confidence=(status==="uneven"||immature||regimeBad||extreme||localDev)?"LOW":"MEDIUM";
+    // R3 triage annotations, appended to detail in priority order (advisory text only).
+    const notes=[];
+    if(subtype==="coarse-uneven")notes.push("偏粗且不均匀（rel "+round(rel,1)+"%）：先查布粉，再谈调细半档");
+    if(localDev)notes.push("本杯指令偏离学习中心 "+gm.deviationPct+"%（base 纠正中），流量偏差优先归因指令/base；下一杯纠正后再评估研磨");
+    if(high||low){
+      const s2hit=high?s2HitHigh:s2HitLow,s3hit=s3Err!=null&&(high?s3Err>=5:s3Err<=-5);
+      if(s2hit&&!s3hit)notes.push("阶段归因：S2 尾 "+round(s2Err,1)+"% 触发（S3 "+(s3Err==null?"—":round(s3Err,1)+"%")+"）");
+      else if(s3hit&&!s2hit)notes.push("阶段归因：S3 尾 "+round(s3Err,1)+"% 触发（S2 平直 "+(s2Err==null?"—":round(s2Err,1)+"%")+"）：先查 S3 形状/指令，研磨嫌疑低");
+      else if(s2hit&&s3hit)notes.push("阶段归因：S2/S3 同向（"+round(s2Err,1)+"% / "+round(s3Err,1)+"%）");
+    }
+    if(regimeBad||extreme){
+      const parts=[];if(gm&&gm.stale)parts.push("stale");if(gm&&gm.fallback)parts.push(String(gm.fallback));if(extreme)parts.push("rel "+round(rel,1)+"%");
+      notes.push("参考桶可能不匹配当前纸/豆 regime（"+parts.join("/")+"），阻力对比仅供参考，先核 regime");
+    }
+    if(uneven&&!high){
+      const ev=Number.isFinite(lateRatio)&&lateRatio<.80?"S3 late/early "+round(lateRatio,3)+"<0.80":"S2 尾 CV "+round(s2Cv,1)+"≥15";
+      notes.push(ev+"，布粉可能不均；流量未偏高，先观察");
+    }
+    if(status==="flow-high"||status==="flow-low")notes.push("若本杯 TDS 命中 3.5±0.2，研磨大概率合适，流量偏差先查粉量/指令（TDS 联合判定见 HEC 总结页·确认重算）");
+    // R6 two-cup confirmation: read the persisted history only, never write memory.
+    let confirmation=null;
+    const rows=(state.persistentHistoryFile&&state.persistentHistoryFile.shots)||[];
+    let idx=-1;for(let i=rows.length-1;i>=0;i--){if(rows[i]&&rows[i].runId===run.runId){idx=i;break;}}
+    const prev=idx>0?rows[idx-1]:(idx===-1&&rows.length?rows[rows.length-1]:null);
+    const pg=prev&&prev.grindAdvice,pgm=prev&&prev.adaptiveDecision&&prev.adaptiveDecision.s2&&prev.adaptiveDecision.s2.gainMemory;
+    const prevOk=!!(pg&&pg.available&&["uneven","coarse-uneven","aborted"].indexOf(pg.status)<0&&prev.s2&&prev.s2.status!=="MISS"&&(!prev.learningIntegrity||prev.learningIntegrity.eligible!==false));
+    const sameBucket=!!(gm&&pgm&&gm.bucketId===pgm.bucketId);
+    const prevRel=pg&&pg.relPct!=null&&Number.isFinite(Number(pg.relPct))?Number(pg.relPct):null;
+    const prevHint=prevRel==null?null:(prevRel<0?"finer":"coarser");
+    const confirmable=(status==="flow-high"||status==="flow-low"||status==="resistance-shift")&&prevHint===hint
+      &&Math.abs(rel)>=8&&Math.abs(rel)<=35&&prevRel!=null&&Math.abs(prevRel)>=8&&Math.abs(prevRel)<=35
+      &&!regimeBad&&!(pgm&&(pgm.stale||pgm.fallback));
+    if(confirmable&&prevOk&&sameBucket){
+      confirmation={confirmed:true,prevRunId:prev.runId,prevRelPct:round(prevRel,1),relPct:round(rel,1),bucketId:gm.bucketId};
+      label+="；连续两杯同向（"+round(prevRel,1)+"%→"+round(rel,1)+"%，桶 "+gm.bucketId+"），建议微调半档";
+      if(!immature&&!regimeBad&&!localDev&&gmN!=null&&gmN>=8&&gconf==="HIGH")confidence="HIGH";
+    }
+    const evidence=(gm?("桶 "+gm.bucketId+" n"+(gmN==null?"—":gmN)+" "+gconf+(gm.local?" local dev"+gm.deviationPct+"%":"")+(gm.stale?" stale":"")+(gm.fallback?" "+gm.fallback:"")):"无桶证据")+" · "+(confirmation?"两杯确认":"单杯");
+    let detail="S2尾 p/q "+round(pq,3)+" vs 桶中心 "+round(center,3)+"（"+(rel<0?"低":"高")+round(Math.abs(rel),1)+"%）；S2尾偏差 "+(s2Err==null?"—":round(s2Err,1))+"%，S2尾CV "+(s2Cv==null?"—":round(s2Cv,1))+"%，S3偏差 "+(s3Err==null?"—":round(s3Err,1))+"%"+(Number.isFinite(lateRatio)?"，S3 late/early "+round(lateRatio,3):"")+"。";
+    if(notes.length)detail+=notes.join("；")+"。";
+    return {available:true,status,direction,label,confidence,subtype,suggestedDirection,confirmation,evidence,s2Pq:round(pq,3),referencePq:round(center,3),relPct:round(rel,1),s2TailErrorPct:s2Err,s2TailCvPct:s2Cv,s3TailErrorPct:s3Err,s3LateToEarlyRatio:Number.isFinite(lateRatio)?round(lateRatio,3):null,detail,basis:"S2 tail pressure / machine flow vs active gain-memory bucket centre; S2/S3 tail errors; S2 tail CV; S3 late/early"};
   }
   function diagnosticSummary(run) {
     if (!run) return null;

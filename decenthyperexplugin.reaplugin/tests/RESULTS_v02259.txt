@@ -732,7 +732,7 @@ PASS 2.2.58 restore does not assert or force a specific next-shot base (law outp
 PASS 2.2.58 gain-memory-restore HTTP endpoint restores without machine upload
 PASS 2.2.58 gain-memory-restore endpoint rejects bad body with 409 and no state change
 PASS 2.2.58 manifest exposes gain-memory-restore surface and keeps short description
-PASS 2.2.59 d normalizeGainMemory validates the vi row band and keeps vi-only buckets (r mechanism untouched)
+PASS 2.2.59 d-B normalizeGainMemory validates viBuckets bands and tolerates old A-format rows (r mechanism untouched)
 PASS 2.2.59 d viObservation seven gates: clean cup learns, every fault path rejects with a reason
 PASS 2.2.59 d real material cups cross: onset Vi_obs matches the fit material; scale-noise cup 23 rejected online
 PASS 2.2.59 d asymmetric EWMA: up fast / down slow, dev gate boost + lastLocalVi, censored and damped halving
@@ -741,7 +741,8 @@ PASS 2.2.59 d FULL fingerprint gate: mismatch falls back to law without touching
 PASS 2.2.59 d cold start and extrapolation never consume the learned value
 PASS 2.2.59 d restore undoes a Vi-only bad cup: snapshot rollback + exclusion annotation, record kept
 PASS 2.2.59 d cup-end hook persists viMemory evidence + vi row atomically; trace carries the consumption source
-PASS 2.2.59 d era-switch first cup keeps the old-bucket prior (Q10) and the law structure is untouched
+PASS 2.2.59 d-B band isolation: a new band starts on the law prior (Q10), no cross-band prior leak
+PASS 2.2.59 d-B band boundaries: viBandFor [lo,hi) membership + ratio-band consumption routing
 PASS write vector arrow sits on the check-to-write trend line while the head follows the command direction
 PASS write vector arrow without a RAW regression keeps the command position
 PASS steady-gain k row stays visible with a sample counter when history is short
@@ -950,4 +951,4 @@ PASS 2.2.56 closed loop: the law-selected flood is what reaches the driver, insi
    2.2.59 replay: 25 real cups (batch1 13 / batch2 12), law flood 6.000..8.000 vs historical 6.813..7.000; mean estimated peak delta -3.1pp (13.84 pp per ml/s, closed-loop truth needs the machine); extrapolated 0; infeasible 0
 PASS 2.2.59 decision-level replay over the 25 calibrated real cups (selection + flags only)
 
-937/937 checks passed
+938/938 checks passed

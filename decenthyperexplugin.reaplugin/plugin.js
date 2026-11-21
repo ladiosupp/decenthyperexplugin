@@ -281,6 +281,12 @@ const S2_VI_LEARN_DT0_MAX=5;             // clean 0, noise 46
 const S2_VI_LEARN_CLUSTER_MAX=100;     // sub-60ms stamp gaps (100Hz flush microclusters):
                                        // 130-cup archive clean max 65, scale-noise cup23 257
 const S2_VI_LEARN_BRIDGE_GAP_S=2;        // stall-level hole in the stage2 scale stream
+// 2.2.59 d-B (user 2026-11-21 ruling 1, retreat to bucket key B): Vi buckets are
+// keyed by soakP2sRatio band (the law input domain), independent of the r g
+// buckets. At the stage2-entry decision the ratio already exists -> routing has
+// no lastBucket lag and no cross-era same-signature mixing. 3 bands trisect the
+// support [0.2,0.8]; band shape is a design parameter (change requires asking).
+const S2_VI_BANDS=[[0.2,0.4],[0.4,0.6],[0.6,0.8]];
 // 2.2.57 (scaleSampleGate, user 2026-11-20 "过滤一个可以用的参数写进去"): ingestion
 // gate for the scale samples feeding the INSTANTANEOUS estimates only (oq tail
 // rolling regression / Vb3 instantCross / learning observedR via the oq tail).
@@ -1324,7 +1330,7 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
     return {factor,r2:base=>round(1-(1-base)*factor,6),seconds:base=>base/factor,samples:base=>Math.ceil(base/factor),spread:base=>base*factor};
   }
   function emptyGainMemory() {
-    return {schema:GAIN_MEMORY_SCHEMA,buckets:[],seq:0,lastBucketId:null,updatedAt:null};
+    return {schema:GAIN_MEMORY_SCHEMA,buckets:[],viBuckets:[],seq:0,lastBucketId:null,updatedAt:null};
   }
   function normalizeGainMemory(raw) {
     const out=emptyGainMemory();
@@ -1357,36 +1363,45 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
           bands:(function(){const b={};for(const k of Object.keys(x.bands&&typeof x.bands==="object"?x.bands:{})){const v=x.bands[k],br=Number(v&&v.r);if(!(br>=GAIN_R_MIN&&br<=GAIN_R_MAX))continue;b[k]={r:round(br,4),n:Math.max(1,Math.floor(Number(v.n)||1)),lastObservedR:finiteOrNull(v.lastObservedR)!==null?round(Number(v.lastObservedR),4):null,updatedAt:v.updatedAt||null,steadyN:v.steadyN==null?null:(Number.isFinite(Number(v.steadyN))?Math.max(0,Math.floor(Number(v.steadyN))):null),provisional:v.provisional===true};}return Object.keys(b).length?b:null;})(),
           lastRunId:x.lastRunId==null?null:String(x.lastRunId),updatedAt:x.updatedAt||null};
       }
-      // 2.2.59 d (Q1/Q4/Q11): per-bucket Vi row, parallel to stages.s2/s3 (the r
-      // mechanism is untouched). A vi-only bucket survives: a cup can learn Vi
-      // without an r observation. Old files without vi normalize to vi=null.
-      let vi=null;
-      const vraw=row.vi;
-      if(vraw&&typeof vraw==="object"){
-        const vv=Number(vraw.vi);
-        if(Number.isFinite(vv)&&vv>=S2_VI_LEARN_STORAGE_MIN&&vv<=S2_VI_LEARN_STORAGE_MAX){
-          vi={vi:round(vv,2),n:Math.max(1,Math.floor(Number(vraw.n)||1)),
-            lastDeviation:finiteOrNull(vraw.lastDeviation)!==null?round(Number(vraw.lastDeviation),4):null,
-            lastObservedVi:finiteOrNull(vraw.lastObservedVi)!==null?round(Number(vraw.lastObservedVi),2):null,
-            lastLocalVi:finiteOrNull(vraw.lastLocalVi)!==null?round(Number(vraw.lastLocalVi),2):null,
-            damped:!!vraw.damped,censored:!!vraw.censored,
-            censoredN:Math.max(0,Math.floor(Number(vraw.censoredN)||0)),
-            lastRunId:vraw.lastRunId==null?null:String(vraw.lastRunId),updatedAt:vraw.updatedAt||null,
-            fpKey:typeof vraw.fpKey==="string"?vraw.fpKey:null,
-            floodMode:typeof vraw.floodMode==="string"?vraw.floodMode:null};
-        }else if(Number.isFinite(vv)){
-          out.dropped.push({bucketId:id,stage:"vi",vi:round(vv,2),reason:"vi outside ["+S2_VI_LEARN_STORAGE_MIN+","+S2_VI_LEARN_STORAGE_MAX+"]"});
-        }
-      }
-      if(!Object.keys(stages).length&&!vi)continue;
+      // 2.2.59 d-B (user ruling 1, key B): the A-key g-bucket vi row is removed;
+      // Vi lives in independent ratio-band viBuckets (below). Old A-format vi
+      // rows on g buckets are ignored tolerantly (no live data, no migration).
+      if(!Object.keys(stages).length)continue;
       seen.add(id);
       out.buckets.push({id,center:round(center,4),radius:Number.isFinite(radius)&&radius>0?round(radius,4):GAIN_MEMORY_BUCKET_RADIUS,
-        samples:samples.length?samples:[round(center,4)],stages,vi,createdAt:row.createdAt||null,updatedAt:row.updatedAt||null});
+        samples:samples.length?samples:[round(center,4)],stages,createdAt:row.createdAt||null,updatedAt:row.updatedAt||null});
     }
     out.buckets=out.buckets.slice(0,GAIN_MEMORY_MAX_BUCKETS);
     out.dropped=out.dropped.slice(-20);
     out.seq=Math.max(Number(raw.seq)||0,out.buckets.length);
     out.lastBucketId=out.buckets.some(x=>x.id===raw.lastBucketId)?String(raw.lastBucketId):null;
+    // 2.2.59 d-B: independent Vi ratio-band buckets. Rows validated [12,40],
+    // deduped by band, LRU-capped to the band count. Old files -> empty array.
+    out.viBuckets=[];
+    const vseen=new Set();
+    for(const v of Array.isArray(raw.viBuckets)?raw.viBuckets:[]){
+      if(!v||typeof v!=="object")continue;
+      const lo=Number(v.bandLo),hi=Number(v.bandHi);
+      if(!Number.isFinite(lo)||!Number.isFinite(hi)||!(lo>=S2_REFILL_VI_RATIO_MIN&&hi<=S2_REFILL_VI_RATIO_MAX&&lo<hi))continue;
+      const bk=lo+"-"+hi;if(vseen.has(bk))continue;
+      const vv=Number(v.vi);
+      if(!(Number.isFinite(vv)&&vv>=S2_VI_LEARN_STORAGE_MIN&&vv<=S2_VI_LEARN_STORAGE_MAX)){
+        if(Number.isFinite(vv))out.dropped.push({band:bk,stage:"vi",vi:round(vv,2),reason:"vi outside ["+S2_VI_LEARN_STORAGE_MIN+","+S2_VI_LEARN_STORAGE_MAX+"]"});
+        continue;
+      }
+      vseen.add(bk);
+      out.viBuckets.push({bandLo:round(lo,4),bandHi:round(hi,4),vi:round(vv,2),n:Math.max(1,Math.floor(Number(v.n)||1)),
+        lastDeviation:finiteOrNull(v.lastDeviation)!==null?round(Number(v.lastDeviation),4):null,
+        lastObservedVi:finiteOrNull(v.lastObservedVi)!==null?round(Number(v.lastObservedVi),2):null,
+        lastLocalVi:finiteOrNull(v.lastLocalVi)!==null?round(Number(v.lastLocalVi),2):null,
+        damped:!!v.damped,censored:!!v.censored,
+        censoredN:Math.max(0,Math.floor(Number(v.censoredN)||0)),
+        lastRunId:v.lastRunId==null?null:String(v.lastRunId),updatedAt:v.updatedAt||null,
+        fpKey:typeof v.fpKey==="string"?v.fpKey:null,
+        floodMode:typeof v.floodMode==="string"?v.floodMode:null});
+    }
+    out.viBuckets.sort((a,b)=>String(b.updatedAt||"").localeCompare(String(a.updatedAt||"")));
+    out.viBuckets=out.viBuckets.slice(0,S2_VI_BANDS.length);
     out.updatedAt=raw.updatedAt||null;
     return out;
   }
@@ -1839,37 +1854,33 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
     if(n>=2)return "MEDIUM";
     return "LOW";
   }
-  // 2.2.59 d: read-side routing. At the stage2-entry decision the S2 tail
-  // signature does not exist yet, so route by lastBucketId (previous cup's
-  // bucket, Q10 era-switch first cup keeps the old prior); the regime signature
-  // overrides once it exists (cup end / offline replay). FULL fpKey gate (Q7):
-  // mismatch -> LOW (law fallback), stored row untouched.
+  // 2.2.59 d-B (key B): map a soakP2sRatio to its band ([lo,hi), last inclusive).
+  function viBandFor(ratio) {
+    if(!(ratio>=S2_REFILL_VI_RATIO_MIN&&ratio<=S2_REFILL_VI_RATIO_MAX))return null;
+    for(let i=0;i<S2_VI_BANDS.length;i++){const b=S2_VI_BANDS[i];
+      if(ratio>=b[0]&&(ratio<b[1]||(i===S2_VI_BANDS.length-1&&ratio<=b[1])))return b;}
+    return null;
+  }
+  // 2.2.59 d-B (key B): route by the current cup soakP2sRatio band -- the law
+  // input domain, available at the stage2-entry decision (no regime signature,
+  // no lastBucket lag, no cross-era same-signature mixing). Empty band -> null
+  // -> law b prior (Q10 first cup). FULL fpKey gate (Q7): mismatch -> LOW.
   function viMemorySuggestion(run) {
     const memory=gainMemoryState(false);
-    if(!memory)return null;
-    const regime=gainRegimeForRun(run);
-    let bucket=null,routedBy=null;
-    if(regime){
-      bucket=run&&run.gainMemoryBucketId?memory.buckets.find(x=>x.id===run.gainMemoryBucketId):null;
-      if(!bucket)bucket=selectGainBucket(memory,regime.signature).bucket;
-      routedBy="regime";
-    }else{
-      bucket=memory.lastBucketId?memory.buckets.find(x=>x.id===memory.lastBucketId):null;
-      routedBy="last-bucket";
-      if(!bucket){
-        const hint=s1OutflowHint(run);
-        if(hint&&hint.candidate==="high"){bucket=memory.buckets.slice().sort((a,b)=>Number(b.center)-Number(a.center))[0]||null;routedBy="s1-hint";}
-      }
-    }
-    if(!bucket||!bucket.vi||!(Number(bucket.vi.vi)>0))return null;
-    const row=bucket.vi;
+    if(!memory||!Array.isArray(memory.viBuckets))return null;
+    const obs=soakWettingObservation(run);
+    if(!obs||obs.available!==true)return null;
+    const band=viBandFor(Number(obs.soakP2sRatio));
+    if(!band)return null;
+    const row=memory.viBuckets.find(x=>x.bandLo===band[0]&&x.bandHi===band[1]);
+    if(!row||!(Number(row.vi)>0))return null;
     const fpKey=adaptiveHistoryFingerprintKey(adaptiveHistoryFingerprint());
     const fpMatch=!!fpKey&&row.fpKey===fpKey;
     let confidence=viConfidence(row);
-    if(!fpMatch||routedBy==="s1-hint")confidence="LOW";
-    return {bucketId:bucket.id,routedBy,vi:round(Number(row.vi),2),n:Number(row.n)||1,confidence,
+    if(!fpMatch)confidence="LOW";
+    return {bandLo:band[0],bandHi:band[1],routedBy:"ratio-band",vi:round(Number(row.vi),2),n:Number(row.n)||1,confidence,
       fpKeyMatch:fpMatch,deviationPct:row.lastDeviation==null?null:round(row.lastDeviation*100,1),
-      censored:!!row.censored,censoredN:Number(row.censoredN)||0,lastRunId:row.lastRunId||null,stale:!regime};
+      censored:!!row.censored,censoredN:Number(row.censoredN)||0,lastRunId:row.lastRunId||null,stale:false};
   }
   // 2.2.59 d: cup-end Vi_obs measurement + seven quality gates (Q2/Q5/Q6/Q8).
   // Vi_obs = wetLat_onset x flood_actual (trace boost commandMlS, not the plan);
@@ -1927,56 +1938,51 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
       neg,dt0,cluster,damped:neg>0||dt0>0,onsetStartMs:Number(onset.startMs),boostTMs:Number(boost.tMs),
       floodMode:String(plan.floodMode||"adaptive")};
   }
-  // 2.2.59 d: asymmetric EWMA update (Q2) into the shared g bucket (Q1). The r
-  // update runs first and is untouched; Vi maintains centre/radius only when r
-  // did not touch the bucket this cup (vi-only buckets still track their regime).
-  // fpKey change -> reseed n=1 (Q7: ~3 cups to re-mature, law covers the gap).
+  // 2.2.59 d-B (key B): asymmetric EWMA update (Q2) into the ratio-band viBucket.
+  // Independent of the r g buckets (no regime, no centre/radius, no lastBucketId
+  // mutation -- r mechanism untouched). Same-band era drift relies on the dev
+  // gate + asymmetric absorption. fpKey change -> reseed n=1 (Q7: ~3 cups to
+  // re-mature, law covers the gap).
   function updateViMemoryFromRun(run,evidence) {
     const o=viObservation(run);
     if(!o.ok)return {status:"rejected",reason:o.reason};
-    const regime=gainRegimeForRun(run);
-    if(!regime)return {status:"no-regime",reason:"S2 late pressure/machine-flow signature unavailable",observation:o};
+    const band=viBandFor(o.ratio);
+    if(!band)return {status:"rejected",reason:"vi-extrapolated"};
     const memory=gainMemoryState(true);
     if(!memory)return null;
-    const selected=selectGainBucket(memory,regime.signature);
-    const scratch=!selected.bucket&&!selected.absorb;
-    const bucket=selected.bucket||selected.absorb||createGainBucket(memory,regime.signature);
+    if(!Array.isArray(memory.viBuckets))memory.viBuckets=[];
     const now=new Date().toISOString();
     const fpKey=adaptiveHistoryFingerprintKey(adaptiveHistoryFingerprint());
-    const prior=bucket.vi;
-    const fpChanged=!!(prior&&prior.fpKey&&fpKey&&prior.fpKey!==fpKey);
+    let row=memory.viBuckets.find(x=>x.bandLo===band[0]&&x.bandHi===band[1]);
+    const fpChanged=!!(row&&row.fpKey&&fpKey&&row.fpKey!==fpKey);
     let alpha=null,deviation=null,seeded=false;
-    if(!prior||!(Number(prior.vi)>0)||fpChanged){
-      bucket.vi={vi:o.viObs,n:1,lastDeviation:null,lastObservedVi:o.viObs,lastLocalVi:null,
+    if(!row||!(Number(row.vi)>0)||fpChanged){
+      const fresh={bandLo:band[0],bandHi:band[1],vi:o.viObs,n:1,lastDeviation:null,lastObservedVi:o.viObs,lastLocalVi:null,
         damped:o.damped,censored:o.censored,censoredN:o.censored?1:0,
         lastRunId:run.runId,updatedAt:now,fpKey,floodMode:o.floodMode};
+      if(row){Object.assign(row,fresh);}else{memory.viBuckets.push(fresh);row=fresh;}
       seeded=true;
     }else{
-      deviation=Math.abs(o.viObs-prior.vi)/prior.vi;
-      const up=o.viObs>prior.vi;
+      deviation=Math.abs(o.viObs-row.vi)/row.vi;
+      const up=o.viObs>row.vi;
       alpha=up?S2_VI_LEARN_ALPHA_UP:S2_VI_LEARN_ALPHA_DOWN;
-      if(deviation>GAIN_MEMORY_DEVIATION){alpha=up?S2_VI_LEARN_DEV_ALPHA_UP:S2_VI_LEARN_DEV_ALPHA_DOWN;prior.lastLocalVi=o.viObs;}
+      if(deviation>GAIN_MEMORY_DEVIATION){alpha=up?S2_VI_LEARN_DEV_ALPHA_UP:S2_VI_LEARN_DEV_ALPHA_DOWN;row.lastLocalVi=o.viObs;}
       if(o.damped)alpha=alpha*0.5;
       if(o.censored)alpha=alpha*0.5;
-      prior.vi=round(prior.vi+alpha*(o.viObs-prior.vi),2);
-      prior.n=(Number(prior.n)||1)+1;
-      prior.lastDeviation=round(deviation,4);
-      prior.lastObservedVi=o.viObs;
-      prior.damped=o.damped;
-      prior.censored=o.censored;
-      prior.censoredN=(Number(prior.censoredN)||0)+(o.censored?1:0);
-      prior.lastRunId=run.runId;prior.updatedAt=now;prior.fpKey=fpKey;prior.floodMode=o.floodMode;
+      row.vi=round(row.vi+alpha*(o.viObs-row.vi),2);
+      row.n=(Number(row.n)||1)+1;
+      row.lastDeviation=round(deviation,4);
+      row.lastObservedVi=o.viObs;
+      row.damped=o.damped;
+      row.censored=o.censored;
+      row.censoredN=(Number(row.censoredN)||0)+(o.censored?1:0);
+      row.lastRunId=run.runId;row.updatedAt=now;row.fpKey=fpKey;row.floodMode=o.floodMode;
     }
-    if(run.gainMemoryBucketId!==bucket.id){
-      bucket.samples=(Array.isArray(bucket.samples)?bucket.samples.slice(-(GAIN_MEMORY_SIGNATURE_SAMPLES-1)):[]).concat([round(regime.signature,4)]);
-      bucket.center=round(median(bucket.samples),4);
-      bucket.radius=round(gainBucketRadius(bucket.samples),4);
-    }
-    memory.lastBucketId=bucket.id;memory.updatedAt=now;bucket.updatedAt=now;
-    if(!run.gainMemoryBucketId)run.gainMemoryBucketId=bucket.id;
-    const row=bucket.vi;
-    return {status:seeded?"seeded":"updated",bucketId:bucket.id,bucketCreated:scratch,absorbed:!!selected.absorb,
-      signature:regime.signature,vi:row.vi,n:row.n,observedVi:o.viObs,wetLatS:o.wetLatS,floodMlS:o.floodMlS,
+    memory.viBuckets.sort((a,b)=>String(b.updatedAt||"").localeCompare(String(a.updatedAt||"")));
+    if(memory.viBuckets.length>S2_VI_BANDS.length)memory.viBuckets=memory.viBuckets.slice(0,S2_VI_BANDS.length);
+    memory.updatedAt=now;
+    return {status:seeded?"seeded":"updated",bandLo:band[0],bandHi:band[1],
+      vi:row.vi,n:row.n,observedVi:o.viObs,wetLatS:o.wetLatS,floodMlS:o.floodMlS,
       deviationPct:row.lastDeviation==null?null:round(row.lastDeviation*100,1),alpha,
       confidence:viConfidence(row),censored:o.censored,censoredN:row.censoredN,damped:o.damped,
       fpKeyReset:fpChanged,floodMode:o.floodMode,lastRunId:row.lastRunId};
@@ -3347,7 +3353,7 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
     if(signaled&&!viExtrapolated){
       const sug=viMemorySuggestion(run);
       if(sug){
-        viLearning={bucketId:sug.bucketId,routedBy:sug.routedBy,viLearnedMl:sug.vi,n:sug.n,
+        viLearning={bandLo:sug.bandLo,bandHi:sug.bandHi,routedBy:sug.routedBy,viLearnedMl:sug.vi,n:sug.n,
           confidence:sug.confidence,fpKeyMatch:sug.fpKeyMatch,deviationPct:sug.deviationPct,
           censoredN:sug.censoredN,lastRunId:sug.lastRunId,blend:0};
         if(sug.fpKeyMatch&&sug.confidence==="HIGH"){vi=sug.vi;viUsedSource="learned-high";viLearning.blend=1;}
@@ -4504,12 +4510,12 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
     if(!body.gainMemory||typeof body.gainMemory!=="object"||!Array.isArray(body.gainMemory.buckets))throw new Error("gainMemory snapshot with buckets required");
     const normalized=normalizeGainMemory(body.gainMemory);
     if(Array.isArray(normalized.dropped)&&normalized.dropped.length)throw new Error("Snapshot rejected by normalizeGainMemory: "+JSON.stringify(normalized.dropped));
-    if(!normalized.buckets.length)throw new Error("Snapshot has no valid buckets");
+    if(!normalized.buckets.length&&!(normalized.viBuckets||[]).length)throw new Error("Snapshot has no valid buckets");
     const file=state.persistentHistoryFile;
     const live=gainMemoryState(false);
     if(!live||!Array.isArray(live.buckets))throw new Error("No live gain memory to restore");
-    // 2.2.59 d (Q11): a Vi-only bad cup must be undoable too.
-    const contributed=live.buckets.some(b=>b&&((b.stages&&b.stages.s2&&b.stages.s2.lastRunId===body.excludeRunId)||(b.vi&&b.vi.lastRunId===body.excludeRunId)));
+    // 2.2.59 d-B (Q11): a Vi-only bad cup must be undoable too (viBuckets).
+    const contributed=live.buckets.some(b=>b&&b.stages&&b.stages.s2&&b.stages.s2.lastRunId===body.excludeRunId)||(live.viBuckets||[]).some(v=>v.lastRunId===body.excludeRunId);
     if(!contributed)throw new Error("excludeRunId is not the latest s2 or vi contributor of any bucket; nothing to undo");
     const row=(file.shots||[]).find(x=>x&&x.runId===body.excludeRunId);
     if(!row)throw new Error("History record not found for excludeRunId");
@@ -4533,8 +4539,8 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
   }
   function gainMemoryRestoreSummary(gm){
     const stage=s=>s?{r:s.r,n:s.n,deviationPct:s.lastDeviation==null?null:round(s.lastDeviation*100,1),confidence:gainConfidence(s),lastRunId:s.lastRunId}:null;
-    const vi=v=>v?{vi:v.vi,n:v.n,deviationPct:v.lastDeviation==null?null:round(v.lastDeviation*100,1),confidence:viConfidence(v),lastRunId:v.lastRunId,fpKey:v.fpKey||null}:null;
-    return {seq:gm.seq,lastBucketId:gm.lastBucketId,updatedAt:gm.updatedAt,buckets:(gm.buckets||[]).map(b=>({id:b.id,center:b.center,radius:b.radius,s2:stage(b.stages&&b.stages.s2),s3:stage(b.stages&&b.stages.s3),vi:vi(b.vi)}))};
+    const vi=v=>v?{bandLo:v.bandLo,bandHi:v.bandHi,vi:v.vi,n:v.n,deviationPct:v.lastDeviation==null?null:round(v.lastDeviation*100,1),confidence:viConfidence(v),lastRunId:v.lastRunId,fpKey:v.fpKey||null}:null;
+    return {seq:gm.seq,lastBucketId:gm.lastBucketId,updatedAt:gm.updatedAt,buckets:(gm.buckets||[]).map(b=>({id:b.id,center:b.center,radius:b.radius,s2:stage(b.stages&&b.stages.s2),s3:stage(b.stages&&b.stages.s3)})),viBuckets:(gm.viBuckets||[]).map(vi)};
   }
 
   function trustedAdaptiveRun(run) {

@@ -21,7 +21,7 @@ const injection=`globalThis.hooks={controlQualityGood,recoveryTimeEstimate,norma
  testOverrideBinding,recordNextShotApplied,buildSkinSurfaceAnswer,refreshLearningStage,commandFlowSummary,baselineFeedForwardPayload,buildGhcOverlayHtml,stageActuatorEvidence,adaptiveAuditPayload,autoApplyNextShotIfEligible,testOverrideStatus,resetSequence,startSequence,s3StepLimit,snapCommandFlow,soakWettingObservation,refillAdaptiveFloodDecision,adaptiveReplanAtStage2Entry,applyNextShotAdaptiveSuggestion,extractMachine,profilesEquivalent,profileExecutionEquivalent,profileExecutionDifferences,
  workflowBrewTemperature,adoptWorkflowBrewTemperature,controlRunReview,controlLearningAssessment,stageGainEstimate,initializeLiveTrim,startLiveTrim,liveTrimTick,stopLiveTrim,observeLiveTrimMachine,encodeLiveFlowFrame,liveTrimLearningView,liveTrimRegression,commandCeilingFor,computeAngleStats,emptyGainMemory,normalizeGainMemory,gainMemoryState,gainRegimeForRun,s1OutflowHint,selectGainBucket,createGainBucket,gainStageObservation,updateGainMemoryFromRun,gainMemorySuggestion,adaptiveEstimateFallback,ffKQualified,s2FfPlatformCandidate,restoreDiagnosticLastFromPersistentFile,mergeCalibrationMap,adoptCalibrationMap,qualificationFingerprintKey,applyPendingPreset,presetsPayload,savePresetSlot,rescaleOverridesForTargets,diagnosticCsv,
  beginSoak,beginAutoRelease,finishAutoSoak,beginDirectStartTest,restartPourConfirmed,startRestartPoll,manualRearmSecondStage,directStartTestPayload,advancedSettingsFromCfg,uiStatusPayload,releaseMode,normalizeReleaseMode,profileLayoutForMode,profileLayoutForProfile,logicalFrameForPhysical,physicalFrameForLogical,runProfileLayout,profileTitleForMode,isHyperExProfileTitle,profileCommandSummaryFromProfile,
- enterHyperExScopedMultiplier,restoreHyperExScopedMultiplier,gainStageObservation,soakWettingObservation,scaleSampleGate,viConfidence,viMemorySuggestion,viObservation,updateViMemoryFromRun,setApi(fn){api=fn;}};\n`;
+ enterHyperExScopedMultiplier,restoreHyperExScopedMultiplier,gainStageObservation,soakWettingObservation,scaleSampleGate,viConfidence,viBandFor,viMemorySuggestion,viObservation,updateViMemoryFromRun,setApi(fn){api=fn;}};\n`;
  const token='  return {\n    id: ID,';assert(source.includes(token));
  vm.runInContext(source.replace(token,injection+token),context);plugin=context.createPlugin(host);h=context.hooks;
  const s=h.state;const initialLanguage=s.uiLanguage;s.uiLanguage=options.uiLanguage||"en";s.cfg=h.loadConfig({ActiveRelease:options.releaseMode||"on",AdaptiveLearningLevel:"保守",LiveFlowTrimTest:false,LiveFlowTrimLevel:1});s.cfg.liveTrimDecisionModel=false;s.cfg.s3DriftModel=false;s.cfg.s2RefillBoundedModel=false;s.cfg.basketContext='empty';s.scopeMode='off';s.calibrationStorageLoaded=true;s.overrideStorageLoaded=true;s.scopeStorageLoaded=true;s.scopedOriginalStorageLoaded=true;
@@ -3999,18 +3999,22 @@ function viLawPlan(e,ratio,patch){
  const run={runId:'vi-law-run',rawScaleSamples:ratio==null?[]:soakSignature(ratio)};
  return e.h.stage2StartupPlan(undefined,run).adaptiveFlood;
 }
-function viRow(e){const m=e.h.gainMemoryState(false);const b=m&&m.buckets.find(x=>x.vi);return b?b.vi:null;}
+function viRow(e,lo,hi){const m=e.h.gainMemoryState(false);const L=lo==null?0.4:lo,H=hi==null?0.6:hi;return (m.viBuckets||[]).find(x=>x.bandLo===L&&x.bandHi===H)||null;}
 function vround(x){return Math.round(x*100)/100;}
-test('2.2.59 d normalizeGainMemory validates the vi row band and keeps vi-only buckets (r mechanism untouched)',()=>{
+test('2.2.59 d-B normalizeGainMemory validates viBuckets bands and tolerates old A-format rows (r mechanism untouched)',()=>{
  const e=setup();
- const mk=vi=>({schema:1,buckets:[{id:'g1',center:.4,radius:.12,stages:{},vi}]});
+ const mk=vi=>({schema:1,buckets:[],viBuckets:[Object.assign({bandLo:0.4,bandHi:0.6},vi)]});
  const ok=e.h.normalizeGainMemory(mk({vi:26.64,n:3,lastDeviation:0.08,lastObservedVi:27.1,fpKey:'fp',floodMode:'adaptive',censoredN:1}));
- assert.equal(ok.buckets.length,1,'vi-only bucket survives');assert.equal(ok.buckets[0].vi.vi,26.64);assert.equal(ok.buckets[0].vi.n,3);assert.equal(ok.buckets[0].vi.fpKey,'fp');assert.equal(ok.dropped.length,0);
- for(const bad of [11.9,40.1,0.28,157]){const m=e.h.normalizeGainMemory(mk({vi:bad,n:2}));assert.equal(m.buckets.length,0,'out-of-band vi dropped: '+bad);assert(m.dropped.some(d=>d.stage==='vi'),'dropped records the vi failure: '+bad);}
+ assert.equal(ok.viBuckets.length,1,'viBucket survives');assert.equal(ok.viBuckets[0].vi,26.64);assert.equal(ok.viBuckets[0].n,3);assert.equal(ok.viBuckets[0].fpKey,'fp');assert.equal(ok.viBuckets[0].bandLo,0.4);assert.equal(ok.dropped.length,0);
+ for(const bad of [11.9,40.1,0.28,157]){const m=e.h.normalizeGainMemory(mk({vi:bad,n:2}));assert.equal(m.viBuckets.length,0,'out-of-band vi dropped: '+bad);assert(m.dropped.some(d=>d.stage==='vi'),'dropped records the vi failure: '+bad);}
+ const badBand=e.h.normalizeGainMemory({schema:1,viBuckets:[{bandLo:0.1,bandHi:0.3,vi:16,n:2},{bandLo:0.5,bandHi:0.4,vi:16,n:2}]});
+ assert.equal(badBand.viBuckets.length,0,'bands outside support / inverted rejected');
  const legacy=e.h.normalizeGainMemory({schema:1,buckets:[{id:'g1',center:.4,radius:.12,stages:{s2:{r:1.29,n:4}}}]});
- assert.equal(legacy.buckets[0].vi,null,'old files without vi normalize to null');assert.equal(legacy.buckets[0].stages.s2.r,1.29,'r row untouched');
- const both=e.h.normalizeGainMemory({schema:1,buckets:[{id:'g1',center:.4,radius:.12,stages:{s2:{r:1.29,n:4}},vi:{vi:16,n:2}}]});
- assert.equal(both.buckets[0].stages.s2.r,1.29);assert.equal(both.buckets[0].vi.vi,16);
+ assert.equal(legacy.viBuckets.length,0,'old files without viBuckets normalize to empty');assert.equal(legacy.buckets[0].stages.s2.r,1.29,'r row untouched');assert.equal(legacy.buckets[0].vi,undefined,'A-key g-bucket vi field removed');
+ const oldA=e.h.normalizeGainMemory({schema:1,buckets:[{id:'g1',center:.4,radius:.12,stages:{},vi:{vi:16,n:2}}]});
+ assert.equal(oldA.buckets.length,0,'old A vi-only bucket dropped tolerantly (no live data)');assert.equal(oldA.viBuckets.length,0);
+ const both=e.h.normalizeGainMemory({schema:1,buckets:[{id:'g1',center:.4,radius:.12,stages:{s2:{r:1.29,n:4}}}],viBuckets:[{bandLo:0.4,bandHi:0.6,vi:16,n:2}]});
+ assert.equal(both.buckets[0].stages.s2.r,1.29);assert.equal(both.viBuckets[0].vi,16,'r g bucket and viBucket coexist independently');
 });
 test('2.2.59 d viObservation seven gates: clean cup learns, every fault path rejects with a reason',()=>{
  const e=viPrep(normalEnv());
@@ -4097,13 +4101,13 @@ test('2.2.59 d confidence tiers and consumption: HIGH full / MEDIUM half-blend /
  assert.equal(a.viUsedSource,'learned-high','n=3 dev<=15% HIGH');
  assert.equal(a.viMl,viRow(e).vi,'HIGH consumes the learned value in full');
  assert(a.viMl>=15&&a.viMl<=40,'used band');assert(a.viLawMl>=15&&a.viLawMl<=36,'law clamp untouched');
- assert.equal(a.viLearning.blend,1);assert.equal(a.viLearning.fpKeyMatch,true);assert(a.viLearning.bucketId);
+ assert.equal(a.viLearning.blend,1);assert.equal(a.viLearning.fpKeyMatch,true);assert.equal(a.viLearning.bandLo,0.4);assert.equal(a.viLearning.bandHi,0.6);
  const e2=viPrep(normalEnv());
  viFeed(e2,{id:'vi-lo1',wetLatS:2.2,flood:6});viFeed(e2,{id:'vi-lo2',wetLatS:2.22,flood:6});viFeed(e2,{id:'vi-lo3',wetLatS:2.21,flood:6});
  const lo=viLawPlan(e2,0.55);
  assert.equal(lo.viMl,15,'learned 12-ish is lifted to the law floor 15 (Q4 no under-extraction)');
  const e3=viPrep(normalEnv());
- viFeed(e3,{id:'vi-hi1',wetLatS:6.5,flood:6,closeS:7.5});viFeed(e3,{id:'vi-hi2',wetLatS:6.5,flood:6,closeS:7.5});viFeed(e3,{id:'vi-hi3',wetLatS:6.5,flood:6,closeS:7.5});
+ viFeed(e3,{id:'vi-hi1',ratio:0.25,wetLatS:6.5,flood:6,closeS:7.5});viFeed(e3,{id:'vi-hi2',ratio:0.25,wetLatS:6.5,flood:6,closeS:7.5});viFeed(e3,{id:'vi-hi3',ratio:0.25,wetLatS:6.5,flood:6,closeS:7.5});
  const hi=viLawPlan(e3,0.25);
  assert(hi.viMl<=40,'used ceiling 40');assert(hi.floodMlS<=8,'hard envelope holds');assert(hi.predictedBoostToBleedS<=hi.holdMs/1000+1e-9,'no silent timeout at the ceiling');
 });
@@ -4144,11 +4148,11 @@ test('2.2.59 d restore undoes a Vi-only bad cup: snapshot rollback + exclusion a
  e.s.pendingHistoryWrite=null;e.s.historyWriteDirty=false;e.flushReads();
  const fpKey=e.h.adaptiveHistoryFingerprintKey(e.h.adaptiveHistoryFingerprint());
  const out=e.h.restoreGainMemoryFromSnapshot({gainMemory:cleanSnap,excludeRunId:'vi-bad',excludeReason:'scale-or-cup-disturbance',fingerprintKey:fpKey});
- assert.equal(out.ok,true);assert.equal(out.after.buckets[0].vi.vi,cleanVi,'vi rolled back to the snapshot');
+ assert.equal(out.ok,true);assert.equal(out.after.viBuckets.find(x=>x.bandLo===0.4).vi,cleanVi,'vi rolled back to the snapshot');
  const rec=e.s.persistentHistoryFile.shots.find(x=>x.runId==='vi-bad');
  assert(rec,'cup record kept');assert.equal(rec.learningReview.excluded,true,'annotated excluded, never deleted');
  assert.throws(()=>e.h.restoreGainMemoryFromSnapshot({gainMemory:cleanSnap,excludeRunId:'vi-r1',excludeReason:'other',fingerprintKey:fpKey}),/contributor/,'non-latest contributor rejected');
- const poisoned=copy(cleanSnap);poisoned.buckets.find(x=>x.vi).vi.vi=41;
+ const poisoned=copy(cleanSnap);poisoned.viBuckets[0].vi=41;
  assert.throws(()=>e.h.restoreGainMemoryFromSnapshot({gainMemory:poisoned,excludeRunId:'vi-bad',excludeReason:'other',fingerprintKey:fpKey}),/Snapshot rejected/,'out-of-band snapshot vi rejected by normalize');
 });
 test('2.2.59 d cup-end hook persists viMemory evidence + vi row atomically; trace carries the consumption source',()=>{
@@ -4160,7 +4164,7 @@ test('2.2.59 d cup-end hook persists viMemory evidence + vi row atomically; trac
  const rec=saved.shots.find(x=>x.runId==='vi-persist');
  assert(rec&&rec.evidence&&rec.evidence.viMemory,'viMemory rides the persisted evidence');
  assert.equal(rec.evidence.viMemory.status,'seeded');
- assert(saved.gainMemory.buckets.some(b=>b.vi&&b.vi.lastRunId==='vi-persist'),'vi row persisted in gainMemory');
+ assert(saved.gainMemory.viBuckets.some(v=>v.lastRunId==='vi-persist'),'viBucket persisted in gainMemory');
  viFeed(e,{id:'vi-p2',wetLatS:2.65,flood:6});viFeed(e,{id:'vi-p3',wetLatS:2.62,flood:6});
  const r2=viRun(e,{id:'vi-trace'});
  e.s.liveTrim={run:{runId:r2.runId,startedAtMs:0},report:{trace:[]}};
@@ -4174,15 +4178,17 @@ test('2.2.59 d cup-end hook persists viMemory evidence + vi row atomically; trac
  e.s.s2RefillSettings={basis:'cup-target',startDelayMs:0,targetPercent:100,cutoffPercent:85,maxDurationMs:4000,approachMs:800,floodMode:'adaptive',floodMaxMlS:7};
  e.h.adaptiveReplanAtStage2Entry(t);
  const sw=t.report.trace.find(x=>x.kind==='soak-wetting');
- assert(sw,'soak-wetting recorded');assert.equal(sw.viUsedSource,'learned-high');assert(sw.viLearning&&sw.viLearning.bucketId);assert(sw.viLawMl>=15&&sw.viLawMl<=36);
+ assert(sw,'soak-wetting recorded');assert.equal(sw.viUsedSource,'learned-high');assert(sw.viLearning&&sw.viLearning.bandLo===0.4);assert(sw.viLawMl>=15&&sw.viLawMl<=36);
 });
-test('2.2.59 d era-switch first cup keeps the old-bucket prior (Q10) and the law structure is untouched',()=>{
+test('2.2.59 d-B band isolation: a new band starts on the law prior (Q10), no cross-band prior leak',()=>{
  const e=viPrep(normalEnv());
  viFeed(e,{id:'vi-era1',wetLatS:4.0,flood:6.8125,closeS:5.0});viFeed(e,{id:'vi-era2',wetLatS:4.05,flood:6.8125,closeS:5.0});viFeed(e,{id:'vi-era3',wetLatS:4.02,flood:6.8125,closeS:5.0});
- const oldVi=viRow(e).vi;
- const a=viLawPlan(e,0.6);
- assert.equal(a.viLearning.routedBy,'last-bucket','stage2 entry routes by the previous cup bucket');
- assert.equal(a.viMl,oldVi,'era-switch first cup consumes the old prior (accepted Q10, safety envelope covers)');
+ const a=viLawPlan(e,0.55);
+ assert.equal(a.viLearning.routedBy,'ratio-band','B routes by the current cup ratio band');
+ assert.equal(a.viMl,viRow(e).vi,'same band consumes the learned value in full');
+ const b=viLawPlan(e,0.25);
+ assert.equal(b.viUsedSource,'law','a new empty band starts on the law b prior (Q10), no leak from the mature band');
+ assert.equal(b.viLearning,null);assert.equal(b.viMl,b.viLawMl);
  assert(a.floodMlS>=3.5&&a.floodMlS<=8);assert(a.holdMs>=2000&&a.holdMs<=7000);
  assert(a.predictedBoostToBleedS<=a.holdMs/1000+1e-9,'no silent timeout');
  assert.equal(a.fcFactor,0);assert.equal(a.riseTargetS,0.8);assert.equal(a.rrQuantile,4.8);
@@ -4192,7 +4198,24 @@ test('2.2.59 d era-switch first cup keeps the old-bucket prior (Q10) and the law
  assert(src.includes('const S2_REFILL_VI_MIN_ML=15;'));assert(src.includes('const S2_REFILL_VI_MAX_ML=36;'));
  assert(src.includes('const S2_REFILL_FC_FACTOR=0;'));
 });
-
+test('2.2.59 d-B band boundaries: viBandFor [lo,hi) membership + ratio-band consumption routing',()=>{
+ const e=viPrep(normalEnv());
+ const b1=e.h.viBandFor(0.399);assert.equal(b1[0],0.2);assert.equal(b1[1],0.4,'0.399 in [0.2,0.4)');
+ const b2=e.h.viBandFor(0.4);assert.equal(b2[0],0.4);assert.equal(b2[1],0.6,'0.4 starts [0.4,0.6)');
+ const b3=e.h.viBandFor(0.6);assert.equal(b3[0],0.6);assert.equal(b3[1],0.8,'0.6 starts [0.6,0.8]');
+ const b4=e.h.viBandFor(0.8);assert.equal(b4[0],0.6);assert.equal(b4[1],0.8,'0.8 inclusive top');
+ assert.equal(e.h.viBandFor(0.81),null,'0.81 outside support');assert.equal(e.h.viBandFor(0.19),null,'0.19 outside support');
+ viFeed(e,{id:'vi-bnd1',ratio:0.3,wetLatS:3.0,flood:6,closeS:4.0});viFeed(e,{id:'vi-bnd2',ratio:0.3,wetLatS:3.05,flood:6,closeS:4.0});viFeed(e,{id:'vi-bnd3',ratio:0.3,wetLatS:3.02,flood:6,closeS:4.0});
+ assert(viRow(e,0.2,0.4),'ratio 0.3 learns into [0.2,0.4)');
+ const lo=viLawPlan(e,0.35);
+ assert.equal(lo.viUsedSource,'learned-high','0.35 stays in [0.2,0.4), consumes');
+ const at=viLawPlan(e,0.45);
+ assert.equal(at.viUsedSource,'law','0.45 in [0.4,0.6), empty -> law');
+ const top=viLawPlan(e,0.7);
+ assert.equal(top.viUsedSource,'law','0.7 in [0.6,0.8], empty -> law');assert.equal(top.viExtrapolated,false);
+ const out=viLawPlan(e,0.9);
+ assert.equal(out.viExtrapolated,true,'0.9 outside support -> flag, law only');
+});
 (async()=>{let failed=0;for(const [name,fn]of tests){try{await fn();console.log('PASS '+name);}catch(err){failed++;console.error('FAIL '+name+'\n'+err.stack);}}console.log(`\n${tests.length-failed}/${tests.length} checks passed`);process.exitCode=failed?1:0;})();
 
 test('write vector arrow sits on the check-to-write trend line while the head follows the command direction',()=>{const s=require('fs').readFileSync(require('path').join(__dirname,'..','plugin.js'),'utf8');const NL=String.fromCharCode(10);const a=s.indexOf('function liveTrimMarkers(');const ns=s.slice(a,s.indexOf(NL,a));const ctx=vm.createContext({Math,Number,esc:v=>String(v??'')});vm.runInContext(ns,ctx);const run={liveFlowTrim:{trace:[{kind:'check',tMs:1000,rawGS:4,targetGS:5},{kind:'write',tMs:1500,commandMlS:2.5,previousMlS:2.4375,rawGS:4.5,targetGS:5}]}};const ms=ctx.liveTrimMarkers(run);assert.equal(ms[1].shape,'up');assert.equal(ms[1].y,4.5);assert(ms[1].label.indexOf('2.5 ml/s')>=0);});

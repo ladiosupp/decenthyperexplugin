@@ -260,6 +260,27 @@ const S2_REFILL_HOLD_MS_MIN=2000;        // user 2026-11-20 watchdog band
 const S2_REFILL_HOLD_MS_MAX=7000;
 const S2_REFILL_HOLD_MARGIN_S=0.6;       // margin over the predicted need
 const S2_REFILL_BOOST_VOLUME_WARN_ML=32; // skill 22.11 water envelope
+// 2.2.59 d (user 2026-11-21 Q1-Q11, memory-touch authorized): per-bucket Vi
+// residual learning on top of the b law. Storage band wider than the law clamp
+// (out-of-band = measurement failure, dropped like GAIN_R); consumption never
+// below the law floor 15 (no under-extraction). Asymmetric EWMA: up fast (under-
+// prediction risk), down slow (safe). FULL fingerprint gate: Vi is a command-ml
+// quantity (wetLat x flood), unlike the r ratio it drifts with recalibration.
+const S2_VI_LEARN_STORAGE_MIN=12;        // ml, Q4 storage band
+const S2_VI_LEARN_STORAGE_MAX=40;        // ml, era headroom above the law max 36
+const S2_VI_LEARN_USED_MIN=15;           // ml, = law floor, Q4 no under-extraction
+const S2_VI_LEARN_USED_MAX=40;           // ml
+const S2_VI_LEARN_ALPHA_UP=0.5;          // Q2 asymmetric
+const S2_VI_LEARN_ALPHA_DOWN=0.15;       // Q2 asymmetric
+const S2_VI_LEARN_DEV_ALPHA_UP=0.55;     // dev>15% era jump, fast absorption
+const S2_VI_LEARN_DEV_ALPHA_DOWN=0.3;    // dev>15% down, still damped
+const S2_VI_LEARN_WETLAT_MIN_S=0.8;      // plausible band (onset caliber)
+const S2_VI_LEARN_WETLAT_MAX_S=8;
+const S2_VI_LEARN_NEG_MAX=2;             // archive calibration: clean 0-2, noise 15-196
+const S2_VI_LEARN_DT0_MAX=5;             // clean 0, noise 46
+const S2_VI_LEARN_CLUSTER_MAX=100;     // sub-60ms stamp gaps (100Hz flush microclusters):
+                                       // 130-cup archive clean max 65, scale-noise cup23 257
+const S2_VI_LEARN_BRIDGE_GAP_S=2;        // stall-level hole in the stage2 scale stream
 // 2.2.57 (scaleSampleGate, user 2026-11-20 "过滤一个可以用的参数写进去"): ingestion
 // gate for the scale samples feeding the INSTANTANEOUS estimates only (oq tail
 // rolling regression / Vb3 instantCross / learning observedR via the oq tail).
@@ -1336,10 +1357,31 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
           bands:(function(){const b={};for(const k of Object.keys(x.bands&&typeof x.bands==="object"?x.bands:{})){const v=x.bands[k],br=Number(v&&v.r);if(!(br>=GAIN_R_MIN&&br<=GAIN_R_MAX))continue;b[k]={r:round(br,4),n:Math.max(1,Math.floor(Number(v.n)||1)),lastObservedR:finiteOrNull(v.lastObservedR)!==null?round(Number(v.lastObservedR),4):null,updatedAt:v.updatedAt||null,steadyN:v.steadyN==null?null:(Number.isFinite(Number(v.steadyN))?Math.max(0,Math.floor(Number(v.steadyN))):null),provisional:v.provisional===true};}return Object.keys(b).length?b:null;})(),
           lastRunId:x.lastRunId==null?null:String(x.lastRunId),updatedAt:x.updatedAt||null};
       }
-      if(!Object.keys(stages).length)continue;
+      // 2.2.59 d (Q1/Q4/Q11): per-bucket Vi row, parallel to stages.s2/s3 (the r
+      // mechanism is untouched). A vi-only bucket survives: a cup can learn Vi
+      // without an r observation. Old files without vi normalize to vi=null.
+      let vi=null;
+      const vraw=row.vi;
+      if(vraw&&typeof vraw==="object"){
+        const vv=Number(vraw.vi);
+        if(Number.isFinite(vv)&&vv>=S2_VI_LEARN_STORAGE_MIN&&vv<=S2_VI_LEARN_STORAGE_MAX){
+          vi={vi:round(vv,2),n:Math.max(1,Math.floor(Number(vraw.n)||1)),
+            lastDeviation:finiteOrNull(vraw.lastDeviation)!==null?round(Number(vraw.lastDeviation),4):null,
+            lastObservedVi:finiteOrNull(vraw.lastObservedVi)!==null?round(Number(vraw.lastObservedVi),2):null,
+            lastLocalVi:finiteOrNull(vraw.lastLocalVi)!==null?round(Number(vraw.lastLocalVi),2):null,
+            damped:!!vraw.damped,censored:!!vraw.censored,
+            censoredN:Math.max(0,Math.floor(Number(vraw.censoredN)||0)),
+            lastRunId:vraw.lastRunId==null?null:String(vraw.lastRunId),updatedAt:vraw.updatedAt||null,
+            fpKey:typeof vraw.fpKey==="string"?vraw.fpKey:null,
+            floodMode:typeof vraw.floodMode==="string"?vraw.floodMode:null};
+        }else if(Number.isFinite(vv)){
+          out.dropped.push({bucketId:id,stage:"vi",vi:round(vv,2),reason:"vi outside ["+S2_VI_LEARN_STORAGE_MIN+","+S2_VI_LEARN_STORAGE_MAX+"]"});
+        }
+      }
+      if(!Object.keys(stages).length&&!vi)continue;
       seen.add(id);
       out.buckets.push({id,center:round(center,4),radius:Number.isFinite(radius)&&radius>0?round(radius,4):GAIN_MEMORY_BUCKET_RADIUS,
-        samples:samples.length?samples:[round(center,4)],stages,createdAt:row.createdAt||null,updatedAt:row.updatedAt||null});
+        samples:samples.length?samples:[round(center,4)],stages,vi,createdAt:row.createdAt||null,updatedAt:row.updatedAt||null});
     }
     out.buckets=out.buckets.slice(0,GAIN_MEMORY_MAX_BUCKETS);
     out.dropped=out.dropped.slice(-20);
@@ -1787,6 +1829,157 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
       commandBand:stateRow.commandBand||null,currentBand:commandBandOf(command),
       crossBand,bandProvisional:!!(bandRowRaw&&bandRowRaw.provisional===true),baseBand:baseBand||null,
       sourceRunId:stateRow.lastRunId||null,s1Hint:hint||null,hintApplied:!!hintBucket,applied:false};
+  }
+  // 2.2.59 d: Vi confidence tiers (gainConfidence同款, censored caps MEDIUM Q5).
+  function viConfidence(v) {
+    if(!v||!(Number(v.vi)>0))return "LOW";
+    const n=Number(v.n)||1,dev=Number(v.lastDeviation);
+    if(v.censored)return n>=2?"MEDIUM":"LOW";
+    if(n>=3&&(!Number.isFinite(dev)||dev<=GAIN_MEMORY_DEVIATION))return "HIGH";
+    if(n>=2)return "MEDIUM";
+    return "LOW";
+  }
+  // 2.2.59 d: read-side routing. At the stage2-entry decision the S2 tail
+  // signature does not exist yet, so route by lastBucketId (previous cup's
+  // bucket, Q10 era-switch first cup keeps the old prior); the regime signature
+  // overrides once it exists (cup end / offline replay). FULL fpKey gate (Q7):
+  // mismatch -> LOW (law fallback), stored row untouched.
+  function viMemorySuggestion(run) {
+    const memory=gainMemoryState(false);
+    if(!memory)return null;
+    const regime=gainRegimeForRun(run);
+    let bucket=null,routedBy=null;
+    if(regime){
+      bucket=run&&run.gainMemoryBucketId?memory.buckets.find(x=>x.id===run.gainMemoryBucketId):null;
+      if(!bucket)bucket=selectGainBucket(memory,regime.signature).bucket;
+      routedBy="regime";
+    }else{
+      bucket=memory.lastBucketId?memory.buckets.find(x=>x.id===memory.lastBucketId):null;
+      routedBy="last-bucket";
+      if(!bucket){
+        const hint=s1OutflowHint(run);
+        if(hint&&hint.candidate==="high"){bucket=memory.buckets.slice().sort((a,b)=>Number(b.center)-Number(a.center))[0]||null;routedBy="s1-hint";}
+      }
+    }
+    if(!bucket||!bucket.vi||!(Number(bucket.vi.vi)>0))return null;
+    const row=bucket.vi;
+    const fpKey=adaptiveHistoryFingerprintKey(adaptiveHistoryFingerprint());
+    const fpMatch=!!fpKey&&row.fpKey===fpKey;
+    let confidence=viConfidence(row);
+    if(!fpMatch||routedBy==="s1-hint")confidence="LOW";
+    return {bucketId:bucket.id,routedBy,vi:round(Number(row.vi),2),n:Number(row.n)||1,confidence,
+      fpKeyMatch:fpMatch,deviationPct:row.lastDeviation==null?null:round(row.lastDeviation*100,1),
+      censored:!!row.censored,censoredN:Number(row.censoredN)||0,lastRunId:row.lastRunId||null,stale:!regime};
+  }
+  // 2.2.59 d: cup-end Vi_obs measurement + seven quality gates (Q2/Q5/Q6/Q8).
+  // Vi_obs = wetLat_onset x flood_actual (trace boost commandMlS, not the plan);
+  // onset = plugin stage2CupOnset (r2>=0.85 / slope / 0.6s gap reset built in).
+  // Computed at cup end only -- no in-shot competing requests (HEC 11-20).
+  function viObservation(run) {
+    const cfg=run&&run.config||{};
+    const fail=reason=>({ok:false,reason});
+    if(cfg.basketContext!=="coffee")return fail("basket-not-coffee");
+    if(!learningRunAllowed(run))return fail("learning-not-allowed");
+    const obs=soakWettingObservation(run);
+    if(!obs||obs.available!==true)return fail("soak:"+(obs&&obs.reason||"unavailable"));
+    const ratio=Number(obs.soakP2sRatio);
+    if(!(ratio>=S2_REFILL_VI_RATIO_MIN&&ratio<=S2_REFILL_VI_RATIO_MAX))return fail("vi-extrapolated");
+    const trace=(run.liveFlowTrim&&Array.isArray(run.liveFlowTrim.trace))?run.liveFlowTrim.trace:[];
+    const boost=trace.find(x=>x&&x.kind==="write"&&x.startupAction==="boost");
+    if(!boost||!(Number(boost.commandMlS)>0)||!Number.isFinite(Number(boost.tMs)))return fail("no-boost-write");
+    const flood=Number(boost.commandMlS);
+    const raw=(run.rawScaleSamples||[]).filter(x=>x&&x.phase==="stage2");
+    let prevStamp=null;
+    for(const x of raw){const st=finiteOrNull(x.scaleTimestampSeconds);if(st===null)continue;
+      if(prevStamp!==null&&st-prevStamp>S2_VI_LEARN_BRIDGE_GAP_S)return fail("bridge-gap");
+      prevStamp=st;}
+    const onset=stage2CupOnset(run);
+    if(!onset.detected)return fail("onset-not-detected");
+    const wetLatS=(Number(onset.startMs)-Number(boost.tMs))/1000;
+    if(!(wetLatS>=S2_VI_LEARN_WETLAT_MIN_S&&wetLatS<=S2_VI_LEARN_WETLAT_MAX_S))return fail("wetlat-band");
+    // Q9 reservation: FC_FACTOR>0 -> Vi_obs = wetLat x (flood - fc). FC0 today.
+    const platform=Number(cfg.stage2CommandMlS)>0?Number(cfg.stage2CommandMlS):0;
+    const fc=S2_REFILL_FC_FACTOR*platform;
+    const viObs=wetLatS*Math.max(0.2,flood-fc);
+    if(!(viObs>=S2_VI_LEARN_STORAGE_MIN&&viObs<=S2_VI_LEARN_STORAGE_MAX))return fail("vi-band");
+    // Post-hoc scale noise counts: onset reads raw weight by design (the 2.2.57
+    // gate protects the instantaneous consumers, not this measurement).
+    let neg=0,dt0=0,cluster=0,lastStamp=null,lastW=null;
+    for(const x of run.rawScaleSamples||[]){
+      const st=finiteOrNull(x.scaleTimestampSeconds),w=finiteOrNull(x.weightG);
+      if(st!==null&&lastStamp!==null&&st===lastStamp)dt0++;
+      if(st!==null&&lastStamp!==null&&st>lastStamp&&st-lastStamp<0.06)cluster++;
+      if(w!==null&&lastW!==null&&w<lastW-0.001)neg++;
+      if(st!==null)lastStamp=st;
+      if(w!==null)lastW=w;
+    }
+    if(neg>S2_VI_LEARN_NEG_MAX)return fail("scale-noise-neg");
+    if(dt0>S2_VI_LEARN_DT0_MAX)return fail("scale-noise-dt0");
+    // cup23's pollution is 100Hz flush microclusters (neg 2 / dt0 1 pass the
+    // count gates); the sub-60ms gap count catches it (257 vs clean max 65).
+    if(cluster>S2_VI_LEARN_CLUSTER_MAX)return fail("scale-noise-cluster");
+    const bleed=trace.find(x=>x&&x.kind==="write"&&x.startupAction==="bleed");
+    const complete=trace.find(x=>x&&x.kind==="startup-complete"&&Number(x.frame)===1);
+    const closeMs=bleed&&Number.isFinite(Number(bleed.tMs))?Number(bleed.tMs):(complete&&Number.isFinite(Number(complete.tMs))?Number(complete.tMs):null);
+    const censored=closeMs!==null&&Number(onset.startMs)>closeMs;
+    const plan=cfg.s2StartupPlan||{};
+    return {ok:true,viObs:round(viObs,2),wetLatS:round(wetLatS,3),floodMlS:flood,ratio,censored,
+      neg,dt0,cluster,damped:neg>0||dt0>0,onsetStartMs:Number(onset.startMs),boostTMs:Number(boost.tMs),
+      floodMode:String(plan.floodMode||"adaptive")};
+  }
+  // 2.2.59 d: asymmetric EWMA update (Q2) into the shared g bucket (Q1). The r
+  // update runs first and is untouched; Vi maintains centre/radius only when r
+  // did not touch the bucket this cup (vi-only buckets still track their regime).
+  // fpKey change -> reseed n=1 (Q7: ~3 cups to re-mature, law covers the gap).
+  function updateViMemoryFromRun(run,evidence) {
+    const o=viObservation(run);
+    if(!o.ok)return {status:"rejected",reason:o.reason};
+    const regime=gainRegimeForRun(run);
+    if(!regime)return {status:"no-regime",reason:"S2 late pressure/machine-flow signature unavailable",observation:o};
+    const memory=gainMemoryState(true);
+    if(!memory)return null;
+    const selected=selectGainBucket(memory,regime.signature);
+    const scratch=!selected.bucket&&!selected.absorb;
+    const bucket=selected.bucket||selected.absorb||createGainBucket(memory,regime.signature);
+    const now=new Date().toISOString();
+    const fpKey=adaptiveHistoryFingerprintKey(adaptiveHistoryFingerprint());
+    const prior=bucket.vi;
+    const fpChanged=!!(prior&&prior.fpKey&&fpKey&&prior.fpKey!==fpKey);
+    let alpha=null,deviation=null,seeded=false;
+    if(!prior||!(Number(prior.vi)>0)||fpChanged){
+      bucket.vi={vi:o.viObs,n:1,lastDeviation:null,lastObservedVi:o.viObs,lastLocalVi:null,
+        damped:o.damped,censored:o.censored,censoredN:o.censored?1:0,
+        lastRunId:run.runId,updatedAt:now,fpKey,floodMode:o.floodMode};
+      seeded=true;
+    }else{
+      deviation=Math.abs(o.viObs-prior.vi)/prior.vi;
+      const up=o.viObs>prior.vi;
+      alpha=up?S2_VI_LEARN_ALPHA_UP:S2_VI_LEARN_ALPHA_DOWN;
+      if(deviation>GAIN_MEMORY_DEVIATION){alpha=up?S2_VI_LEARN_DEV_ALPHA_UP:S2_VI_LEARN_DEV_ALPHA_DOWN;prior.lastLocalVi=o.viObs;}
+      if(o.damped)alpha=alpha*0.5;
+      if(o.censored)alpha=alpha*0.5;
+      prior.vi=round(prior.vi+alpha*(o.viObs-prior.vi),2);
+      prior.n=(Number(prior.n)||1)+1;
+      prior.lastDeviation=round(deviation,4);
+      prior.lastObservedVi=o.viObs;
+      prior.damped=o.damped;
+      prior.censored=o.censored;
+      prior.censoredN=(Number(prior.censoredN)||0)+(o.censored?1:0);
+      prior.lastRunId=run.runId;prior.updatedAt=now;prior.fpKey=fpKey;prior.floodMode=o.floodMode;
+    }
+    if(run.gainMemoryBucketId!==bucket.id){
+      bucket.samples=(Array.isArray(bucket.samples)?bucket.samples.slice(-(GAIN_MEMORY_SIGNATURE_SAMPLES-1)):[]).concat([round(regime.signature,4)]);
+      bucket.center=round(median(bucket.samples),4);
+      bucket.radius=round(gainBucketRadius(bucket.samples),4);
+    }
+    memory.lastBucketId=bucket.id;memory.updatedAt=now;bucket.updatedAt=now;
+    if(!run.gainMemoryBucketId)run.gainMemoryBucketId=bucket.id;
+    const row=bucket.vi;
+    return {status:seeded?"seeded":"updated",bucketId:bucket.id,bucketCreated:scratch,absorbed:!!selected.absorb,
+      signature:regime.signature,vi:row.vi,n:row.n,observedVi:o.viObs,wetLatS:o.wetLatS,floodMlS:o.floodMlS,
+      deviationPct:row.lastDeviation==null?null:round(row.lastDeviation*100,1),alpha,
+      confidence:viConfidence(row),censored:o.censored,censoredN:row.censoredN,damped:o.damped,
+      fpKeyReset:fpChanged,floodMode:o.floodMode,lastRunId:row.lastRunId};
   }
   function scalarLearningSuggestion(label,key,current,previous,policy,steadyLarge) {
     const opt={deadbandPct:policy.deadband,maxVariability:policy.rank===0?(key==="s1"?.18:.15):.25,gain:policy.gain,maxFraction:policy[key][0],maxAbs:policy[key][1],
@@ -3142,9 +3335,26 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
     const fc=platform===null?0:S2_REFILL_FC_FACTOR*platform;
     const obs=soakWettingObservation(run);
     const signaled=!!(obs&&obs.available===true);
-    const vi=signaled
+    const viExtrapolated=signaled&&(Number(obs.soakP2sRatio)<S2_REFILL_VI_RATIO_MIN||Number(obs.soakP2sRatio)>S2_REFILL_VI_RATIO_MAX);
+    const viLaw=signaled
       ?Math.min(S2_REFILL_VI_MAX_ML,Math.max(S2_REFILL_VI_MIN_ML,S2_REFILL_VI_A+S2_REFILL_VI_B*Number(obs.soakP2sRatio)))
       :S2_REFILL_VI_FALLBACK_ML;
+    // 2.2.59 d (Q3/Q4/Q7): learned residual consumption -- HIGH full, MEDIUM
+    // half-blend, LOW law; fpKey mismatch -> law; clamp [15,40] never below the
+    // law floor. No soak / extrapolated -> law only, learned value not consumed.
+    // The law structure below is unchanged; vi is the only input that moves.
+    let vi=viLaw,viLearning=null,viUsedSource=signaled?"law":"cold-start-fallback";
+    if(signaled&&!viExtrapolated){
+      const sug=viMemorySuggestion(run);
+      if(sug){
+        viLearning={bucketId:sug.bucketId,routedBy:sug.routedBy,viLearnedMl:sug.vi,n:sug.n,
+          confidence:sug.confidence,fpKeyMatch:sug.fpKeyMatch,deviationPct:sug.deviationPct,
+          censoredN:sug.censoredN,lastRunId:sug.lastRunId,blend:0};
+        if(sug.fpKeyMatch&&sug.confidence==="HIGH"){vi=sug.vi;viUsedSource="learned-high";viLearning.blend=1;}
+        else if(sug.fpKeyMatch&&sug.confidence==="MEDIUM"){vi=0.5*sug.vi+0.5*viLaw;viUsedSource="learned-medium-blend";viLearning.blend=0.5;}
+        vi=Math.min(S2_VI_LEARN_USED_MAX,Math.max(S2_VI_LEARN_USED_MIN,vi));
+      }
+    }
     const budgetS=Math.max(0.3,holdCfg/1000+S2_REFILL_CUTOFF_LEAD_S-riseTarget);
     const fBudget=fc+vi/budgetS;
     const lo=refillFloodFloor(),hi=LIMITS.commandFlowMax;
@@ -3185,8 +3395,8 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
       fRiseMlS:round(fRise,3),fBudgetMlS:round(fBudget,3),binding:binding,
       riseTargetS:riseTarget,rrQuantile:S2_REFILL_RR_QUANTILE,rrMedian:S2_REFILL_RR_MEDIAN,
       cutoffLeadS:S2_REFILL_CUTOFF_LEAD_S,fcFactor:S2_REFILL_FC_FACTOR,fcMlS:round(fc,3),platformMlS:platform,
-      viMl:round(vi,2),viSource:signaled?"soak-p2s-ratio":"cold-start-fallback",
-      viExtrapolated:signaled&&(Number(obs.soakP2sRatio)<S2_REFILL_VI_RATIO_MIN||Number(obs.soakP2sRatio)>S2_REFILL_VI_RATIO_MAX),
+      viMl:round(vi,2),viLawMl:round(viLaw,2),viSource:signaled?"soak-p2s-ratio":"cold-start-fallback",
+      viUsedSource,viLearning,viExtrapolated,
       viRatioSupport:[S2_REFILL_VI_RATIO_MIN,S2_REFILL_VI_RATIO_MAX],
       predictedWetLatencyS:round(Math.max(0,needed+S2_REFILL_CUTOFF_LEAD_S-S2_REFILL_RR_MEDIAN/flood),3),
       predictedRiseS:round(S2_REFILL_RR_MEDIAN/flood,3),predictedBoostToBleedS:round(needed,3),
@@ -3218,6 +3428,7 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
       soakTauES:obs&&obs.soakTauES!=null?obs.soakTauES:null,
       samples:obs&&obs.samples||0,floodMode:before.floodMode||null,applied:before.floodMode==="adaptive",
       viMl:forecast.viMl,viSource:forecast.viSource,fcMlS:forecast.fcMlS,
+      viLawMl:forecast.viLawMl,viUsedSource:forecast.viUsedSource,viLearning:forecast.viLearning,
       lawFloodMlS:forecast.floodMlS,lawHoldMs:forecast.holdMs,lawBinding:forecast.binding,
       currentFloodMlS:round(curFlood,4),predictedBoostToBleedS:round(curNeed,3),
       configuredHoldMs:Number(before.holdMs)||null,
@@ -4297,8 +4508,9 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
     const file=state.persistentHistoryFile;
     const live=gainMemoryState(false);
     if(!live||!Array.isArray(live.buckets))throw new Error("No live gain memory to restore");
-    const contributed=live.buckets.some(b=>b&&b.stages&&b.stages.s2&&b.stages.s2.lastRunId===body.excludeRunId);
-    if(!contributed)throw new Error("excludeRunId is not the latest s2 contributor of any bucket; nothing to undo");
+    // 2.2.59 d (Q11): a Vi-only bad cup must be undoable too.
+    const contributed=live.buckets.some(b=>b&&((b.stages&&b.stages.s2&&b.stages.s2.lastRunId===body.excludeRunId)||(b.vi&&b.vi.lastRunId===body.excludeRunId)));
+    if(!contributed)throw new Error("excludeRunId is not the latest s2 or vi contributor of any bucket; nothing to undo");
     const row=(file.shots||[]).find(x=>x&&x.runId===body.excludeRunId);
     if(!row)throw new Error("History record not found for excludeRunId");
     const before=gainMemoryRestoreSummary(live);
@@ -4321,7 +4533,8 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
   }
   function gainMemoryRestoreSummary(gm){
     const stage=s=>s?{r:s.r,n:s.n,deviationPct:s.lastDeviation==null?null:round(s.lastDeviation*100,1),confidence:gainConfidence(s),lastRunId:s.lastRunId}:null;
-    return {seq:gm.seq,lastBucketId:gm.lastBucketId,updatedAt:gm.updatedAt,buckets:(gm.buckets||[]).map(b=>({id:b.id,center:b.center,radius:b.radius,s2:stage(b.stages&&b.stages.s2),s3:stage(b.stages&&b.stages.s3)}))};
+    const vi=v=>v?{vi:v.vi,n:v.n,deviationPct:v.lastDeviation==null?null:round(v.lastDeviation*100,1),confidence:viConfidence(v),lastRunId:v.lastRunId,fpKey:v.fpKey||null}:null;
+    return {seq:gm.seq,lastBucketId:gm.lastBucketId,updatedAt:gm.updatedAt,buckets:(gm.buckets||[]).map(b=>({id:b.id,center:b.center,radius:b.radius,s2:stage(b.stages&&b.stages.s2),s3:stage(b.stages&&b.stages.s3),vi:vi(b.vi)}))};
   }
 
   function trustedAdaptiveRun(run) {
@@ -4605,6 +4818,13 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
     if (truthVerified && ev) {
       const gainMemory = updateGainMemoryFromRun(run, ev);
       if (gainMemory) ev.gainMemory = gainMemory;
+      // 2.2.59 d (Q11 memory-touch authorized): cup-end Vi residual learning,
+      // same hook as r, persisted with the evidence (atomic file write below).
+      const viMemory = updateViMemoryFromRun(run, ev);
+      if (viMemory) ev.viMemory = viMemory;
+      if (state.liveTrim && state.liveTrim.run && state.liveTrim.run.runId === (run && run.runId)) {
+        liveTrimRecord("vi-learning", viMemory || {status:"rejected",reason:"no-memory"});
+      }
       if (run.summary) run.summary.nextShotAdaptive = nextShotAdaptiveSuggestion(run);
     }
     if (!truthVerified) {

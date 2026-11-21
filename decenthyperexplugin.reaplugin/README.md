@@ -8,6 +8,12 @@ S2 补水 **Vi 律重拟合·裁 b 约束拟合**（用户 11-21 批 Vi 重拟�
 - **测试**：tests/verify_v02259.cjs **927/927**（926 基线＋5 杯素材门交叉；律断言按裁 b 重编码：慢端默认挡预算驱动、clamp 平摊快端弱单调、固定挡记录 Vi 包线断言、回放机制跨度改全集跨度＋紧预算包线饱和；Vd15 通道夹具钉基线 flood 6.4375 隔离 Vi；禁镜像）；sim-regression 5/5；node --check 通过；manifest description 保持 275（§1.15）。
 - **APK 移植同步点**：VI_A/VI_B 新系数（34.057/−32.251）→ shadow/arbiter 等价物（与 2.2.56 新律债合并，full→hec 里程碑）。
 
+**d Vi 杯间学习（同批 2.2.59，用户 11-21 Q1–Q11 全裁＋触记忆授权）**：b 静态律之上按 g 桶学 Vi 残余（gainMemory.buckets[].vi 行与 r 并列，r 机制零改）。杯末 Vi_obs＝stage2CupOnset wetLat×实际 boost commandMlS，七质量门（含微簇<60ms≤100 拒杯23 原始流），非对称 EWMA（up 0.5/down 0.15，dev>15% 0.55/0.3，截尾/微噪减半），置信消费 HIGH 全量/MEDIUM 半混/LOW 律、vi_used 夹[15,40] 不低于律下限，完整指纹门（重标定回律＋reseed），restore 扩 vi 贡献者撤销。冷启动律 b/flood5 不动。详见 [HANDOFF_2026-11-21-vi-learning-impl.md](HANDOFF_2026-11-21-vi-learning-impl.md)。
+
+- **d 验证**：verify_v02259 **937/937**（927＋10 vi 学习套件：七门/非对称 EWMA/置信消费/完整指纹拒/restore vi 撤销/冷启动/截尾/固定挡/真杯交叉，禁镜像；5 杯素材门 rmse 0.086≤0.30 保持）；sim 5/5；130 杯离线顺序回放（律复刻 41 杯零误差）：批1 预测口径 11/11 零静默欠流、25 杯学习注入 rise 地板/包线/hold 全过零 infeasible、当前 4 干净杯（21/22/24/25）Vi 隔离写序列逐字不变；排除核 universe 7（6 在线即拒＋1 离线-only）/integrity/噪点杯全不学。
+- **d 呈报（不硬凑）**：批1 真值口径 4/11 杯残余欠流窗（Q10 首杯旧桶先验＋A 键同签名混桶＋EWMA 滞后，R1 量化——用户 Q1「退 B 须先问」呈裁）；era 过渡窗学习 rmse 0.309（成熟记忆 0.179、律素材门 0.086）；杯23 收口晚 250ms（命令不变，噪点杯非「当前 4 杯」）。
+- **d APK 移植同步点**：桶 vi 行＋七门＋非对称 EWMA＋完整指纹门＋restore 扩展 → shadow/arbiter，full→hec 里程碑（与既有债合并；APK 无 soak 流则 Vi 学习 inert）。
+
 # 2.2.58 experimental
 
 增益记忆**回退维护端点** gain-memory-restore（用户 11-20 批：作为以后类似秤噪点污染情况的永久维护能力；杯23 回滚本身暂缓不执行、污染态保留；改码本批授权，发版/push/tag/装机押后「以后再一起发版」）。新增 guarded REST 端点，把增益记忆恢复到传入的历史快照并排除指定污染杯（标记不删），**只恢复状态，不改任何控制律**；下一杯 base 仍是律输出（随路径变，端点不强制特定数值）。设计依据 [HANDOFF_2026-11-20-cup23-memory-rollback.md](HANDOFF_2026-11-20-cup23-memory-rollback.md)，实施 [HANDOFF_2026-11-20-gain-memory-restore-impl.md](HANDOFF_2026-11-20-gain-memory-restore-impl.md)。

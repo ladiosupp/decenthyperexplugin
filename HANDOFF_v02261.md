@@ -46,3 +46,13 @@ grace：杯末 autoApply 从 250 ms 延到 7000 ms，把整条出站 profile 链
 - 真机陪杯（另批）：中心序列／每笔写／峰秤流／tail／whole；杯29 类与 9401-1 类各 1 杯；关注欠流杯首笔上调幅度与 40% 峰绊线。
 - shadow/APK 同步：`estLiveTrimControlCenter` 与 `commandCeilingFor` 对位（1.25 只 S2 normal），a′ gate 需要 basis＝return+2–4 s 且命中桶。
 
+
+## 8. 发版回执（2026-11-21，2.2.61：grace＋d1）
+
+- **基线**：51ccff2（grace）→ 0de0946（d1）→ 发版批 **b2101ee**（notes＋本交接，代码零改）。tag **v2.2.61**=b2101ee7c4f54ab47631472b78bbaa34e2fe0602（lightweight）。
+- **push**：origin auto-hyperex **74e54f4..b2101ee**＋new tag v2.2.61（VPN 57890）；ls-remote 分支／tag 均=b2101ee。
+- **包**：release/HyperExPulseFilter_v2.2.61.zip **603050 字节**，SHA256 **39477B261C290DD9FA8D6017A527951F1B7A6280AB4FCB8B9CCD9F41A146B75C**（git archive v2.2.61，9 条目同 v2259/v2260 布局，__build_v2261.ps1）；**包内复跑 986/986 EXIT0**＋node --check＋manifest version=2.2.61 descLen=397。
+- **GitHub Release**：**453572358**（tag v2.2.61，draft=false，prerelease=false，latest=v2.2.61），asset HyperExPulseFilter_v2.2.61.zip（603050 字节，state=**uploaded**，asset id **775033792**／node_id RA_kwDOVO5zXc4uMhPA）。REST POST releases＋uploads 直传（token credential fill 不回显，代理 57890），body=release/notes-v2.2.61.md。
+- **夸克**：「夸克网盘/来自：Codex」fileId **419711529e9e4da99c6a742da194593c**（603050 字节，instantUpload=false 非秒传；result 无 notice）。
+- **平板**：adb mDNS adb-haf6uwvcqcdujzin-trqoCZ（192.168.31.15:44439）推 `/sdcard/Download/HyperExPulseFilter_v2.2.61.zip`，ls 核 **603050** 字节（2026-11-21 17:14）；**不代装，用户 Decaid 自装**。
+- **说明**：包内交接是 §1–§7 版本，本回执在发版后的独立 commit（沿 v2259／v2260 先例，避免包内自指）。发版批代码零改；别人 WIP HANDOFF_2026-10-31.md 未碰。

@@ -3,7 +3,7 @@
   "author": "ladiosupp",
   "name": "HyperEx Pulse Filter",
   "description": "Adaptive three-stage flow controller for the Decent DE1. Maps pump commands to cup flow, holds S1/S2/S3 targets with predictive live trim, and learns bounded next-shot adjustments per resistance bucket. New: soak-band Vi learning for refill (per-ratio-band memory, no-under-extraction floor) and finer-grained grind advice with cause triage and confidence. Guarded refill, diagnostics, CSV export.",
-  "version": "2.2.60",
+  "version": "2.2.61",
   "apiVersion": 1,
   "permissions": [
     "log",

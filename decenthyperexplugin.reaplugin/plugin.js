@@ -5,7 +5,7 @@ function createPlugin(host) {
   const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
   const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
   const ID = "decenthyperexplugin.reaplugin";
-const PLUGIN_VERSION = "2.2.60";
+const PLUGIN_VERSION = "2.2.61";
   // Generated profiles and profile binding share one fixed title prefix,
   // matching ProfileRecorder's ownership gate. Settings no longer rename them.
   const HYPEREX_TITLE_PREFIX = "HyperEx";
@@ -196,6 +196,13 @@ const PLUGIN_VERSION = "2.2.60";
   // peaking +58.6%). Backstop = latest observed-slope firing fraction of target;
   // accel history = median-filter window; predicted cap = sanity ceiling x target.
   const S2_REFILL_CUTOFF_BACKSTOP=0.85;
+  // 2.2.61 grace window (user 11-21 batch, relay-9): the host serializes inbound
+  // HTTP behind pending outbound api() legs (probe INBOUND_STARVED_DURING_OUTBOUND;
+  // cup29 autoApply 21s blocked the APK 8.5s post-cup data window). Keep the cup-end
+  // autoApply outbound chain out of that window; the settled data itself is final
+  // at finalizeDiagnostics (2.2.60 D), so the APK can fetch during the grace.
+  const AUTO_APPLY_GRACE_MS=7000;
+  const AUTO_APPLY_DEFER_MS=1000;
   const S2_REFILL_ACCEL_HISTORY=4;
   const S2_REFILL_PREDICTED_CAP=1.6;
 // 2.2.55 (Vb3, d-path cup-16): instantaneous dw/dt cross-check during boost.
@@ -442,6 +449,7 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
     workflowProfile: null,
     runtimeProfileVerified: false,
     profileSyncQueue: Promise.resolve(),
+    profileSyncBusy: 0,
     temperatureRecheckNeeded: false,
     machineProfileAckKey: "",
     profileReadbackAt: null,
@@ -5431,6 +5439,22 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
     }
   }
 
+  // 2.2.61: cup-end autoApply waits out the grace window so the APK can fetch
+  // settled data while the host bridge is idle. If the machine/calibration is
+  // busy at expiry, keep "scheduled" and re-check shortly; profile writes stay
+  // guarded by profileSyncIsIdle inside syncHyperExProfile. A plugin-driven new
+  // shot still cancels the pending timer in startSequence (existing guard).
+  function scheduleAutoApplyGrace(run, delayMs) {
+    state.autoApplyTimer = setTimeout(() => {
+      state.autoApplyTimer = null;
+      if (state.phase !== "idle" || !profileSyncIsIdle()) {
+        scheduleAutoApplyGrace(run, AUTO_APPLY_DEFER_MS);
+        return;
+      }
+      return autoApplyNextShotIfEligible(run);
+    }, delayMs);
+  }
+
   async function autoApplyNextShotIfEligible(run) {
     if (!state.autoApplyNextShot || !run || state.curveApplyBusy || manualCurveBlocksRun(run)) return;
     if (run.observationOnly === true) {
@@ -5954,8 +5978,12 @@ const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
       fpKey: fpKey || null,
       numericFpKey: numericFpKey || null,
       settledRunId: state.settled && state.settled.runId ? String(state.settled.runId) : null,
-      settlingBusy: !!(state.autoApplyTimer || state.runtimeProfileRepairBusy ||
-        (state.autoApplyLastStatus && ["scheduled", "applying"].indexOf(state.autoApplyLastStatus.status) >= 0))
+      // 2.2.61: only true occupancy counts as busy (applying / repair / queued or
+      // in-flight profile sync). "scheduled" (waiting out the grace window) no
+      // longer blocks the APK: settledRunId===diagnostics.runId means fetchable.
+      settlingBusy: !!(
+        (state.autoApplyLastStatus && state.autoApplyLastStatus.status === "applying") ||
+        state.runtimeProfileRepairBusy || profileSyncInFlight())
     };
   }
   // 2.2.60 additive (user 11-21 batch ②, coordinator ruling ① plugin master + APK mirror):
@@ -7411,6 +7439,12 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     return state.phase === 'idle' && !state.calibrationActive && state.lastMachineState !== 'espresso';
   }
 
+  // 2.2.61: true occupancy of the profile bridge (queued or in-flight syncs),
+  // independent of runtimeProfileRepairBusy which only tracks selected-workflow repairs.
+  function profileSyncInFlight() {
+    return state.profileSyncBusy > 0;
+  }
+
   function workflowBrewTemperature(profile) {
     if(!state.cfg||!profile||!isHyperExProfileTitle(profile.title)||!Array.isArray(profile.steps)||profile.steps.length<3||profile.steps.length>LIMITS.maxProfileFrames)return null;
     const temps=profile.steps.map(step=>finiteOrNull(step&&step.temperature));
@@ -7563,7 +7597,9 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
   function syncHyperExProfile(updateCurrentWorkflow, reason, records) {
     if (!profileSyncIsIdle()) return Promise.reject(new Error('Profile writes blocked during an active shot'));
     if (updateCurrentWorkflow && isHyperExProfileTitle(state.workflowTitle)) invalidateProfileTruth('waiting for fresh workflow readback', false);
-    const task = state.profileSyncQueue.catch(() => {}).then(() => performHyperExProfileSync(updateCurrentWorkflow, reason, records));
+    state.profileSyncBusy++;
+    const task = state.profileSyncQueue.catch(() => {}).then(() => performHyperExProfileSync(updateCurrentWorkflow, reason, records))
+      .finally(() => { state.profileSyncBusy--; });
     state.profileSyncQueue = task.catch(() => {});
     return task;
   }
@@ -8287,7 +8323,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
   }
   function restoreManualApplySchedule(previousStatus) {
     if(previousStatus&&previousStatus.status==="scheduled"&&!state.autoApplyTimer&&state.phase==="idle"&&state.autoApplyNextShot&&state.diagnosticLast&&state.diagnosticLast.runId===previousStatus.runId){
-      const run=state.diagnosticLast;state.autoApplyTimer=setTimeout(()=>{state.autoApplyTimer=null;return autoApplyNextShotIfEligible(run);},250);
+      const run=state.diagnosticLast;scheduleAutoApplyGrace(run, AUTO_APPLY_GRACE_MS);
     }
   }
   function verifyS2RefillReadback(stored){
@@ -8864,10 +8900,7 @@ const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click"
     if (reason && isHyperExProfileTitle(state.workflowTitle)) scheduleProfileVerification('sequence reset');
     if (completedDiagnosticRun && /^completed at /i.test(String(reason || "")) && state.autoApplyNextShot) {
       state.autoApplyLastStatus = {runId:completedDiagnosticRun.runId,status:"scheduled",at:new Date().toISOString(),message:"Completed shot queued for next-shot evaluation"};
-      state.autoApplyTimer = setTimeout(() => {
-        state.autoApplyTimer = null;
-        return autoApplyNextShotIfEligible(completedDiagnosticRun);
-      }, 250);
+      scheduleAutoApplyGrace(completedDiagnosticRun, AUTO_APPLY_GRACE_MS);
     }
   }
 

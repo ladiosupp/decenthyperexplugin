@@ -48,4 +48,15 @@ completed 杯且 autoApply 已排队时，**杯末 profile 校验不再跟着 re
 - 用户 Decaid 自装 2.2.62；装机不由插件包代做（包只推平板 `Download/`）。
 - 真机验证计划：1 杯可执行 autoApply 的萃取 → 看杯末自动取分是否在 +8.5 s 内成功（不手刷）、ext-status settledRunId／settlingBusy 时序、autoApply 最终 applied。
 - 若真机仍取不到分：下一步评估把 apply 链再拆段（评估文档 b/c 方案），须用户裁。
++
+## 8. 发版回执（2026-11-21，2.2.62：杯末校验后置）
+
+- **基线**：128a40c（本批改码）→ 1a7b719（文档补记：本地桥分辨力口径）→ 发版批 **9aa21fc**（notes＋本交接 §1–§7，代码零改）。tag **v2.2.62**=9aa21fca82494085e2ab08f10330d4f4b6ca0456（lightweight）。
+- **push**：origin auto-hyperex **b982d79..9aa21fc**＋new tag v2.2.62（VPN 57890）；ls-remote 分支／tag 均=9aa21fc。
+- **包**：release/HyperExPulseFilter_v2.2.62.zip **598661 字节**，SHA256 **6E16727B79F3ECD13865E246D91002BF959D0017FA3E2FE8497C173FD0F9F4F6**（git archive v2.2.62，9 条目同 v2259–v2261 布局，__build_v2262.ps1）；**包内复跑 995/995 EXIT0**＋node --check＋manifest version=2.2.62 descLen=397（manifest 回读用 node，PS 5.1 的 ConvertFrom-Json 会按 GBK 误读 UTF-8）。
+- **GitHub Release**：**453603083**（tag v2.2.62，draft=false，prerelease=false，latest=v2.2.62），asset HyperExPulseFilter_v2.2.62.zip（598661 字节，state=**uploaded**，asset id **775171781**／node_id RA_kwDOVO5zXc4uNC7F）。REST POST releases＋uploads（token credential fill 不回显，代理 57890），body=release/notes-v2.2.62.md（首行核对无乱码）。首轮 POST 因 PowerShell 5.1 把 Get-Content 的字符串带 ETS 属性序列化被 ConvertTo-Json 展开成对象（payload 7.6 MB）而超时；改为 `name="$title"; body="$body"` 强制纯字符串后成功。
+- **夸克**：「夸克网盘/来自：Codex」fileId **a674e5fdac34422596fe280d2f4213cc**（598661 字节，instantUpload=false 非秒传；result 无 notice）。
+- **平板**：adb 192.168.31.15:44439（mDNS adb-haf6uwvcqcdujzin-trqoCZ 同一台）推 `/sdcard/Download/HyperExPulseFilter_v2.2.62.zip`，ls 核 **598661** 字节（2026-11-21 18:09）；**不代装，用户 Decaid 自装**。
+- **说明**：包内交接是 §1–§7 版本，本回执在发版后的独立 commit（沿 v2259–v2261 先例）。发版批代码零改；别人 WIP HANDOFF_2026-10-31.md 未碰。
+
 

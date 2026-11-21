@@ -1,3 +1,13 @@
+# 2.2.59 experimental
+
+S2 补水 **Vi 律重拟合**（用户 11-21 批 Vi 重拟合批：改码本批授权，发版/push/tag/装机另问）。现行律 Vi=clamp(VI_A+VI_B×soakP2sRatio,15,36)（fc=0）的系数来自 10-28→11-19 跨两个豆期的 25 杯，对当前豆期系统保守：5 杯预测 wetLat 偏高 +0.56…+1.08s（rmse 0.831s）。本批按当前豆期 5 杯素材（杯21/22/23去尖峰/24/25，vi-refit-material.json）重拟合：**VI_A 40.929→21.013、VI_B −32.251→−8.962**，wetLat rmse **0.831→0.077s**（用户验收门 ≤0.30s，PASS；平均偏差 +0.802→+0.012s）。详见 [HANDOFF_2026-11-21-vi-refit.md](HANDOFF_2026-11-21-vi-refit.md)。
+
+- **只改两个系数常量**：clamp[15,36]／兜底 24.8／FC_FACTOR=0／flood[3.5,8]／holdMs[2000,7000]默认4000／riseTarget 0.80／RR_QUANTILE 4.80／决策点 stage2 入口时序／soak 六拒收门／禁 S1 出流族／Va/Vb3/Vd15/O1/cutoff/Q2/硬包线 0.10–8.00/sent 恒 false/LUT/单一写者/gain memory 全零改。
+- **拟合口径**：预测 wetLat=Vi/flood（fc=0，flood 取素材当杯实测指令），最小化 5 杯 rmse，clamp 固定；ratio 取插件 soakWettingObservation 对原始样本的精确值（与素材 viPlan 反推交叉一致）。杯23/24/25 原始 Vi<15 被下限托底（预测 2.500s），门仍达标；下限松到 12 仅改善 0.010s → **不需动 clamp/兜底/律结构**。
+- **行为后果（25 杯决策级回放＋5 杯全量写序列回放，呈统筹）**：当前豆期支撑域内 Vi 15–19.2ml，默认 holdMs4000 时 F_budget=Vi/3.474 恒 <F_rise=6.0 → flood 全选 6.000（旧律 6.0–8.0），holdMs 仍逐杯自适应（3600–4000）；按历史逐杯设置（部分 3000ms）回放仍有预算驱动 6.375–7.688、跨度 1.688>1.0。批1（旧豆期）不再抬过历史灌水（b1up 13/13→5/13），批1类粉饼再现的欠流风险已呈报；峰估 +4.3→−8.7pp；零 infeasible／零 extrapolated／零 disabled。写序列：杯21/22 仅 boost 首笔 6.75/6.4375→6.0，杯23 bleed/return 早 250ms（命令不变），杯24/25 逐字不变，oq/observedR 全不变。
+- **测试**：tests/verify_v02259.cjs **927/927**（926 基线＋5 杯素材门交叉；6 处律断言按新口径重编码＋Vd15 通道夹具钉基线 flood 6.4375 隔离 Vi，禁镜像）；sim-regression 5/5；node --check 通过；manifest description 保持 275（§1.15）。
+- **APK 移植同步点**：VI_A/VI_B 新系数 → shadow/arbiter 等价物（与 2.2.56 新律债合并，full→hec 里程碑）。
+
 # 2.2.58 experimental
 
 增益记忆**回退维护端点** gain-memory-restore（用户 11-20 批：作为以后类似秤噪点污染情况的永久维护能力；杯23 回滚本身暂缓不执行、污染态保留；改码本批授权，发版/push/tag/装机押后「以后再一起发版」）。新增 guarded REST 端点，把增益记忆恢复到传入的历史快照并排除指定污染杯（标记不删），**只恢复状态，不改任何控制律**；下一杯 base 仍是律输出（随路径变，端点不强制特定数值）。设计依据 [HANDOFF_2026-11-20-cup23-memory-rollback.md](HANDOFF_2026-11-20-cup23-memory-rollback.md)，实施 [HANDOFF_2026-11-20-gain-memory-restore-impl.md](HANDOFF_2026-11-20-gain-memory-restore-impl.md)。

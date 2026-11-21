@@ -1,12 +1,12 @@
 # 2.2.59 experimental
 
-S2 补水 **Vi 律重拟合**（用户 11-21 批 Vi 重拟合批：改码本批授权，发版/push/tag/装机另问）。现行律 Vi=clamp(VI_A+VI_B×soakP2sRatio,15,36)（fc=0）的系数来自 10-28→11-19 跨两个豆期的 25 杯，对当前豆期系统保守：5 杯预测 wetLat 偏高 +0.56…+1.08s（rmse 0.831s）。本批按当前豆期 5 杯素材（杯21/22/23去尖峰/24/25，vi-refit-material.json）重拟合：**VI_A 40.929→21.013、VI_B −32.251→−8.962**，wetLat rmse **0.831→0.077s**（用户验收门 ≤0.30s，PASS；平均偏差 +0.802→+0.012s）。详见 [HANDOFF_2026-11-21-vi-refit.md](HANDOFF_2026-11-21-vi-refit.md)。
+S2 补水 **Vi 律重拟合·裁 b 约束拟合**（用户 11-21 批 Vi 重拟合批＋裁 b：改码本批授权，发版/push/tag/装机另问）。现行律 Vi=clamp(VI_A+VI_B×soakP2sRatio,15,36)（fc=0）系数来自 10-28→11-19 跨两个豆期的 25 杯，对当前豆期系统保守（5 杯预测 wetLat 偏高 +0.56…+1.08s，rmse 0.831s）。首轮无约束重拟合（VI_A 21.013／VI_B −8.962，rmse 0.077s，commit a6ae73c）被**用户裁 b 约束拟合取代：B=−32.251 跨豆期斜率保留、只拟 A → VI_A 34.057**，wetLat rmse **0.831→0.086s**（用户验收门 ≤0.30s PASS；平均偏差 +0.802→+0.013s；+0.009s rmse 换回低 ratio 端 Vi 表征与默认挡 flood 跨度）。详见 [HANDOFF_2026-11-21-vi-refit.md](HANDOFF_2026-11-21-vi-refit.md) §10。
 
-- **只改两个系数常量**：clamp[15,36]／兜底 24.8／FC_FACTOR=0／flood[3.5,8]／holdMs[2000,7000]默认4000／riseTarget 0.80／RR_QUANTILE 4.80／决策点 stage2 入口时序／soak 六拒收门／禁 S1 出流族／Va/Vb3/Vd15/O1/cutoff/Q2/硬包线 0.10–8.00/sent 恒 false/LUT/单一写者/gain memory 全零改。
-- **拟合口径**：预测 wetLat=Vi/flood（fc=0，flood 取素材当杯实测指令），最小化 5 杯 rmse，clamp 固定；ratio 取插件 soakWettingObservation 对原始样本的精确值（与素材 viPlan 反推交叉一致）。杯23/24/25 原始 Vi<15 被下限托底（预测 2.500s），门仍达标；下限松到 12 仅改善 0.010s → **不需动 clamp/兜底/律结构**。
-- **行为后果（25 杯决策级回放＋5 杯全量写序列回放，呈统筹）**：当前豆期支撑域内 Vi 15–19.2ml，默认 holdMs4000 时 F_budget=Vi/3.474 恒 <F_rise=6.0 → flood 全选 6.000（旧律 6.0–8.0），holdMs 仍逐杯自适应（3600–4000）；按历史逐杯设置（部分 3000ms）回放仍有预算驱动 6.375–7.688、跨度 1.688>1.0。批1（旧豆期）不再抬过历史灌水（b1up 13/13→5/13），批1类粉饼再现的欠流风险已呈报；峰估 +4.3→−8.7pp；零 infeasible／零 extrapolated／零 disabled。写序列：杯21/22 仅 boost 首笔 6.75/6.4375→6.0，杯23 bleed/return 早 250ms（命令不变），杯24/25 逐字不变，oq/observedR 全不变。
-- **测试**：tests/verify_v02259.cjs **927/927**（926 基线＋5 杯素材门交叉；6 处律断言按新口径重编码＋Vd15 通道夹具钉基线 flood 6.4375 隔离 Vi，禁镜像）；sim-regression 5/5；node --check 通过；manifest description 保持 275（§1.15）。
-- **APK 移植同步点**：VI_A/VI_B 新系数 → shadow/arbiter 等价物（与 2.2.56 新律债合并，full→hec 里程碑）。
+- **只改系数常量**（A 拟合、B 恢复裁定固定值）：clamp[15,36]／兜底 24.8／FC_FACTOR=0／flood[3.5,8]／holdMs[2000,7000]默认4000／riseTarget 0.80／RR_QUANTILE 4.80／决策点 stage2 入口时序／soak 六拒收门／禁 S1 出流族／Va/Vb3/Vd15/O1/cutoff/Q2/硬包线 0.10–8.00/sent 恒 false/LUT/单一写者/gain memory 全零改。
+- **拟合口径**：预测 wetLat=Vi/flood（fc=0，flood 取素材当杯实测指令），最小化 5 杯 rmse，clamp 固定、B=−32.251 固定（裁 b）；ratio 取插件 soakWettingObservation 对原始样本精确值（与素材 viPlan 反推交叉一致）。杯23/24/25 原始 Vi<15 被下限托底（预测 2.500s），门仍达标；**不需动 clamp/兜底/律结构**。
+- **行为后果（25 杯决策级回放＋5 杯全量写序列回放，呈统筹）**：支撑域 Vi 15–27.6ml，默认 holdMs4000 低 ratio 端（<0.41）预算驱动 flood 6.0–7.9375（跨度恢复），当前 5 杯 ratio 0.54–0.72 仍全选 6.000、holdMs 3600–3900；批1 Vi 表征 15.2–27.2（隐含 25.1–35.8，**残余差距 4.5–10.3ml，b 减轻不消除**，欠流风险仍呈报）；b1up 9/13（ef4f490 13/13、a6ae73c 5/13）、hotDown 4/4、零 infeasible/extrapolated/disabled、峰估 +4.26→−3.15pp。写序列：5 杯**与 a6ae73c 逐字相同**（boost 全 6.0，holdMs 微调不动写笔）；vs ef4f490 杯21/22 boost 首笔 6.75/6.4375→6.0、杯23 bleed/return 早 250ms（命令不变）、杯24/25 逐字不变，oq/observedR 全不变。
+- **测试**：tests/verify_v02259.cjs **927/927**（926 基线＋5 杯素材门交叉；律断言按裁 b 重编码：慢端默认挡预算驱动、clamp 平摊快端弱单调、固定挡记录 Vi 包线断言、回放机制跨度改全集跨度＋紧预算包线饱和；Vd15 通道夹具钉基线 flood 6.4375 隔离 Vi；禁镜像）；sim-regression 5/5；node --check 通过；manifest description 保持 275（§1.15）。
+- **APK 移植同步点**：VI_A/VI_B 新系数（34.057/−32.251）→ shadow/arbiter 等价物（与 2.2.56 新律债合并，full→hec 里程碑）。
 
 # 2.2.58 experimental
 

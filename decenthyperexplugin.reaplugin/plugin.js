@@ -236,13 +236,16 @@ const S2_REFILL_RR_QUANTILE=4.8;         // p75 of rise2080 x flood (n=23)
 const S2_REFILL_RR_MEDIAN=4.59;          // p50, used for the predicted rise
 const S2_REFILL_CUTOFF_LEAD_S=0.274;     // cutoff is prediction-driven
 const S2_REFILL_FC_FACTOR=0;             // critical flow x platform
-// 2.2.59 (user 2026-11-21 Vi refit batch): VI_A/VI_B recalibrated on the 5
-// current-era cups 21-25 (.tools/hx-train/data/vi-refit-material.json), minimizing
-// wetLat rmse at fc=0 with clamp[15,36] fixed: 0.831 s -> 0.077 s (gate <= 0.30 s).
-// The 2.2.56 25-cup cross-era fit above was systematically conservative for this
-// era (+0.56..+1.08 s predicted wetLat). Clamp/fallback/law structure unchanged.
-const S2_REFILL_VI_A=21.013;             // ml (2.2.59 refit, cups 21-25)
-const S2_REFILL_VI_B=-8.962;             // ml per unit soakP2sRatio (2.2.59 refit)
+// 2.2.59 (user 2026-11-21 Vi refit batch, ruling b constrained fit): B is FIXED
+// at the 2.2.56 cross-era slope -32.251 (user ruling b preserves it); A alone is
+// refit on the 5 current-era cups 21-25 (.tools/hx-train/data/vi-refit-material.json),
+// minimizing wetLat rmse at fc=0 with clamp[15,36] fixed: 0.831 s -> 0.086 s
+// (gate <= 0.30 s). The unconstrained 5-cup fit (21.013/-8.962, rmse 0.077 s,
+// commit a6ae73c) was superseded by ruling b: +0.009 s rmse buys back the
+// low-ratio (slow-wetting) Vi representation and the default-gear flood span
+// 6.0..7.9375 over the support. Clamp/fallback/law structure unchanged.
+const S2_REFILL_VI_A=34.057;             // ml (2.2.59 ruling-b fit, cups 21-25, B fixed)
+const S2_REFILL_VI_B=-32.251;            // ml per unit soakP2sRatio (cross-era slope, user ruling b fixed)
 const S2_REFILL_VI_MIN_ML=15;            // observed real range 15.1 .. 35.8
 const S2_REFILL_VI_MAX_ML=36;
 const S2_REFILL_VI_FALLBACK_ML=24.8;     // skill 22.19 conservative constant

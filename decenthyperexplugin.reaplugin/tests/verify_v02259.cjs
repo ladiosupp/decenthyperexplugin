@@ -5521,12 +5521,14 @@ test('2.2.56 §22.19 adaptive flood follows the wetting signature; D4 floor 7 an
   // SCALE the flood (1.8 x platform is gone); it only guards headroom.
   assert.equal(high.floodCommandMlS,6.3125,'cold start keeps command headroom above the 6.25 platform');
   assert.equal(high.enabled,true,'the refill is never skipped for lack of headroom');
-  // 2.2.59 refit: at the default 4000 ms watchdog the current-era Vi (19.0 ml
-  // at ratio 0.22) leaves F_budget 5.48 < F_rise 6.0 -> the rise floor binds.
-  // Envelope saturation + watchdog raise still happen on a tight user budget.
+  // 2.2.59 ruling b (B fixed -32.251): at ratio 0.22 Vi ~26.9 ml -> F_budget ~7.8
+  // > F_rise 6.0, so the default 4000 ms watchdog is budget-driven again at the
+  // slow end (feasible -> watchdog stays at the configured value). A tight user
+  // budget saturates the envelope and raises the watchdog.
   const slow=mk(2.0,{floodMode:'adaptive'},0.22);
-  assert.equal(slow.floodCommandMlS,6,'2.2.59 era: the rise-target floor binds at the default watchdog');
-  assert.equal(slow.adaptiveFlood.binding,'rise-target');
+  assert(slow.floodCommandMlS>4.8/0.8&&slow.floodCommandMlS<=8,'ruling b: the wetting term lifts the slow end above the rise floor: '+slow.floodCommandMlS);
+  assert.equal(slow.adaptiveFlood.binding,'hold-budget');
+  assert(slow.adaptiveFlood.holdMs<=4000,'feasible at the configured watchdog -> not raised: '+slow.adaptiveFlood.holdMs);
   const slowTight=mk(2.0,{floodMode:'adaptive',maxDurationMs:2000},0.22);
   assert.equal(slowTight.floodCommandMlS,8,'a slow-wetting puck saturates the envelope when the budget binds');
   assert(slowTight.adaptiveFlood.holdMs>2000,'and raises the tight watchdog: '+slowTight.adaptiveFlood.holdMs);
@@ -6043,20 +6045,24 @@ test('2.2.56 soakWettingObservation reads the pump-off decay and rejects thin ev
  assert(obs.soakTauES>0&&obs.soakTauES<10,'1/e decay time is diagnostic only');
  assert.equal(obs.samples,101);
 });
-test('2.2.59 a slower-wetting puck gets MORE flood when the budget binds, Vi tracks the signature, and the rise target is the floor',()=>{
- // 2.2.59 refit (cups 21-25): in-support Vi is 15..19.2 ml, so at the default
- // 4000 ms watchdog F_budget = Vi/3.474 stays below F_rise = 6.0 and the rise
- // target binds across the era. The wetting term still dominates when the user
- // tightens the watchdog (budgetS shrinks) - that is the mechanism under test.
+test('2.2.59 a slower-wetting puck gets MORE flood, Vi tracks the signature, and the rise target is the floor',()=>{
+ // 2.2.59 ruling b (B fixed at the cross-era -32.251, A refit on cups 21-25):
+ // in-support Vi spans 15..27.6 ml. At the default 4000 ms watchdog the slow end
+ // (ratio 0.22, Vi ~26.9) is budget-driven again (F_budget ~7.8 > F_rise 6.0),
+ // while the current-era fast end (ratio >= ~0.41) sits on the rise floor. A
+ // tight watchdog saturates the envelope even harder. Both terms are lower
+ // bounds (max, never min) - that is the mechanism under test.
  const slowTight=lawEnv({maxDurationMs:2000},0.22).plan.adaptiveFlood;
  const slow=lawEnv(null,0.22).plan.adaptiveFlood, mid=lawEnv(null,0.5735).plan.adaptiveFlood, fast=lawEnv(null,0.76).plan.adaptiveFlood;
- assert(slowTight.floodMlS>mid.floodMlS,'slow puck floods harder when the budget binds: '+slowTight.floodMlS+' vs '+mid.floodMlS);
- assert.equal(slowTight.binding,'hold-budget','tight watchdog: the wetting term dominates and saturates the envelope');
- assert(slow.floodMlS>=mid.floodMlS&&mid.floodMlS>=fast.floodMlS,'flood never increases with the ratio: '+slow.floodMlS+'/'+mid.floodMlS+'/'+fast.floodMlS);
- assert.equal(slow.binding,'rise-target','2.2.59 era: at 4000 ms the rise target binds even at the support edge');
+ assert(slow.floodMlS>mid.floodMlS,'slow puck floods harder: '+slow.floodMlS+' vs '+mid.floodMlS);
+ assert.equal(slow.binding,'hold-budget','ruling b: the cross-era slope makes the wetting term dominate at the slow end');
+ assert(slowTight.floodMlS>=slow.floodMlS&&slowTight.floodMlS<=8,'tight watchdog saturates the envelope: '+slowTight.floodMlS);
+ assert.equal(slowTight.binding,'hold-budget');
+ assert(mid.floodMlS>=fast.floodMlS,'fast puck never floods harder: '+mid.floodMlS+' vs '+fast.floodMlS);
+ assert.equal(mid.binding,'rise-target','current-era ratios sit on the rise floor at the default watchdog');
  assert.equal(fast.binding,'rise-target','fast puck is limited by the 0.8 s rise target, not by wetting');
  assert(fast.floodMlS>=4.8/0.8-1e-9,'F_rise = RR p75 / riseTarget is a hard floor: '+fast.floodMlS);
- assert(slow.viMl>mid.viMl&&mid.viMl>fast.viMl,'Vi tracks the decay signature: '+slow.viMl+' > '+mid.viMl+' > '+fast.viMl);
+ assert(slow.viMl>mid.viMl&&mid.viMl>=fast.viMl,'Vi tracks the decay signature (clamp flattens the fast end): '+slow.viMl+' > '+mid.viMl+' >= '+fast.viMl);
 });
 test('2.2.56 flood stays inside the absolute band and on the 1/16 driver grid over the whole signal range',()=>{
  for(let i=0;i<=40;i++){
@@ -6098,9 +6104,9 @@ test('2.2.59 an out-of-calibration soak signature is flagged, not silently extra
  const a=lawEnv(null,0.05).plan.adaptiveFlood;
  assert.equal(a.viExtrapolated,true,'ratio 0.05 is outside the calibrated support');
  assert.equal(a.viRatioSupport[0],0.2);assert.equal(a.viRatioSupport[1],0.8);
- // 2.2.59 refit: raw Vi = 21.013 - 8.962 x ratio peaks at 21.013 (ratio 0), so
- // the upper clamp 36 is unreachable for physical signatures; the guard is the
- // flag + the [15,36] envelope + monotone Vi, not a pinned clamp value.
+ // 2.2.59 ruling b: raw Vi = 34.057 - 32.251 x ratio peaks at 34.057 (ratio 0),
+ // still below the upper clamp 36, so it stays unreachable for physical
+ // signatures; the guard is the flag + the [15,36] envelope + monotone Vi.
  assert(a.viMl>=15&&a.viMl<=36,'Vi stays inside the calibrated envelope: '+a.viMl);
  const edge=lawEnv(null,0.2).plan.adaptiveFlood;
  assert(a.viMl>edge.viMl,'slower-than-calibrated puck still gets more water: '+a.viMl+' vs '+edge.viMl);
@@ -6129,7 +6135,7 @@ test('2.2.56 fixed mode keeps the manual knob and the manual holdMs untouched bu
  assert.equal(w.length,1,'the P2 calibration trials run on the manual knob, so the signature is still recorded');
  assert.equal(w[0].applied,false);assert.equal(w[0].floodMode,'fixed');
  assert(Math.abs(w[0].soakP2sRatio-0.5735)<0.05,'recorded ratio: '+w[0].soakP2sRatio);
- assert(w[0].viMl>15&&w[0].viMl<36,'recorded Vi: '+w[0].viMl);
+ assert(w[0].viMl>=15&&w[0].viMl<=36,'recorded Vi inside the calibrated envelope (ruling b: the 0.5735 fixture sits at the clamp crossing): '+w[0].viMl);
  assert.equal(t.report.trace.filter(x=>x.kind==='adaptive-replan').length,0,'no replan event in fixed mode');
 });
 test('2.2.56 the flood is re-decided once at stage2 entry, after the wetting evidence exists',async()=>{
@@ -6208,6 +6214,9 @@ test('2.2.56 real cup-20 soak samples reproduce the offline probe signature (his
  assert(a.predictedBoostToBleedS<=a.holdMs/1000,'this cup completed in 3.31 s, the law must not time it out');
 });
 test('2.2.59 Vi refit crosses the 5-cup calibration material (wetLat rmse gate <= 0.30 s, user 11-21)',()=>{
+ // Ruling b constrained fit (B fixed -32.251, A=34.057): rmse 0.086 s, slightly
+ // above the unconstrained 0.077 s (a6ae73c) by design - the cross-era slope is
+ // preserved. The gate and the bias check are caliber-level, not fit-specific.
  const mf='D:/vscode/.tools/hx-train/data/vi-refit-material.json';
  const f18='D:/vscode/HyperExController/.tools/__live-plugin-history-18.json';
  const fa='D:/vscode/.tools/hx-data/hyperex-history-all.json';
@@ -6298,13 +6307,14 @@ test('2.2.59 decision-level replay over the 25 calibrated real cups (selection +
    binding:a.binding,extrapolated:a.viExtrapolated===true,infeasible:a.budgetInfeasible===true});
  }
  assert(rows.length>=20,'enough real cups replayed: '+rows.length);
- // 2.2.59 refit is era-local (cups 21-25): in-support Vi 15..19.2 ml puts the
- // default-4000 ms cups on the rise-target floor (tight-3000 ms cups still adapt). Batch 1
- // (11-10..14, previous bean era, implied Vi 25-36 ml) is no longer pushed above
- // its historical flood - the cross-era conservatism pin is superseded. The
- // safety invariant that remains: the rise floor is never undercut and the
- // watchdog is never silently short. Recurrence risk for batch-1-class pucks is
- // reported to the coordinator (HANDOFF_2026-11-21-vi-refit.md).
+ // 2.2.59 ruling b (B fixed at the cross-era slope, A refit on cups 21-25):
+ // in-support Vi 15..27.6 ml. Current-era ratios (>= ~0.41) sit on the rise floor
+ // at 4000 ms; slower signatures are budget-driven again. Batch 1 (11-10..14,
+ // previous bean era, implied Vi 25-36 ml) is partially represented (Vi 15-27,
+ // residual gap 4.5-10.3 ml) - the cross-era conservatism pin stays superseded.
+ // The safety invariant that remains: the rise floor is never undercut and the
+ // watchdog is never silently short. Residual recurrence risk for batch-1-class
+ // pucks is reported to the coordinator (HANDOFF_2026-11-21-vi-refit.md §10).
  const b1=rows.filter(x=>x.batch===1);
  assert(b1.length>=10,'batch-1 cups replayed: '+b1.length);
  assert(rows.every(x=>x.law>=4.8/0.8-1e-9),'the rise-target floor holds for every cup: '+JSON.stringify(rows.map(x=>x.law)));
@@ -6321,16 +6331,17 @@ test('2.2.59 decision-level replay over the 25 calibrated real cups (selection +
  assert(hot.length>=3,'high-peak cups present: '+hot.length);
  const hotDown=hot.filter(x=>x.law<=x.hist).length;
  assert(hotDown>=hot.length*0.6,'high-peak cups get no more flood than they had ('+hotDown+'/'+hot.length+')');
- // 2.2.59: at the default watchdog the current-era fit sits on the rise floor
- // (flood spread 0 over this set - reported). The adaptive range is a MECHANISM
- // capability: it must still appear when the budget binds (tight watchdog), and
- // the watchdog itself keeps adapting per cup (anti over-extraction).
+ // 2.2.59 ruling b: the cross-era slope restores the low-ratio flood span
+ // (default-4000 support span 6.0..7.9375); the current 5-cup era still sits on
+ // the rise floor. The adaptive range must exceed the fixed knob both over the
+ // real per-cup settings and when the budget binds, and the watchdog keeps
+ // adapting per cup (anti over-extraction).
  assert(rows.some(x=>x.lawHold<x.histHold),'the watchdog shrinks on cups with margin (anti over-extraction)');
  const slowest=rows.reduce((a,b)=>(b.ratio!=null&&(a.ratio==null||b.ratio<a.ratio))?b:a);
  e.s.s2RefillSettings={basis:'cup-target',startDelayMs:0,targetPercent:100,cutoffPercent:85,maxDurationMs:2000,approachMs:800,floodMode:'adaptive',floodMaxMlS:7};
  const tightPlan=e.h.stage2StartupPlan(undefined,{runId:slowest.runId,rawScaleSamples:(shots.find(x=>x.runId===slowest.runId).fullRecord||{}).rawScaleSamples||[]});
- assert(tightPlan.adaptiveFlood.floodMlS>slowest.law,'tight watchdog: the wetting term lifts the flood above the rise floor ('+tightPlan.adaptiveFlood.floodMlS+' vs '+slowest.law+')');
- assert(tightPlan.adaptiveFlood.floodMlS-slowest.law>=1.0,'the adaptive flood range exceeds the fixed knob when the budget binds (spread '+(tightPlan.adaptiveFlood.floodMlS-slowest.law).toFixed(2)+' ml/s)');
+ assert(tightPlan.adaptiveFlood.floodMlS>=slowest.law,'tight watchdog never lowers the slowest cup flood: '+tightPlan.adaptiveFlood.floodMlS+' vs '+slowest.law);
+ assert.equal(tightPlan.adaptiveFlood.floodMlS,8,'ruling b: the slowest puck already rides the budget at 4000 ms; a tight budget saturates the envelope');
  const spread=Math.max(...rows.map(x=>x.law))-Math.min(...rows.map(x=>x.law));
  assert(spread>=1.0,'the adaptive range is wider than the fixed knob over the real per-cup settings (spread '+spread.toFixed(2)+' ml/s over '+rows.length+' cups)');
  const dPeak=rows.filter(x=>x.peakPct!=null).reduce((s,x)=>s+(x.law-x.hist)*13.84,0)/rows.filter(x=>x.peakPct!=null).length;
